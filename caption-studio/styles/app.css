@@ -1,0 +1,220 @@
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg-0);
+  color: var(--text-0);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+header.app-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: 12px 20px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+}
+header.app-bar h1 { font-size: 15px; margin: 0; letter-spacing: 0.3px; }
+header.app-bar .badge {
+  font-size: 11px; color: var(--text-2); border: 1px solid var(--border);
+  padding: 2px 8px; border-radius: 999px;
+}
+header .spacer { flex: 1; }
+
+main {
+  display: grid;
+  grid-template-columns: 320px 1fr 380px;
+  gap: var(--gap);
+  padding: var(--gap);
+  align-items: start;
+}
+
+.panel {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.panel h2 {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-2); margin: 0 0 12px;
+}
+
+.field { margin-bottom: 12px; }
+.field label { display: block; font-size: 11px; color: var(--text-2); text-transform: uppercase; margin-bottom: 6px; }
+.field input[type='file'] { width: 100%; font-size: 12px; color: var(--text-1); }
+.field .hint { font-size: 11px; color: var(--text-2); margin-top: 4px; }
+
+button {
+  font: inherit; cursor: pointer; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg-3); color: var(--text-0);
+  padding: 9px 14px;
+}
+button.primary { background: var(--accent); border-color: var(--accent-dim); color: #04220f; font-weight: 600; }
+button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
+button:hover:not(:disabled) { filter: brightness(1.08); }
+
+.stat-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.stat { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; }
+.stat .k { font-size: 10px; color: var(--text-2); text-transform: uppercase; }
+.stat .v { font-size: 18px; font-weight: 600; }
+
+.mono { font-family: var(--font-mono); font-size: 12px; }
+
+.list { max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.row { display: flex; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.row:last-child { border-bottom: none; }
+.row { cursor: pointer; }
+.row:hover { background: var(--bg-2); }
+.row.active { background: var(--bg-2); box-shadow: inset 2px 0 0 var(--accent); }
+.row .t { color: var(--text-2); font-family: var(--font-mono); flex: 0 0 84px; }
+.row .body { flex: 1; }
+.tag { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-2); }
+.tag.replace { color: #fca5a5; border-color: #7f1d1d; }
+.tag.insert { color: #86efac; border-color: #166534; }
+.tag.delete { color: #fcd34d; border-color: #78350f; }
+.tag.punctuation, .tag.case { color: #93c5fd; border-color: #1e3a8a; }
+
+#log { white-space: pre-wrap; font-family: var(--font-mono); font-size: 12px; color: var(--text-1); }
+.empty { color: var(--text-2); font-size: 12px; padding: 8px 2px; }
+
+/* ============ preview ============ */
+
+/* the preview spans the whole grid; the three working panels flow below it */
+.preview-panel { grid-column: 1 / -1; }
+.preview-panel h2 { display: flex; align-items: center; gap: 8px; }
+
+.stage {
+  position: relative;
+  /* a fixed aspect on the *container* keeps the canvas fit stable: if the stage's height were
+     derived from the canvas, re-fitting on resize would oscillate */
+  aspect-ratio: 16 / 9;
+  max-height: 62vh;
+  width: 100%;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+.stage video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  visibility: hidden;
+}
+.stage canvas { position: relative; display: block; }
+.stage-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+  font-size: 12px;
+  pointer-events: none;
+}
+.stage.has-content .stage-empty { display: none; }
+
+.transport { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.transport input[type='range'] { flex: 1 1 200px; min-width: 140px; }
+.transport .spacer { flex: 0 0 4px; }
+.transport button { padding: 6px 12px; }
+.check { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-1); }
+.check input { accent-color: var(--accent); }
+
+.style-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.field-inline { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-2); }
+.field-inline b { color: var(--text-0); font-weight: 600; font-family: var(--font-mono); }
+.field-inline select {
+  background: var(--bg-2);
+  color: var(--text-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 7px;
+  font-size: 12px;
+  min-width: 130px;
+}
+.field-inline input[type='range'] { width: 150px; }
+
+button.ghost { background: var(--bg-2); border-color: var(--border); color: var(--text-1); }
+
+/* ------------------------------------------------------------------ *
+ * Phase 4 — placement overlay, template picker, block inspector
+ * ------------------------------------------------------------------ */
+
+/* The overlay sits on top of the preview canvas and owns pointer input for dragging. It covers
+   the whole stage (which may be wider than the canvas), so the guide layer converts coordinates
+   through the canvas's own rect rather than assuming it fills the stage.
+
+   `.stage > .overlay-canvas` rather than plain `.overlay-canvas`: the shared
+   `.stage canvas { position: relative }` rule would otherwise win on specificity and leave the
+   overlay as a second, *relative* grid item below the preview — invisible as a bug, fatal as
+   behaviour, because the canvas underneath then receives every pointer event. */
+.stage > .overlay-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+.stage.has-content > .overlay-canvas:active { cursor: grabbing; }
+
+.templates-panel, .block-panel { grid-column: 1 / -1; }
+.templates-panel h2, .block-panel h2 { display: flex; align-items: center; gap: 8px; }
+.templates-panel h2 .spacer, .block-panel h2 .spacer { flex: 1; }
+
+.templates { display: grid; grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); gap: 10px; }
+.templates .origin-heading {
+  grid-column: 1 / -1;
+  font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-2);
+  margin: 6px 0 -2px;
+}
+.tile {
+  text-align: left; padding: 10px; border-radius: var(--radius-sm);
+  background: var(--bg-2); border: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 8px; align-items: stretch; cursor: pointer;
+}
+.tile:hover:not(:disabled) { border-color: var(--accent-dim); }
+.tile.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.tile .preview {
+  height: 40px; display: grid; place-items: center; border-radius: var(--radius-sm);
+  background: #000; overflow: hidden; padding: 2px 6px;
+}
+.tile .preview span {
+  line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.tile .meta { display: flex; align-items: baseline; gap: 6px; }
+.tile .name { font-size: 12px; color: var(--text-0); }
+.tile .desc { font-size: 10px; color: var(--text-2); line-height: 1.35; }
+.tile .tag { font-size: 9px; }
+
+.block-panel .inspector-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px;
+}
+.block-panel .block-meta { font-size: 12px; color: var(--text-1); margin-bottom: 10px; }
+.block-panel .block-meta b { color: var(--text-0); font-family: var(--font-mono); }
+.block-panel .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.block-panel input[type='color'] {
+  width: 100%; height: 26px; padding: 1px; background: var(--bg-2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.block-panel .field-inline { gap: 4px; }
+.block-panel .field-inline select, .block-panel .field-inline input { min-width: 0; width: 100%; }
+.hint { font-size: 11px; color: var(--text-2); }
+.templates-panel .hint { margin-top: 10px; }
+

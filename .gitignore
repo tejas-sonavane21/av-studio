@@ -1,0 +1,39 @@
+# ---- Dependencies ----
+node_modules/
+**/node_modules/
+
+# ---- Large local reference material (not part of the project) ----
+# ~600 MB of captured artifacts (duplicate videos, audio, vendor bundles).
+# Kept on disk for local research only, deliberately out of version control.
+referece_material/
+**/referece_material/
+
+# ---- Research notes that must not be published ----
+# Raw, leak-heavy source analysis. The sanitized, publishable version lives at
+# caption-studio/docs/KNOWLEDGE-BASE.md.
+caption-studio/docs/KNOWLEDGE-BASE.internal.md
+
+# Local research documents kept off the published tree.
+Gemini-Local HTML5 Subtitle Renderer-20260926-1210.md
+VEED-Subtitle-Replication-Complete-Understanding.md
+
+# ---- Machine-specific / OS junk ----
+*.lnk
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+*.tmp
+.cache/
+
+# ---- Editor / tooling ----
+.vscode/
+.idea/
+.venv/
+venv/
+__pycache__/
+
+# ---- Build output ----
+dist/
+build/
+coverage/

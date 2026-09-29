@@ -1,0 +1,14 @@
+{
+  "name": "caption-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first interactive Veed/CapCut-style caption studio with AI-caption quality correction.",
+  "scripts": {
+    "test": "node --test \"tests/unit/*.test.js\"",
+    "serve": "node tools/serve.mjs 8000",
+    "serve:workspace": "node tools/serve.mjs 8000 ..",
+    "visual": "node tools/visual-check.mjs",
+    "ui": "node tools/ui-smoke.mjs"
+  }
+}

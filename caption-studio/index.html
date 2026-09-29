@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Caption Studio</title>
+  <link rel="stylesheet" href="./styles/tokens.css" />
+  <link rel="stylesheet" href="./styles/app.css" />
+</head>
+<body>
+  <header class="app-bar">
+    <h1>Caption Studio</h1>
+    <span class="badge">Phase 4 — templates, placement &amp; per-block styling</span>
+    <span class="spacer"></span>
+    <span class="badge" id="status-badge">idle</span>
+  </header>
+
+  <main>
+    <!-- ============ PREVIEW ============ -->
+    <section class="panel preview-panel">
+      <h2>
+        Preview
+        <span class="tag" id="preview-time">—</span>
+      </h2>
+
+      <div class="stage" id="stage">
+        <video id="preview-video" playsinline muted></video>
+        <canvas id="preview-canvas" width="1280" height="720"></canvas>
+        <canvas id="overlay-canvas" class="overlay-canvas"></canvas>
+        <div class="stage-empty" id="stage-empty">Load a source, or open the demo</div>
+      </div>
+
+      <div class="transport">
+        <button id="play-btn" disabled>▶ Play</button>
+        <input type="range" id="seek" min="0" max="100" step="0.01" value="0" disabled />
+        <span class="mono" id="seek-label">0.00 / 0.00</span>
+        <span class="spacer"></span>
+        <button id="demo-btn" class="ghost">Demo document</button>
+        <label class="check"><input type="checkbox" id="video-toggle" /> show video</label>
+        <label class="check"><input type="checkbox" id="guides-toggle" /> guides</label>
+        <label class="check"><input type="checkbox" id="overlay-toggle" checked /> drag &amp; snap</label>
+      </div>
+
+      <div class="style-bar">
+        <label class="field-inline">
+          <span>Font</span>
+          <select id="font-family"></select>
+        </label>
+        <label class="field-inline">
+          <span>Weight</span>
+          <select id="font-weight"></select>
+        </label>
+        <label class="field-inline">
+          <span>Size <b id="size-out">0.036</b></span>
+          <input type="range" id="font-size" min="0.012" max="0.12" step="0.001" value="0.036" />
+        </label>
+        <label class="field-inline">
+          <span>Size is a fraction of</span>
+          <select id="size-unit">
+            <option value="w">width — Veed's getTextProps()</option>
+            <option value="h">height — the v10 replica</option>
+          </select>
+        </label>
+        <label class="field-inline">
+          <span>Wrap <b id="wrap-out">0.90</b></span>
+          <input type="range" id="wrap-width" min="0" max="1" step="0.01" value="0.9" />
+        </label>
+        <label class="field-inline">
+          <span>Reveal</span>
+          <select id="reveal-mode">
+            <option value="progressive">progressive — Veed word-by-word</option>
+            <option value="all">all — whole line at block start</option>
+            <option value="active">active — only the spoken word</option>
+          </select>
+        </label>
+        <label class="field-inline">
+          <span>Emphasis</span>
+          <select id="emphasis-decoration">
+            <option value="underline">underline</option>
+            <option value="highlight">highlight block</option>
+            <option value="none">none</option>
+          </select>
+        </label>
+        <label class="field-inline">
+          <span>Emphasis on</span>
+          <select id="emphasis-source">
+            <option value="keyword">AI keywords — Veed</option>
+            <option value="active">the spoken word — karaoke</option>
+          </select>
+        </label>
+        <button id="reset-style" class="ghost">Reset to Veed parity</button>
+      </div>
+    </section>
+
+    <!-- ============ TEMPLATES ============ -->
+    <section class="panel templates-panel">
+      <h2>
+        Templates
+        <span class="tag" id="template-status">—</span>
+        <span class="spacer"></span>
+        <button class="ghost" id="template-parity">Compare with Veed parity</button>
+      </h2>
+      <div class="templates" id="templates"></div>
+      <div class="hint" id="template-note">
+        Applying a template replaces the document style. Per-block positions and per-block overrides
+        are kept, and applying the same template twice changes nothing.
+      </div>
+    </section>
+
+    <!-- ============ BLOCK INSPECTOR ============ -->
+    <section class="panel block-panel">
+      <h2>
+        Selected block
+        <span class="tag" id="block-status">none</span>
+        <span class="spacer"></span>
+        <span class="hint" id="block-hint">drag on the canvas · arrows nudge · shift = ×4</span>
+      </h2>
+      <div id="block-inspector" class="empty">
+        Click a caption on the canvas (or a row in “Corrected blocks”) to edit just that one.
+      </div>
+
+    <!-- ============ SOURCES ============ -->
+    <section class="panel">
+      <h2>Sources</h2>
+
+      <div class="field">
+        <label for="video-in">Video (optional)</label>
+        <input type="file" id="video-in" accept="video/*" />
+      </div>
+
+      <div class="field">
+        <label for="ai-in">AI source — Veed master JSON</label>
+        <input type="file" id="ai-in" accept=".json,application/json" />
+        <div class="hint">Word-level timing + AI keyword emphasis (authoritative timing).</div>
+      </div>
+
+      <div class="field">
+        <label for="truth-in">TRUTH source — SRT / VTT</label>
+        <input type="file" id="truth-in" accept=".srt,.vtt" />
+        <div class="hint">Spelling authority. Rolling cues are de-duplicated automatically.</div>
+      </div>
+
+      <button class="primary" id="align-btn" disabled>Run quality correction</button>
+
+      <h2 style="margin-top:20px">Log</h2>
+      <div id="log" class="empty">No activity yet.</div>
+    </section>
+
+    <!-- ============ REPORT + BLOCKS ============ -->
+    <section class="panel">
+      <h2>Alignment report</h2>
+      <div class="stat-grid" id="report">
+        <div class="empty">Run the correction to see the report.</div>
+      </div>
+
+      <h2 style="margin-top:20px">Corrected blocks</h2>
+      <div class="list" id="blocks"><div class="empty">—</div></div>
+    </section>
+
+    <!-- ============ CORRECTIONS ============ -->
+    <section class="panel">
+      <h2>Corrections <span class="tag" id="cor-count">0</span></h2>
+      <div class="list" id="corrections"><div class="empty">—</div></div>
+    </section>
+  </main>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
