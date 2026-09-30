@@ -1,0 +1,24 @@
+# Local virtualenv - never committed. The studio is always installed into .venv
+# so the system Python is never touched.
+.venv/
+venv/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Downloaded model weights (fetched lazily on first run; hundreds of MB).
+models/
+.cache/
+
+# Generated output: transcripts, decoded audio, job artifacts.
+out/
+*.decoded.wav
+*.decoded.mp3
