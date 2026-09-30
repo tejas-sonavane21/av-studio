@@ -17,7 +17,7 @@ so this folder is self-contained.
 > and sparse per-block overrides. Alignment is validated end-to-end against the real `spidy.srt` +
 > `veed_master_v3…json` pair (71 blocks, 135 anchors, 0 document errors, 0 overlaps); the renderer is
 > validated by comparing its painted positions against a transcription of v10's own render loop; and
-> the editor UI is exercised in real headless Chrome (`npm run ui`, 43 checks). Timeline,
+> the editor UI is exercised in real headless Chrome (`npm run ui`, 45 checks). Timeline,
 > inline text editing and export are the next phases. See
 > [`IMPLEMENTATION-PLAN.md`](IMPLEMENTATION-PLAN.md) §20.
 
@@ -149,7 +149,7 @@ with the server staying up (`/%zz` gives `400`).
 ```bash
 cd caption-studio
 npm test          # node --test "tests/unit/*.test.js" → 252 tests
-npm run ui        # headless-Chrome smoke test of the editor page (43 checks)
+npm run ui        # headless-Chrome smoke test of the editor page (45 checks)
 ```
 
 All test suites are pure Node — no browser, no dependencies. The integration test runs against the
@@ -162,7 +162,7 @@ calculated by hand rather than mirrored from the implementation.
 
 ```bash
 cd caption-studio
-npm run ui        # → headless Chrome over CDP, 43 checks, exits non-zero on failure
+npm run ui        # → headless Chrome over CDP, 45 checks, exits non-zero on failure
 ```
 
 `src/main.js` is the one module no unit test can reach — it exists only as browser side effects on

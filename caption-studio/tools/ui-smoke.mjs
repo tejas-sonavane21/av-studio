@@ -456,6 +456,19 @@ async function main() {
     'document.querySelector("#preview-audio").src.startsWith("blob:")',
     (v) => v === true,
   );
+  await delay(600);
+  await check(
+    cdp,
+    'the track actually decodes, so the element is playable',
+    '(()=>{const a=document.querySelector("#preview-audio");return a.readyState>=1&&a.duration>0})()',
+    (v) => v === true,
+  );
+  await check(
+    cdp,
+    'and the transport sized its seek bar to the track, not the document',
+    'Math.abs(Number(document.querySelector("#seek").max)-document.querySelector("#preview-audio").duration)<0.05',
+    (v) => v === true,
+  );
   await check(
     cdp,
     'the mute toggle silences the track',
