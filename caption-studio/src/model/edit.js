@@ -32,9 +32,16 @@
  * reading order *is* the timing order. That is why a wording fix such as
  * `"toll, comes the ultimate"` → `"comes the ultimate toll"` is expressed as a re-typed line: the
  * words change places together with their slots, which is the only arrangement the model can hold.
+ *
+ * ## Shaping
+ *
+ * A block is not only a string: it is the unit the renderer reveals and the unit a line break
+ * belongs to. The second half of this module edits *where the captions are* rather than what they
+ * say — `splitBlock` cuts one caption into two at a word boundary, `joinBlockWithPrevious` puts it
+ * back. Neither touches a word's own timing, so neither can move the sync.
  */
 
-import { createWord } from './schema.js';
+import { createBlock, createWord } from './schema.js';
 import { isEmphasisStyle, normalizeBlock, rebuildBlockText } from './document.js';
 
 /** Split a line into words exactly the way `block.text` is joined back together. */
@@ -150,4 +157,167 @@ export function setWordText(doc, blockId, wordIndex, text) {
   if (!Number.isInteger(wordIndex) || wordIndex < 0 || wordIndex >= tokens.length) return null;
   tokens[wordIndex] = String(text ?? '');
   return setBlockText(doc, blockId, tokens.join(' '));
+}
+
+// ---------------------------------------------------------------------------
+// shaping — splitting a caption in two, and joining it back
+// ---------------------------------------------------------------------------
+
+/**
+ * Why splitting exists at all.
+ *
+ * Inside a block, a word stays on screen once it has been spoken (`render/time.js`), so a caption
+ * holding a whole sentence keeps growing until the sentence ends. That is the one thing a real
+ * Veed/CapCut caption never does — it breaks the line, and each line reveals on its own. The cure is
+ * therefore a content operation, not a rendering one: the user draws the line break, and a line
+ * break in this model *is* a block boundary. `splitBlock` is how the editor writes one.
+ *
+ * Two rules make a split safe to perform mid-session:
+ *
+ * - **Nothing is re-timed.** The words move between the two blocks carrying their own
+ *   `[start, end]`, so a split cannot nudge the sync — unlike re-typing a line whose word count
+ *   changed, which has to re-divide the block's span (`apportionTimes`). The only new number is the
+ *   cut time, and it is derived from the two words it sits between.
+ * - **The look follows the text.** Both halves inherit the original's `overrides` and `placement`
+ *   as copies, because a split is not a style edit — and the two halves are independent from then
+ *   on, so promoting one later must not drag the other with it.
+ */
+
+function indexOfBlock(doc, blockId) {
+  return (doc?.blocks ?? []).findIndex((b) => b.id === blockId);
+}
+
+/** A deep copy, so two blocks never share a mutable subtree. Documents are plain JSON by contract. */
+const cloneJSON = (value) => (value == null ? value : JSON.parse(JSON.stringify(value)));
+
+/**
+ * The time a caption is cut at, between two adjacent words.
+ *
+ * Normally the midpoint of the silence between them, so each half's window ends just after its own
+ * last word and begins just before its first. When the words touch it collapses onto that instant,
+ * and when they overlap (a bad import can produce that) it lands in the middle of the overlap. The
+ * result is always somewhere in `[prev.end, next.start]` or `[next.start, prev.end]`, which is what
+ * keeps the two halves exactly contiguous: block windows stay gap-free and non-overlapping whatever
+ * the input looked like.
+ */
+export function splitTimeBetween(prev, next) {
+  const from = Number.isFinite(prev?.end) ? prev.end : Number(next?.start) || 0;
+  const to = Number.isFinite(next?.start) ? next.start : from;
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  return Math.min(hi, Math.max(lo, (from + to) / 2));
+}
+
+/**
+ * Split one caption in two at a word boundary.
+ *
+ * @param {object} doc
+ * @param {string} blockId
+ * @param {number} wordIndex  the first word of the **new** block; the split lands before it
+ * @returns {{first: object, second: object, cut: number}|null}
+ *   null when there is no such block, when the index is not strictly inside its words (a split at
+ *   the very first or last word would leave one half empty — a deletion, not a split), or when the
+ *   cut would fall on the block's own edge and leave a half with no duration.
+ */
+export function splitBlock(doc, blockId, wordIndex) {
+  const blocks = doc?.blocks ?? [];
+  const at = indexOfBlock(doc, blockId);
+  if (at < 0) return null;
+  const block = blocks[at];
+  const words = block.words ?? [];
+  if (!Number.isInteger(wordIndex) || wordIndex <= 0 || wordIndex >= words.length) return null;
+
+  const cut = splitTimeBetween(words[wordIndex - 1], words[wordIndex]);
+  // A split hands out two *windows*, and a window of no length is not a caption — it would flash
+  // for one frame and could only ever be joined back. This is reachable: when two words touch, the
+  // cut between them lands on the instant they share, which is the block's own first or last
+  // moment when the caption was itself cut there a moment ago.
+  if (!(cut > block.start && cut < block.end)) return null;
+  // `splice` hands the tail — with its words' own ids, timings and emphasis flags — to the new
+  // block in one move, so nothing is re-timed and nothing needs re-identifying.
+  const second = createBlock(cut, block.end, words.splice(wordIndex), {
+    overrides: cloneJSON(block.overrides ?? {}),
+    placement: cloneJSON(block.placement),
+    locked: !!block.locked,
+  });
+
+  block.end = cut;
+  // Order matters. `emphasisStylesFor` reads each word's `charFrom`/`charTo`, and at this instant
+  // those still address the *original* block's text — so the halves must re-address their own text
+  // first. Skipping this does not fail loudly: the second half's range lands past its own end and
+  // `normalizeBlock` drops it, and the highlight silently disappears from the new caption.
+  rebuildBlockText(block);
+  rebuildBlockText(second);
+  // Both halves derive their ranges from their own words, and both read the emphasis *payload*
+  // (id/style) off the original block, so the highlight keeps its look in whichever half the word
+  // it follows ended up in. `normalizeBlock` then does what a text edit would: re-derive the text,
+  // the offsets and the flags. The first half keeps the original id, so the selection and the
+  // overlay still know it.
+  second.styles = emphasisStylesFor(second, block.styles);
+  block.styles = emphasisStylesFor(block, block.styles);
+  normalizeBlock(block);
+  normalizeBlock(second);
+
+  blocks.splice(at + 1, 0, second);
+  return { first: block, second, cut };
+}
+
+/**
+ * Split a caption at the word boundary nearest an arbitrary time — the "split here" gesture.
+ *
+ * Returns null when the time is outside the block, because splitting a caption the playhead is not
+ * in is never what the user meant; they would have to guess which boundary was chosen.
+ */
+export function splitBlockAtTime(doc, blockId, time) {
+  const block = findBlock(doc, blockId);
+  if (!block || !Number.isFinite(time)) return null;
+  const words = block.words ?? [];
+  if (words.length < 2) return null;
+  if (time < block.start || time > block.end) return null;
+
+  let best = -1;
+  let bestDistance = Infinity;
+  for (let i = 1; i < words.length; i++) {
+    const cut = splitTimeBetween(words[i - 1], words[i]);
+    // Skip the boundaries `splitBlock` would refuse, so "nearest" is chosen among the cuts that
+    // can actually be made rather than landing on a dead end.
+    if (!(cut > block.start && cut < block.end)) continue;
+    const distance = Math.abs(cut - time);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = i;
+    }
+  }
+  return best < 0 ? null : splitBlock(doc, blockId, best);
+}
+
+/**
+ * Merge a caption back into the one before it — the inverse of `splitBlock`.
+ *
+ * The word lists are concatenated as they are, so every word keeps the timing and the emphasis flag
+ * it had in whichever half it came from; a split followed by a join is therefore lossless (only the
+ * word ids of a re-typed line would differ, and a split never re-ids anything). The **earlier**
+ * block survives and keeps its own id, look and position: joining is reaching backwards for text,
+ * and the caption you were already on is the one that stays selected.
+ *
+ * @returns {object|null} the merged block, or null when there is no block before this one
+ */
+export function joinBlockWithPrevious(doc, blockId) {
+  const blocks = doc?.blocks ?? [];
+  const at = indexOfBlock(doc, blockId);
+  if (at <= 0) return null;
+  const previous = blocks[at - 1];
+  const block = blocks[at];
+
+  previous.words = [...(previous.words ?? []), ...(block.words ?? [])];
+  // `max` rather than assignment: the survivor must span both, and with sorted non-overlapping
+  // blocks this restores exactly the span a split had cut in half.
+  previous.end = Math.max(previous.end, block.end);
+  // Same ordering rule as `splitBlock`, for the same reason: the second block's words were
+  // addressed into *its* text, so the offsets have to be re-derived before the ranges are.
+  rebuildBlockText(previous);
+  previous.styles = emphasisStylesFor(previous, previous.styles);
+  normalizeBlock(previous);
+  blocks.splice(at, 1);
+  return previous;
 }
