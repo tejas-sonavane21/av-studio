@@ -15,7 +15,9 @@
  * position through the overlay (`editor/canvas-overlay.js`) and sparse per-block overrides
  * (`templates/merge.js`). The pattern that keeps this file small is that **every edit is a call to
  * a pure function in another module and then a redraw** — there is no editing state in here beyond
- * `selectedBlockId`.
+ * `selectedBlockId`. Content edits (`model/edit.js`) follow the same rule, including the ones that
+ * change the shape of the document rather than its wording: splitting one caption into two is an
+ * edit to where the line breaks are, and a line break is a block.
  *
  * Must be served over http://localhost (see README): ES modules and `captureStream` need an origin.
  */
@@ -29,7 +31,7 @@ import { validateDocument } from './model/document.js';
 import { createDefaultStyle } from './model/schema.js';
 import { documentFromAlignment } from './model/pipeline.js';
 import { createDemoDocument } from './model/demo.js';
-import { setBlockText, setWordText } from './model/edit.js';
+import { joinBlockWithPrevious, setBlockText, setWordText, splitBlock, splitBlockAtTime } from './model/edit.js';
 import { createPreview } from './editor/preview.js';
 import { createCanvasOverlay } from './editor/canvas-overlay.js';
 import { fontFamilies, getFont } from './fonts/registry.js';
@@ -950,9 +952,35 @@ function renderBlockInspector() {
   words.id = 'word-editor';
   host.append(words);
   renderWordEditor();
+  host.append(
+    el(
+      'div',
+      'hint',
+      '✂ between two words splits the caption there — every word keeps its own timing, and each line then reveals on its own.',
+    ),
+  );
+
+  // One row for edits that change the *shape* of the document (how many captions there are),
+  // one for the edits that change how the selected one looks. The shape row gets its own class
+  // rather than sharing `.actions`, so "the buttons that edit the look" stays a single, nameable
+  // group — position in a list is not an identity.
+  const structure = el('div', 'shape-actions');
+  const splitPlayhead = el('button', 'ghost', 'Split at playhead');
+  splitPlayhead.id = 'split-at-playhead';
+  splitPlayhead.title = 'Split this caption in two at the word boundary nearest the playhead';
+  splitPlayhead.addEventListener('click', () => splitSelected('playhead'));
+  const joinPrevious = el('button', 'ghost', 'Join with previous');
+  joinPrevious.id = 'join-previous';
+  joinPrevious.title = 'Merge this caption back into the one before it';
+  // Nothing precedes the first caption, so the inverse of a split is not available on it.
+  joinPrevious.disabled = doc.blocks[0] === block;
+  joinPrevious.addEventListener('click', () => joinSelected());
+  structure.append(splitPlayhead, joinPrevious);
+  host.append(structure);
 
   const actions = el('div', 'actions');
   const applyAll = el('button', 'ghost', 'Apply look to all captions');
+  applyAll.id = 'apply-to-all';
   applyAll.addEventListener('click', () => {
     promoteBlockToDocument(doc, block.id);
     afterBlockEdit();
@@ -960,12 +988,14 @@ function renderBlockInspector() {
     log('promoted this block\'s look (and position) to every caption');
   });
   const resetBlock = el('button', 'ghost', 'Reset this block');
+  resetBlock.id = 'reset-block';
   resetBlock.addEventListener('click', () => {
     clearBlockOverrides(doc, block.id);
     afterBlockEdit();
     log('block reset — it inherits the document style and position again');
   });
   const resetPosition = el('button', 'ghost', 'Reset position');
+  resetPosition.id = 'reset-position';
   resetPosition.addEventListener('click', () => {
     clearBlockPlacement(doc, block.id);
     afterBlockEdit();
@@ -1033,7 +1063,74 @@ function renderWordEditor() {
     });
     chip.append(input);
     host.append(chip);
+    // A split handle after every word but the last: a click can only mean "break the caption here".
+    if (i < block.words.length - 1) {
+      const split = el('button', 'word-split', '✂');
+      split.dataset.splitAt = String(i + 1);
+      split.title = `Split here — “${w.text}” keeps ${fmt(w.start)}–${fmt(w.end)}`;
+      split.setAttribute('aria-label', `Split the caption after “${w.text}”`);
+      split.addEventListener('click', () => splitSelected(i + 1));
+      host.append(split);
+    }
   });
+}
+
+/**
+ * Split the selected caption in two — at a word boundary (`at` = the first word of the new block)
+ * or at the playhead.
+ *
+ * The two things it does *after* the edit are the point of it being in one place rather than inline
+ * in the handlers:
+ *
+ * - `selectAfterShapeEdit` — one more caption exists, so the picker list has to be rebuilt and the
+ *   overlay has to be told which half is now selected.
+ * - the **remainder** becomes the selection. Carving one long line into three is the normal use, and
+ *   this leaves the next split one click away instead of one click plus a row pick.
+ */
+function splitSelected(at) {
+  const doc = preview?.document;
+  const block = selectedBlock();
+  if (!doc || !block) return null;
+  const parts =
+    at === 'playhead' ? splitBlockAtTime(doc, block.id, preview.currentTime()) : splitBlock(doc, block.id, at);
+  if (!parts) {
+    if (at === 'playhead') log('nothing to split — the playhead has to be inside a caption of more than one word');
+    return null;
+  }
+  selectAfterShapeEdit(parts.second.id);
+  log(`split caption at ${parts.cut.toFixed(2)}s → "${parts.first.text}" | "${parts.second.text}"`);
+  return parts;
+}
+
+/** Merge the selected caption back into the one before it (undo a split). */
+function joinSelected() {
+  const doc = preview?.document;
+  const block = selectedBlock();
+  if (!doc || !block) return null;
+  const merged = joinBlockWithPrevious(doc, block.id);
+  if (!merged) {
+    log('this is the first caption — there is nothing before it to join with');
+    return null;
+  }
+  selectAfterShapeEdit(merged.id);
+  log(`joined with the previous caption → "${merged.text}"`);
+  return merged;
+}
+
+/**
+ * Finish a split or a join: move the selection to the surviving caption and refresh every view.
+ *
+ * This is an `afterBlockEdit`, not the `selectBlock` shortcut, because the *number* of captions
+ * changed — the picker list has to be rebuilt, not merely re-highlighted. The overlay is told
+ * separately: it keeps its own selection for hit-testing and dragging, and left alone it would go
+ * on outlining the half the user did not ask for.
+ */
+function selectAfterShapeEdit(id) {
+  selectedBlockId = id ?? null;
+  // redraw first: `afterBlockEdit` repaints the overlay from the layouts of the last frame, so a
+  // selection drawn before the new caption has been laid out would outline the wrong box.
+  afterBlockEdit();
+  overlay?.select(selectedBlockId);
 }
 
 /** Build the overlay once a document exists — it needs the renderer's size and layouts. */

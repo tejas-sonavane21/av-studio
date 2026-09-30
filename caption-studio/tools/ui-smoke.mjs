@@ -318,7 +318,7 @@ async function main() {
   await check(
     cdp,
     '"apply look to all captions" promotes it into the document (now edited)',
-    '(()=>{[...document.querySelectorAll("#block-inspector .actions button")][0].click();return document.querySelector("#template-status").textContent})()',
+    '(()=>{document.querySelector("#apply-to-all").click();return document.querySelector("#template-status").textContent})()',
     (v) => String(v).includes('edited'),
   );
   await check(
@@ -382,7 +382,7 @@ async function main() {
   await check(
     cdp,
     '"reset this block" clears the override',
-    '(()=>{[...document.querySelectorAll("#block-inspector .actions button")][1].click();return document.querySelector("#block-status").textContent})()',
+    '(()=>{document.querySelector("#reset-block").click();return document.querySelector("#block-status").textContent})()',
     (v) => String(v).includes('inherit'),
   );
   await check(
@@ -545,6 +545,127 @@ async function main() {
     'document.querySelector("#blocks .row.active .body").childNodes[0].textContent.split(" ")[0]',
     (v) => v === 'ZZZ',
     'ZZZ',
+  );
+
+  console.log('\n■ splitting long captions');
+  // The demo's deliberately long line is the shape that holds a whole sentence, so under a
+  // word-by-word reveal every spoken word stays on screen until the block ends. Pick it out by
+  // word count rather than by row position, which earlier sections have already been editing.
+  const longRow = await evaluate(
+    cdp,
+    '(() => { const rows = [...document.querySelectorAll("#blocks .row")]; let best = 0; let bestWords = -1; rows.forEach((r, i) => { const n = r.querySelector(".body").childNodes[0].textContent.trim().split(/\\s+/).length; if (n > bestWords) { bestWords = n; best = i; } }); return best; })()',
+  );
+  await evaluate(cdp, `[...document.querySelectorAll("#blocks .row")][${longRow}].click()`);
+  await delay(250);
+  const line = await evaluate(cdp, '[...document.querySelectorAll("#word-editor .word-chip input")].map((i) => i.value)');
+  const lineTimes = await evaluate(
+    cdp,
+    '[...document.querySelectorAll("#word-editor .word-chip .word-time")].map((e) => e.textContent)',
+  );
+  const rowsBefore = await evaluate(cdp, 'document.querySelectorAll("#blocks .row").length');
+  await check(
+    cdp,
+    'a split handle sits between every pair of words',
+    'document.querySelectorAll("#word-editor .word-split").length',
+    (v) => v === line.length - 1,
+    `${line.length - 1}`,
+  );
+
+  await evaluate(cdp, '[...document.querySelectorAll("#word-editor .word-split")][4].click()');
+  await delay(350);
+  await check(
+    cdp,
+    'splitting adds exactly one caption',
+    'document.querySelectorAll("#blocks .row").length',
+    (v) => v === rowsBefore + 1,
+    `${rowsBefore + 1}`,
+  );
+  const halves = `${line.slice(0, 5).join(' ')} | ${line.slice(5).join(' ')}`;
+  await check(
+    cdp,
+    'and it divides the line at the handle that was clicked',
+    `[...document.querySelectorAll("#blocks .row")].slice(${longRow}, ${longRow + 2}).map((r) => r.querySelector(".body").childNodes[0].textContent).join(" | ")`,
+    (v) => v === halves,
+    JSON.stringify(halves),
+  );
+  await check(
+    cdp,
+    'the two captions meet exactly at the cut',
+    `(() => { const t = [...document.querySelectorAll("#blocks .row")].slice(${longRow}, ${longRow + 2}).map((r) => r.querySelector(".t").textContent.trim().split("–")); return t[0][1].trim() === t[1][0].trim(); })()`,
+    (v) => v === true,
+    'first.end === second.start',
+  );
+  await check(
+    cdp,
+    'the words keep their own timings, so the sync does not move',
+    '[...document.querySelectorAll("#word-editor .word-chip .word-time")][0].textContent',
+    (v) => v === lineTimes[5],
+    JSON.stringify(lineTimes[5]),
+  );
+  await check(
+    cdp,
+    'the keyword highlight travelled with its word into the new caption',
+    `[...document.querySelectorAll("#blocks .row")].slice(${longRow}, ${longRow + 2}).map((r) => r.querySelectorAll(".tag").length).join("|")`,
+    (v) => v === '0|1',
+    '0|1',
+  );
+  await check(
+    cdp,
+    'the remainder is selected, ready for the next split',
+    `document.querySelector("#blocks .row.active").dataset.blockId === [...document.querySelectorAll("#blocks .row")][${longRow + 1}].dataset.blockId`,
+    (v) => v === true,
+  );
+
+  const rowsAfterSplit = await evaluate(cdp, 'document.querySelectorAll("#blocks .row").length');
+  // The audio-import section above left a 0.2 s track loaded, and while *any* media drives the
+  // clock a seek is clamped into it — so the playhead could never reach this caption, which starts
+  // at 17.68 s. Dropping the source returns the preview to its wall clock, i.e. the state the
+  // editor is really in before a track is imported.
+  await evaluate(
+    cdp,
+    '(()=>{const a=document.querySelector("#preview-audio");a.removeAttribute("src");a.load();return a.readyState})()',
+  );
+  // Re-click the selected row: that scrubs the playhead into the caption, which is the gesture
+  // "split at playhead" is written for.
+  await evaluate(cdp, 'document.querySelector("#blocks .row.active").click()');
+  await delay(250);
+  await evaluate(cdp, 'document.querySelector("#split-at-playhead").click()');
+  await delay(350);
+  await check(
+    cdp,
+    'splitting at the playhead carves the remainder again',
+    'document.querySelectorAll("#blocks .row").length',
+    (v) => v === rowsAfterSplit + 1,
+    `${rowsAfterSplit + 1}`,
+  );
+  const splitTexts = await evaluate(
+    cdp,
+    '[...document.querySelectorAll("#blocks .row")].map((r) => r.querySelector(".body").childNodes[0].textContent)',
+  );
+  await evaluate(cdp, 'document.querySelector("#join-previous").click()');
+  await delay(350);
+  await check(
+    cdp,
+    'joining merges it back into the caption before it',
+    'document.querySelectorAll("#blocks .row").length',
+    (v) => v === rowsAfterSplit,
+    `${rowsAfterSplit}`,
+  );
+  const rejoined = `${splitTexts[longRow + 1]} ${splitTexts[longRow + 2]}`;
+  await check(
+    cdp,
+    'and the merged caption carries both halves in order',
+    'document.querySelector("#blocks .row.active .body").childNodes[0].textContent',
+    (v) => v === rejoined,
+    JSON.stringify(rejoined),
+  );
+  await evaluate(cdp, 'document.querySelector("#blocks .row").click()');
+  await delay(250);
+  await check(
+    cdp,
+    'the first caption has nothing before it to join with',
+    'document.querySelector("#join-previous").disabled',
+    (v) => v === true,
   );
 
   console.log('\n■ console health');

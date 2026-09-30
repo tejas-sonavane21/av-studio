@@ -9,7 +9,7 @@ This is a **fresh project**. The previous subtitle-replication work (versions 1�
 Everything learned there is distilled into [`docs/KNOWLEDGE-BASE.md`](docs/KNOWLEDGE-BASE.md)
 so this folder is self-contained.
 
-> **Status: Phases 0–4 complete and verified.** All engines are built and **246/246 tests pass**:
+> **Status: Phases 0–4 complete and verified.** All engines are built and **282/282 tests pass**:
 > the caption document model, the format I/O (SRT/VTT/Veed JSON/project), the
 > **quality-correction engine** (rolling-cue resolution → anchors → banded DTW → typed, auditable
 > corrections), the **Canvas2D renderer with the Veed parity template**, and the **Phase 4 editing
@@ -17,8 +17,8 @@ so this folder is self-contained.
 > and sparse per-block overrides. Alignment is validated end-to-end against the real `spidy.srt` +
 > `veed_master_v3…json` pair (71 blocks, 135 anchors, 0 document errors, 0 overlaps); the renderer is
 > validated by comparing its painted positions against a transcription of v10's own render loop; and
-> the editor UI is exercised in real headless Chrome (`npm run ui`, 45 checks). Timeline,
-> inline text editing and export are the next phases. See
+> the editor UI is exercised in real headless Chrome (`npm run ui`, 62 checks). Timeline
+> and export are the next phases. See
 > [`IMPLEMENTATION-PLAN.md`](IMPLEMENTATION-PLAN.md) §20.
 
 ## What works today
@@ -42,6 +42,7 @@ so this folder is self-contained.
 | Per-block overrides, promote / reset, style resolver | ✅ `src/templates/merge.js` |
 | Drag to place, snapping, keyboard nudge, per-block position | ✅ `src/editor/canvas-overlay.js`, `src/render/placement.js` |
 | Caption text editing — re-type a line, or fix a single word | ✅ `src/model/edit.js`, `src/main.js` |
+| Split a long caption in two / join it back (the line breaks) | ✅ `src/model/edit.js`, `src/main.js` |
 | Timeline / export | ⏳ next phases |
 
 ## The renderer
@@ -66,7 +67,7 @@ render/placement.js   anchors, box rects, snapping, clamping   (pure)
 templates/index.js    the registry (validated at import) + picker swatches
 templates/merge.js    template ⊕ defaults ⊕ overrides ⊕ placement, with an LRU resolver
 templates/defs/*.js   one file per template — data, not code
-model/edit.js         re-type a caption line / one word, invariants rebuilt (pure)
+model/edit.js         re-type a line / one word; split or join captions (pure)
 ```
 
 ## The editing layer
@@ -130,6 +131,32 @@ follow:
 An edit to content is never an edit to looks: `overrides` and `placement` are left alone, so fixing
 a typo cannot drop a per-block drag or a promoted template.
 
+### Breaking a long line in two
+
+A transcript hands captions over in *sentences*, but a caption holding a whole sentence keeps every
+spoken word on screen until the sentence ends — the one thing a Veed or CapCut caption never does.
+There is nothing for the renderer to fix there: the line break is the fix, and in this model a line
+break **is** a block boundary. So the inspector can draw them:
+
+- **✂ between two words** splits the caption at that boundary;
+- **Split at playhead** splits at the nearest boundary to the playhead, and just logs a line when the
+  playhead is outside the selected caption;
+- **Join with previous** puts two captions back together (disabled on the first one).
+
+`splitBlock` moves the words into a new block carrying their own `[start, end]`, so a split cannot
+nudge the sync: the only new number is the cut, taken as the midpoint of the silence between the two
+words it falls between, which leaves the two windows exactly contiguous. Both halves inherit the
+original's `overrides` and `placement` as *copies* — a split is not a style edit, and promoting one
+half later must not drag the other with it — and each re-derives its own emphasis ranges from its own
+words. Two boundaries are refused, because they are not splits but deletions: the very first and the
+very last word, and any cut that would leave a caption with no duration at all.
+
+The keyword highlight is the subtle part. A range is a set of character offsets *into* a block's
+text, so it only means anything within that block — the halves have to re-derive their own text
+*before* their ranges, or the new caption's range lands beyond its own end and `normalizeBlock` drops
+it without a word. That ordering is exactly what the test for "a highlight that lands in the second
+half" exists to catch.
+
 ### Parity, and the one deliberate correction
 
 v10 was the version whose output matched the frame-by-frame analysis of the real Veed video, so its
@@ -175,8 +202,8 @@ with the server staying up (`/%zz` gives `400`).
 
 ```bash
 cd caption-studio
-npm test          # node --test "tests/unit/*.test.js" → 252 tests
-npm run ui        # headless-Chrome smoke test of the editor page (45 checks)
+npm test          # node --test "tests/unit/*.test.js" → 282 tests
+npm run ui        # headless-Chrome smoke test of the editor page (62 checks)
 ```
 
 All test suites are pure Node — no browser, no dependencies. The integration test runs against the
@@ -189,15 +216,16 @@ calculated by hand rather than mirrored from the implementation.
 
 ```bash
 cd caption-studio
-npm run ui        # → headless Chrome over CDP, 51 checks, exits non-zero on failure
+npm run ui        # → headless Chrome over CDP, 62 checks, exits non-zero on failure
 ```
 
 `src/main.js` is the one module no unit test can reach — it exists only as browser side effects on
 `index.html`. This drives the real page in headless Chrome: loads the demo, clicks through every
 template tile as a burst (which is how the overlapping-`await` re-entrancy bug was found), edits a
 per-block override, promotes and resets it, drags a caption with real mouse events from the
-DevTools protocol, re-types a caption line and fixes a single word, and fails on any uncaught
-exception or `console.error`. It is worth running after
+DevTools protocol, re-types a caption line, fixes a single word, splits a long caption in two (by
+handle and at the playhead) and joins it back, and fails on any uncaught exception or
+`console.error`. It is worth running after
 any change to the editor wiring — the two bugs it caught were both invisible in Node:
 
 - a burst of template clicks could settle the UI on a template the document was not on, because

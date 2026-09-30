@@ -216,7 +216,7 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 }
 .block-panel .block-meta { font-size: 12px; color: var(--text-1); margin-bottom: 10px; }
 .block-panel .block-meta b { color: var(--text-0); font-family: var(--font-mono); }
-.block-panel .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.block-panel .actions, .block-panel .shape-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .block-panel input[type='color'] {
   width: 100%; height: 26px; padding: 1px; background: var(--bg-2);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -237,6 +237,15 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
   color: var(--text-0); font: inherit;
 }
 .block-panel .word-chip input:focus { outline: none; }
+
+/* The split handle sits *between* two word chips, so a click can only ever mean "break the caption
+   here": the boundary is the control, not the word. */
+.block-panel .word-split {
+  align-self: center; padding: 3px 5px; font-size: 11px; line-height: 1;
+  background: transparent; border: 1px dashed var(--border); border-radius: var(--radius-sm);
+  color: var(--text-2); cursor: pointer;
+}
+.block-panel .word-split:hover { color: var(--text-0); border-color: var(--text-2); }
 .hint { font-size: 11px; color: var(--text-2); }
 .templates-panel .hint { margin-top: 10px; }
 
