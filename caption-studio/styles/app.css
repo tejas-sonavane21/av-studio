@@ -223,6 +223,20 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 }
 .block-panel .field-inline { gap: 4px; }
 .block-panel .field-inline select, .block-panel .field-inline input { min-width: 0; width: 100%; }
+
+/* Caption text editing: the line field spans the grid, the word strip wraps below it. */
+.block-panel .field-wide { grid-column: 1 / -1; }
+.block-panel .word-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.block-panel .word-chip {
+  display: flex; flex-direction: column; gap: 2px; padding: 4px 7px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.block-panel .word-chip .word-time { font-size: 9px; color: var(--text-2); font-family: var(--font-mono); }
+.block-panel .word-chip input {
+  min-width: 90px; padding: 0; background: transparent; border: none;
+  color: var(--text-0); font: inherit;
+}
+.block-panel .word-chip input:focus { outline: none; }
 .hint { font-size: 11px; color: var(--text-2); }
 .templates-panel .hint { margin-top: 10px; }
 

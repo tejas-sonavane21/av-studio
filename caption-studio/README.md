@@ -41,7 +41,8 @@ so this folder is self-contained.
 | 10 templates (Veed / CapCut / generic), validated at import | ✅ `src/templates/` |
 | Per-block overrides, promote / reset, style resolver | ✅ `src/templates/merge.js` |
 | Drag to place, snapping, keyboard nudge, per-block position | ✅ `src/editor/canvas-overlay.js`, `src/render/placement.js` |
-| Timeline / inline text editing / export | ⏳ next phases |
+| Caption text editing — re-type a line, or fix a single word | ✅ `src/model/edit.js`, `src/main.js` |
+| Timeline / export | ⏳ next phases |
 
 ## The renderer
 
@@ -65,6 +66,7 @@ render/placement.js   anchors, box rects, snapping, clamping   (pure)
 templates/index.js    the registry (validated at import) + picker swatches
 templates/merge.js    template ⊕ defaults ⊕ overrides ⊕ placement, with an LRU resolver
 templates/defs/*.js   one file per template — data, not code
+model/edit.js         re-type a caption line / one word, invariants rebuilt (pure)
 ```
 
 ## The editing layer
@@ -102,6 +104,31 @@ rules there are worth knowing because they are what "CapCut-like" actually means
 
 Keyboard nudges are a fraction of the canvas (0.5 %, `Shift` = ×4), so a nudge means the same thing at
 every preview size and every display; arrow keys inside a text field are left alone.
+
+### Editing the words
+
+Corrections are only as good as their sources: an AI transcript can mis-hear a line *and* get its
+word order wrong, and no spelling policy can fix that. So the inspector edits **content** as well as
+looks — a **Caption text** field replaces a block's whole line, and a **word strip** beneath it gives
+every word its own input, tagged with that word's own timing.
+
+Both are the same operation, `setBlockText` in `src/model/edit.js`. Overwriting `block.text` would
+not be a valid edit: the invariant is `block.text === words.map((w) => w.text).join(' ')`, every word
+addresses a slice of that text by `charFrom`/`charTo`, and the keyword highlight is a set of
+character ranges *into* it. So the edit rebuilds the word list and hands the block back to
+`normalizeBlock` — the one authority on what a consistent block is — which re-derives the offsets,
+ranges and emphasis flags rather than patching them. Because a block owns a fixed span, two rules
+follow:
+
+- **a same-length line keeps its sync.** Every word retains its own `[start, end]`, so fixing
+  `soul` → `toll` cannot nudge the timing. A *reorder* is just a same-length line edit: the words
+  change places together with their slots, which is the only arrangement the model can hold, since
+  words inside a block are kept in time order.
+- **a different-length line stays inside its span.** There is no slot to inherit, so the block's
+  `start`…`end` is divided between the words in proportion to their length. Neighbours never move.
+
+An edit to content is never an edit to looks: `overrides` and `placement` are left alone, so fixing
+a typo cannot drop a per-block drag or a promoted template.
 
 ### Parity, and the one deliberate correction
 
@@ -162,14 +189,15 @@ calculated by hand rather than mirrored from the implementation.
 
 ```bash
 cd caption-studio
-npm run ui        # → headless Chrome over CDP, 45 checks, exits non-zero on failure
+npm run ui        # → headless Chrome over CDP, 51 checks, exits non-zero on failure
 ```
 
 `src/main.js` is the one module no unit test can reach — it exists only as browser side effects on
 `index.html`. This drives the real page in headless Chrome: loads the demo, clicks through every
 template tile as a burst (which is how the overlapping-`await` re-entrancy bug was found), edits a
 per-block override, promotes and resets it, drags a caption with real mouse events from the
-DevTools protocol, and fails on any uncaught exception or `console.error`. It is worth running after
+DevTools protocol, re-types a caption line and fixes a single word, and fails on any uncaught
+exception or `console.error`. It is worth running after
 any change to the editor wiring — the two bugs it caught were both invisible in Node:
 
 - a burst of template clicks could settle the UI on a template the document was not on, because

@@ -488,6 +488,65 @@ async function main() {
     (v) => v === true,
   );
 
+  console.log('\n■ caption text editing');
+  await evaluate(cdp, 'document.querySelector("#blocks .row").click()');
+  await delay(250);
+  await check(
+    cdp,
+    'the inspector exposes a caption text field',
+    'document.querySelectorAll("#block-inspector #block-text-input").length',
+    (v) => v === 1,
+  );
+  await check(
+    cdp,
+    'the field is pre-filled with the selected caption',
+    'document.querySelector("#block-text-input").value.trim().length > 0',
+    (v) => v === true,
+  );
+  const wordCount = await evaluate(cdp, 'document.querySelector("#block-text-input").value.trim().split(/\\s+/).length');
+  await check(
+    cdp,
+    'and the word strip has one timed chip per word',
+    'document.querySelectorAll("#word-editor .word-chip input").length',
+    (v) => v === wordCount,
+    `${wordCount}`,
+  );
+
+  const beforeText = await evaluate(cdp, 'document.querySelector("#blocks .row.active .body").childNodes[0].textContent');
+  const beforeTime = await evaluate(cdp, 'document.querySelector("#blocks .row.active .t").textContent');
+  const reversed = String(beforeText).trim().split(/\s+/).reverse().join(' ');
+  await evaluate(
+    cdp,
+    `(()=>{const f=document.querySelector("#block-text-input");f.value=${JSON.stringify(reversed)};f.dispatchEvent(new Event("change"));})()`,
+  );
+  await delay(300);
+  await check(
+    cdp,
+    're-typing the line updates the caption everywhere',
+    'document.querySelector("#blocks .row.active .body").childNodes[0].textContent',
+    (v) => v === reversed,
+    JSON.stringify(reversed),
+  );
+  await check(
+    cdp,
+    'and a same-length fix leaves the caption’s timing untouched',
+    'document.querySelector("#blocks .row.active .t").textContent',
+    (v) => v === beforeTime,
+    JSON.stringify(beforeTime),
+  );
+  await evaluate(
+    cdp,
+    '(()=>{const i=document.querySelectorAll("#word-editor .word-chip input")[0];i.value="ZZZ";i.dispatchEvent(new Event("change"));})()',
+  );
+  await delay(300);
+  await check(
+    cdp,
+    'a single word can be fixed on its own',
+    'document.querySelector("#blocks .row.active .body").childNodes[0].textContent.split(" ")[0]',
+    (v) => v === 'ZZZ',
+    'ZZZ',
+  );
+
   console.log('\n■ console health');
   await check(cdp, 'the font-size readout resolved to pixels', '/\\d+px/.test(document.querySelector("#size-out").textContent)');
   const clean = cdp.problems.length === 0;

@@ -29,6 +29,7 @@ import { validateDocument } from './model/document.js';
 import { createDefaultStyle } from './model/schema.js';
 import { documentFromAlignment } from './model/pipeline.js';
 import { createDemoDocument } from './model/demo.js';
+import { setBlockText, setWordText } from './model/edit.js';
 import { createPreview } from './editor/preview.js';
 import { createCanvasOverlay } from './editor/canvas-overlay.js';
 import { fontFamilies, getFont } from './fonts/registry.js';
@@ -849,14 +850,25 @@ function renderBlockInspector() {
 
   const meta = el('div', 'block-meta');
   meta.append(document.createTextNode(`${fmt(block.start)}–${fmt(block.end)}  `));
-  meta.append(el('b', null, block.text.slice(0, 90)));
+  const metaText = el('b', null, block.text.slice(0, 90));
+  metaText.id = 'block-meta-text';
+  meta.append(metaText);
   meta.append(el('div', 'hint', `${summary.text} · position ${describeAnchor(anchor)} (${presetFor(anchor) ?? 'custom'})`));
   host.append(meta);
 
   const grid = el('div', 'inspector-grid');
   const weights = getFont(style.font.family)?.weights ?? [style.font.weight];
 
+  // The content edit sits first and spans the grid: it is the reason most people open this panel.
+  const textInput = buildText(block.text, (v) => onBlockText(v), {
+    placeholder: 'the caption exactly as it should read',
+  });
+  textInput.id = 'block-text-input';
+  const textField = fieldInline('Caption text', textInput);
+  textField.classList.add('field-wide');
+
   grid.append(
+    textField,
     fieldInline(
       'Block',
       buildSelect(
@@ -934,6 +946,11 @@ function renderBlockInspector() {
   );
   host.append(grid);
 
+  const words = el('div', 'word-list');
+  words.id = 'word-editor';
+  host.append(words);
+  renderWordEditor();
+
   const actions = el('div', 'actions');
   const applyAll = el('button', 'ghost', 'Apply look to all captions');
   applyAll.addEventListener('click', () => {
@@ -955,6 +972,68 @@ function renderBlockInspector() {
   });
   actions.append(applyAll, resetBlock, resetPosition);
   host.append(actions);
+}
+
+/**
+ * Apply a whole-line text edit to the selected block.
+ *
+ * Unlike `applyBlockPatch`, this must *not* rebuild the inspector: a `change` event fires as the
+ * field is left, and a rebuild at that instant would pull the next control out from under the
+ * user's click — the same reason a range drag is never re-rendered. Only the parts of the UI that
+ * display the block's content are refreshed.
+ */
+function onBlockText(text) {
+  const doc = preview?.document;
+  const block = selectedBlock();
+  if (!doc || !block) return;
+  setBlockText(doc, block.id, text);
+  refreshBlockContent();
+  log(`caption text: "${block.text}"`);
+}
+
+/** Refresh every view of the selected block's content without rebuilding its controls. */
+function refreshBlockContent() {
+  const block = selectedBlock();
+  redraw();
+  renderBlocks();
+  renderBlockStatus();
+  const metaText = $('#block-meta-text');
+  if (metaText && block) metaText.textContent = block.text.slice(0, 90);
+  renderWordEditor();
+}
+
+/**
+ * The word strip: one editable input per word, tagged with that word's own timing.
+ *
+ * A single wrong word is the common correction, and editing it here leaves its `start`/`end`
+ * untouched — whereas retyping the whole line can only preserve timings while the word count holds.
+ */
+function renderWordEditor() {
+  const host = $('#word-editor');
+  if (!host) return;
+  const block = selectedBlock();
+  host.replaceChildren();
+  if (!block) return;
+  if (!block.words.length) {
+    host.append(el('div', 'hint', 'this caption has no words — type a line above to give it some back'));
+    return;
+  }
+  block.words.forEach((w, i) => {
+    const chip = el('label', 'word-chip');
+    chip.append(el('span', 'word-time', `${fmt(w.start)}–${fmt(w.end)}`));
+    const input = el('input');
+    input.type = 'text';
+    input.value = w.text;
+    input.addEventListener('change', () => {
+      const current = selectedBlock();
+      if (!current) return;
+      setWordText(preview.document, current.id, i, input.value);
+      refreshBlockContent();
+      log(`word ${i + 1}: "${input.value}"`);
+    });
+    chip.append(input);
+    host.append(chip);
+  });
 }
 
 /** Build the overlay once a document exists — it needs the renderer's size and layouts. */
