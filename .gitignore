@@ -33,6 +33,14 @@ desktop.ini
 venv/
 __pycache__/
 
+# ---- Local archive dumps ----
+# Ad-hoc zips/7z of the tree. They are scratch exports, and the ones taken while the
+# reference material was still on disk contain it, so they stay out of history.
+*.7z
+*.zip
+*.rar
+*.tar.gz
+
 # ---- Build output ----
 dist/
 build/
