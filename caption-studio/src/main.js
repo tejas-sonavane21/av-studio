@@ -58,9 +58,10 @@ const el = (tag, cls, text) => {
   return n;
 };
 
-const store = createStore({ video: null, aiDoc: null, truthCues: null, result: null, log: [] });
+const store = createStore({ video: null, audio: null, aiDoc: null, truthCues: null, result: null, log: [] });
 
 let videoUrl = null;
+let audioUrl = null;
 let preview = null;
 let overlay = null;
 // The only editing state this module owns: which block the inspector edits. Everything else about
@@ -128,6 +129,39 @@ async function onVideo(file) {
         preview.resize();
         refreshSeekRange();
       }
+    },
+    { once: true },
+  );
+}
+
+/**
+ * Import the original audio track.
+ *
+ * Deliberately independent of the video input: the common Veed-style setup is a silent (or
+ * screen-recorded) picture plus a separate master track, and the captions are what matters. The
+ * preview then plays the two together — the audio drives the clock whenever no video is loaded,
+ * and is force-muted against the video when there is one (see `applyAudioRouting` in preview.js).
+ */
+async function onAudio(file) {
+  if (!file) return;
+  store.setState({ audio: file });
+  log(`audio loaded: ${file.name} (${(file.size / 1e6).toFixed(2)} MB)`);
+
+  const audio = $('#preview-audio');
+  if (audioUrl) URL.revokeObjectURL(audioUrl);
+  audioUrl = URL.createObjectURL(file);
+  preview?.setAudio(audio);
+  audio.src = audioUrl;
+  audio.load();
+  // an audio-only session is still a session: the transport has to work with no picture at all
+  $('#play-btn').disabled = false;
+  $('#audio-tag').textContent = file.name;
+
+  audio.addEventListener(
+    'loadedmetadata',
+    () => {
+      if (Number.isFinite(audio.duration)) log(`audio: ${audio.duration.toFixed(2)}s`);
+      refreshSeekRange();
     },
     { once: true },
   );
@@ -472,6 +506,11 @@ function wirePreview() {
   });
 
   $('#video-toggle').addEventListener('change', (e) => preview.setVideoVisible(e.target.checked));
+  $('#mute-toggle').addEventListener('change', (e) => {
+    preview.setMuted(e.target.checked);
+    log(e.target.checked ? 'sound muted' : 'sound on');
+  });
+  $('#volume').addEventListener('input', (e) => preview.setVolume(Number(e.target.value)));
   $('#guides-toggle').addEventListener('change', (e) => preview.setOptions({ guides: e.target.checked }));
   $('#overlay-toggle').addEventListener('change', (e) => overlay?.setEnabled(e.target.checked));
 
@@ -942,12 +981,14 @@ preview = createPreview({
   canvas: $('#preview-canvas'),
   container: $('#stage'),
   video: $('#preview-video'),
+  audio: $('#preview-audio'),
   onFrame,
 });
 
 createOverlay();
 
 $('#video-in').addEventListener('change', (e) => onVideo(e.target.files?.[0]));
+$('#audio-in').addEventListener('change', (e) => onAudio(e.target.files?.[0]));
 $('#ai-in').addEventListener('change', (e) => onAi(e.target.files?.[0]));
 $('#truth-in').addEventListener('change', (e) => onTruth(e.target.files?.[0]));
 $('#align-btn').addEventListener('click', runAlignment);
@@ -956,4 +997,5 @@ wirePreview();
 syncStyleControls(createDefaultStyle());
 renderTemplates();
 log('ready — load an AI source and a TRUTH subtitle file, or click "Demo document"');
+log('tip: add the original Audio (optional) to hear the preview play, even with no video');
 log('tip: click a caption to select it, drag it to move, arrow keys to nudge (shift = ×4)');

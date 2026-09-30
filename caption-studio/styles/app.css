@@ -109,6 +109,10 @@ button:hover:not(:disabled) { filter: brightness(1.08); }
   object-fit: contain;
   visibility: hidden;
 }
+
+/* A controls-less <audio> has no box of its own, but it is still a grid item in the stage; pin it
+   away so it can never influence the centring of the canvas. The transport is its only UI. */
+.stage > audio { display: none; }
 .stage canvas { position: relative; display: block; }
 .stage-empty {
   position: absolute;
@@ -125,6 +129,10 @@ button:hover:not(:disabled) { filter: brightness(1.08); }
 .transport input[type='range'] { flex: 1 1 200px; min-width: 140px; }
 .transport .spacer { flex: 0 0 4px; }
 .transport button { padding: 6px 12px; }
+
+/* id beats `.transport input[type='range']`, so both the flexible width and its 140px floor have to
+   be reset — otherwise the volume slider stretches across the whole transport strip. */
+.transport #volume { flex: 0 0 84px; width: 84px; min-width: 84px; }
 .check { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-1); }
 .check input { accent-color: var(--accent); }
 
