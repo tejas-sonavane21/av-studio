@@ -6,10 +6,10 @@
  * 1. **The render loop.** One `requestAnimationFrame` loop that draws the current frame. It is the
  *    only place `renderer.draw()` is called from, so the "drawing is a pure function of
  *    `(document, time, opts)`" rule stays enforceable.
- * 2. **The clock.** Time comes from the `<video>` when one is loaded; without a video it advances
- *    by wall-clock time while playing, so a document imported from an SRT/VTT (or the built-in
- *    demo) can still be previewed on its own. That is what makes the renderer testable without any
- *    media at all.
+ * 2. **The clock.** Time comes from the media when any is loaded — video first, then audio — and
+ *    otherwise advances by wall-clock time while playing, so a document imported from an SRT/VTT
+ *    (or the built-in demo) can still be previewed on its own. That is what makes the renderer
+ *    testable without any media at all.
  * 3. **Sizing.** The canvas is fitted to the document's aspect ratio inside its container, at
  *    device resolution, and re-fitted on resize. Export never uses this path (plan §9.8: output
  *    size must not depend on the window), it is preview-only convenience.
@@ -21,7 +21,7 @@ import { mergeDeep } from '../util/math.js';
 
 const log = createLogger('preview');
 
-export function createPreview({ canvas, video = null, container = null, onFrame = null } = {}) {
+export function createPreview({ canvas, video = null, audio = null, container = null, onFrame = null } = {}) {
   if (!canvas) throw new Error('createPreview(): a canvas element is required');
 
   const renderer = createRenderer('canvas2d');
@@ -40,6 +40,58 @@ export function createPreview({ canvas, video = null, container = null, onFrame 
   // Whether the *video layer* is shown. Deliberately unrelated to caption drawing: hiding the
   // video must not stop the caption preview (that would make "show video" a rendering switch).
   let videoVisible = true;
+  // Whether the *sound* is off, and how loud it is. Likewise independent of `videoVisible`: mute
+  // must not stop the picture, and hiding the video must not mute the track.
+  let muted = false;
+  let volume = 1;
+
+  /** Has this element a source and enough metadata loaded that it can be read or seeked? */
+  const isReady = (m) => Boolean(m) && Number.isFinite(m.currentTime) && m.readyState > 0;
+
+  /**
+   * Which element the clock follows: the video when it is loaded, else the audio.
+   *
+   * Video wins on purpose. When both are loaded the video is the picture and normally the
+   * full-length stream; the audio element is the track, and `resyncAudio()` keeps it glued to the
+   * video so two independent decoders cannot drift apart over a long preview.
+   */
+  function activeMedia() {
+    if (isReady(video)) return video;
+    if (isReady(audio)) return audio;
+    return null;
+  }
+
+  /**
+   * Route the sound, in one place, from one rule: **an imported audio file owns the sound**, so the
+   * video is force-muted while it is loaded — otherwise the video's own track and the imported one
+   * would play over each other. With no audio element the video is heard, which is what "the
+   * preview plays with no sound" used to mean.
+   */
+  function applyAudioRouting() {
+    if (video) {
+      video.muted = audio ? true : muted;
+      video.volume = volume;
+    }
+    if (audio) {
+      audio.muted = muted;
+      audio.volume = volume;
+    }
+  }
+
+  // How far the audio may drift from the video before it is snapped back. Large enough that ordinary
+  // frame-to-frame jitter never triggers a seek (which would click), small enough to stay invisible.
+  const DRIFT_LIMIT = 0.25;
+
+  /** Keep the audio track glued to the video, which owns the clock. */
+  function resyncAudio() {
+    if (!isReady(video) || !isReady(audio)) return;
+    if (Math.abs(video.currentTime - audio.currentTime) < DRIFT_LIMIT) return;
+    try {
+      audio.currentTime = video.currentTime;
+    } catch {
+      /* not seekable yet — the next frame tries again */
+    }
+  }
 
   const box = () => {
     const el = container ?? canvas.parentElement;
@@ -75,21 +127,25 @@ export function createPreview({ canvas, video = null, container = null, onFrame 
       return;
     }
     const now = performance.now();
-    if (playing && !video) clock += (now - lastTick) / 1000;
+    // The wall clock is only a fallback: as soon as any media can drive the time, it does.
+    if (playing && !activeMedia()) clock += (now - lastTick) / 1000;
     lastTick = now;
+    if (playing) resyncAudio();
 
     renderFrame(currentTime());
     raf = requestAnimationFrame(loop);
   }
 
   function currentTime() {
-    if (video && Number.isFinite(video.currentTime) && video.readyState > 0) return video.currentTime;
-    return clock;
+    const media = activeMedia();
+    return media ? media.currentTime : clock;
   }
 
   /** Duration used by the transport: the media if there is any, else the document's end. */
   function duration() {
-    if (video && Number.isFinite(video.duration) && video.duration > 0) return video.duration;
+    for (const m of [video, audio]) {
+      if (m && Number.isFinite(m.duration) && m.duration > 0) return m.duration;
+    }
     if (!doc?.blocks?.length) return 0;
     return doc.blocks[doc.blocks.length - 1].end;
   }
@@ -100,15 +156,16 @@ export function createPreview({ canvas, video = null, container = null, onFrame 
     lastTick = performance.now();
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(loop);
-    if (video) {
-      // autoplay may be blocked before a user gesture; the button click *is* the gesture
-      video.play().catch((err) => log.warn('video.play() refused:', err?.message ?? err));
+    resyncAudio();
+    // autoplay may be blocked before a user gesture; the button click *is* the gesture
+    for (const m of [video, audio]) {
+      if (m) m.play().catch((err) => log.warn('media.play() refused:', err?.message ?? err));
     }
   }
 
   function pause() {
     playing = false;
-    if (video && !video.paused) video.pause();
+    for (const m of [video, audio]) if (m && !m.paused) m.pause();
   }
 
   function toggle() {
@@ -116,13 +173,14 @@ export function createPreview({ canvas, video = null, container = null, onFrame 
     return playing;
   }
 
-  /** Seek both clocks. */
+  /** Seek every loaded clock at once, so the picture and the sound cannot disagree. */
   function seek(t) {
     const clamped = Math.max(0, t);
     clock = clamped;
-    if (video && video.readyState > 0) {
+    for (const m of [video, audio]) {
+      if (!isReady(m)) continue;
       try {
-        video.currentTime = clamped;
+        m.currentTime = clamped;
       } catch {
         /* seeking before metadata is ready throws in some browsers — ignore, next frame is fine */
       }
@@ -177,7 +235,28 @@ export function createPreview({ canvas, video = null, container = null, onFrame 
   function setVideo(element) {
     video = element;
     applyVideoVisibility();
+    applyAudioRouting();
     return video;
+  }
+
+  /** Swap in the audio track. Routing is re-applied, so adding one force-mutes the video. */
+  function setAudio(element) {
+    audio = element;
+    applyAudioRouting();
+    return audio;
+  }
+
+  function setMuted(next) {
+    muted = !!next;
+    applyAudioRouting();
+    return muted;
+  }
+
+  function setVolume(next) {
+    const value = Number(next);
+    volume = Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 1;
+    applyAudioRouting();
+    return volume;
   }
 
   function dispose() {
@@ -186,6 +265,10 @@ export function createPreview({ canvas, video = null, container = null, onFrame 
     raf = 0;
     renderer.dispose();
   }
+
+  // Publish the initial routing, so a `<video muted>` in the markup is not left as the source of
+  // truth for whether the preview is audible.
+  applyAudioRouting();
 
   // keep the canvas fitted to its container
   const observer =
@@ -203,6 +286,9 @@ export function createPreview({ canvas, video = null, container = null, onFrame 
     setOptions,
     setVideo,
     setVideoVisible,
+    setAudio,
+    setMuted,
+    setVolume,
     start,
     pause,
     toggle,
@@ -218,6 +304,15 @@ export function createPreview({ canvas, video = null, container = null, onFrame 
     },
     get playing() {
       return playing;
+    },
+    get audio() {
+      return audio;
+    },
+    get muted() {
+      return muted;
+    },
+    get volume() {
+      return volume;
     },
     get options() {
       return { ...options };

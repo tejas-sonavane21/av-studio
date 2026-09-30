@@ -52,7 +52,10 @@ function fakeVideo({ duration = 0, readyState = 1, currentTime = 0 } = {}) {
   };
 }
 
-function mount({ video = null } = {}) {
+/** The surface `preview.js` reads is identical for `<audio>`, so the fake is shared. */
+const fakeAudio = (opts) => fakeVideo(opts);
+
+function mount({ video = null, audio = null } = {}) {
   const canvas = createFakeCanvas();
   const container = { clientWidth: 1280, clientHeight: 720 };
   const frames = [];
@@ -60,9 +63,10 @@ function mount({ video = null } = {}) {
     canvas,
     container,
     video,
+    audio,
     onFrame: (t, doc) => frames.push({ t, blocks: doc?.blocks.length ?? 0 }),
   });
-  return { preview, canvas, ctx: canvas.getContext('2d'), frames, video };
+  return { preview, canvas, ctx: canvas.getContext('2d'), frames, video, audio };
 }
 
 test('a canvas is required', () => {
@@ -215,6 +219,85 @@ test('setVideo swaps the media element and applies the current visibility', asyn
   const other = fakeVideo({ duration: 10 });
   preview.setVideo(other);
   assert.equal(other.style.visibility, 'hidden', 'visibility carries over');
+});
+
+test('audio drives the clock and the duration when there is no ready video', async () => {
+  const audio = fakeAudio({ duration: 30, currentTime: 4.5 });
+  const { preview } = mount({ audio });
+  await preview.setDocument(createDemoDocument());
+
+  assert.equal(preview.currentTime(), 4.5);
+  assert.equal(preview.duration(), 30);
+  preview.seek(11);
+  assert.equal(audio.currentTime, 11, 'seeking moves the audio track');
+});
+
+test('an unloaded video yields the clock to the audio', async () => {
+  const video = fakeVideo({ duration: 0, readyState: 0 });
+  const audio = fakeAudio({ duration: 30, currentTime: 9 });
+  const { preview } = mount({ video, audio });
+  await preview.setDocument(createDemoDocument());
+
+  assert.equal(preview.currentTime(), 9, 'readyState 0 must not win with a meaningless time');
+  assert.equal(preview.duration(), 30);
+});
+
+test('duration prefers the video, then the audio, then the document', async () => {
+  const both = mount({ video: fakeVideo({ duration: 42 }), audio: fakeAudio({ duration: 30 }) });
+  await both.preview.setDocument(createDemoDocument());
+  assert.equal(both.preview.duration(), 42);
+
+  const noMedia = mount();
+  await noMedia.preview.setDocument(createDemoDocument());
+  assert.equal(noMedia.preview.duration(), createDemoDocument().blocks.at(-1).end);
+});
+
+test('play, pause and seek drive the audio as well as the video', async () => {
+  const video = fakeVideo({ duration: 42 });
+  const audio = fakeAudio({ duration: 42 });
+  const { preview } = mount({ video, audio });
+  await preview.setDocument(createDemoDocument());
+
+  preview.start();
+  assert.equal(video.playCalls, 1);
+  assert.equal(audio.playCalls, 1, 'the track starts with the picture');
+
+  preview.pause();
+  assert.equal(video.pauseCalls, 1);
+  assert.equal(audio.pauseCalls, 1);
+});
+
+test('an imported audio track owns the sound, so the video is force-muted', async () => {
+  const video = fakeVideo({ duration: 42 });
+  const { preview } = mount({ video });
+  assert.equal(video.muted, false, 'a video on its own is audible');
+
+  const audio = fakeAudio({ duration: 42 });
+  preview.setAudio(audio);
+  assert.equal(video.muted, true, 'two tracks must not play over each other');
+  assert.equal(audio.muted, false);
+  assert.equal(preview.audio, audio);
+
+  preview.setMuted(true);
+  assert.equal(audio.muted, true);
+  assert.equal(preview.muted, true);
+
+  preview.setVolume(0.4);
+  assert.equal(audio.volume, 0.4);
+  assert.equal(video.volume, 0.4);
+  assert.equal(preview.volume, 0.4);
+  preview.setVolume(5);
+  assert.equal(preview.volume, 1, 'volume clamps to [0, 1]');
+});
+
+test('mute silences a video-only preview without hiding it', async () => {
+  const video = fakeVideo({ duration: 42 });
+  const { preview } = mount({ video });
+  await preview.setDocument(createDemoDocument());
+
+  preview.setMuted(true);
+  assert.equal(video.muted, true);
+  assert.notEqual(video.style.visibility, 'hidden', 'mute is not a visibility switch');
 });
 
 test('nothing is drawn before a document exists', () => {
