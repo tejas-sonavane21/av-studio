@@ -208,6 +208,19 @@ async function main() {
     (v) => v === 'veed (3)|capcut (4)|generic (3)',
   );
   await check(cdp, 'no document loaded yet → inspector is empty', 'document.querySelector("#block-inspector").className', (v) => v === 'empty');
+  await check(cdp, 'the preview owns an audio element', 'document.querySelectorAll("#preview-audio").length', (v) => v === 1);
+  await check(
+    cdp,
+    'the audio input accepts audio files',
+    'document.querySelector("#audio-in").getAttribute("accept")',
+    (v) => v === 'audio/*',
+  );
+  await check(
+    cdp,
+    'and nothing pretends to be loaded before it is',
+    'document.querySelector("#audio-tag").textContent',
+    (v) => v === 'no audio',
+  );
 
   console.log('\n■ demo document');
   await evaluate(cdp, 'document.querySelector("#demo-btn").click()');
@@ -403,6 +416,63 @@ async function main() {
     'and resetting restores both the look and the unedited flag',
     'document.querySelector("#template-status").textContent',
     (v) => !String(v).includes('edited'),
+  );
+
+  console.log('\n■ audio import');
+  // A synthetic, self-contained WAV: the smoke test must not depend on the (gitignored) reference
+  // workspace, and a real file is the only way to exercise the object-URL → <audio> path end to end.
+  const wav = `(() => {
+    const rate = 8000, samples = rate * 0.2;
+    const bytes = new Uint8Array(44 + samples * 2);
+    const dv = new DataView(bytes.buffer);
+    const ascii = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+    ascii(0, 'RIFF'); dv.setUint32(4, 36 + samples * 2, true); ascii(8, 'WAVE');
+    ascii(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+    dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+    ascii(36, 'data'); dv.setUint32(40, samples * 2, true);
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'tone.wav', { type: 'audio/wav' }));
+    const input = document.querySelector('#audio-in');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change'));
+    return input.files.length;
+  })()`;
+  await check(cdp, 'a file selected on the audio input is picked up', wav, (v) => v === 1);
+  await check(
+    cdp,
+    'the audio tag names the imported track',
+    'document.querySelector("#audio-tag").textContent',
+    (v) => v === 'tone.wav',
+  );
+  await check(
+    cdp,
+    'the log records it',
+    'document.querySelector("#log").textContent.includes("audio loaded: tone.wav")',
+    (v) => v === true,
+  );
+  await check(
+    cdp,
+    'the track is wired to an object URL',
+    'document.querySelector("#preview-audio").src.startsWith("blob:")',
+    (v) => v === true,
+  );
+  await check(
+    cdp,
+    'the mute toggle silences the track',
+    '(()=>{const c=document.querySelector("#mute-toggle");c.checked=true;c.dispatchEvent(new Event("change"));return document.querySelector("#preview-audio").muted})()',
+    (v) => v === true,
+  );
+  await check(
+    cdp,
+    'the volume slider reaches the element',
+    '(()=>{const v=document.querySelector("#volume");v.value="0.25";v.dispatchEvent(new Event("input"));return document.querySelector("#preview-audio").volume})()',
+    (v) => Math.abs(v - 0.25) < 0.01,
+  );
+  await check(
+    cdp,
+    'and importing audio force-mutes the video so two tracks cannot overlap',
+    'document.querySelector("#preview-video").muted',
+    (v) => v === true,
   );
 
   console.log('\n■ console health');
