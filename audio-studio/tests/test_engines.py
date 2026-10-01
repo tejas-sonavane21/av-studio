@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from audio_studio.config import TranscribeOptions
+from audio_studio.config import (
+    DEFAULT_MODEL,
+    DEFAULT_PRESET,
+    PRESETS,
+    TranscribeOptions,
+    options_from_preset,
+)
 from audio_studio.engines import available_engines, engine_names, get_engine
 from audio_studio.engines.fake import apportion
 from audio_studio.media import Audio
@@ -148,8 +154,25 @@ def test_fake_engine_calls_the_progress_hook():
 # --------------------------------------------------------------------------- #
 
 
-def test_english_defaults_to_the_distilled_model():
-    assert TranscribeOptions().resolved_model() == "distil-large-v3"
+def test_english_defaults_to_the_cpu_viable_model():
+    # Measured: distil-large-v3 runs below 0.1x realtime on a 4-core CPU, and
+    # base garbles lyrics, so small is the default that actually finishes.
+    assert TranscribeOptions().resolved_model() == DEFAULT_MODEL
+    assert DEFAULT_MODEL == "small"
+
+
+def test_vad_is_off_by_default():
+    # VAD deletes sung vocals: 224 words -> 2 on the real fixture. It is only
+    # correct for spoken-word audio, so it must be opt-in.
+    assert TranscribeOptions().vad_filter is False
+    assert all(not preset["vad_filter"] for preset in PRESETS.values())
+
+
+def test_the_default_preset_is_the_balanced_one():
+    assert DEFAULT_PRESET == "balanced"
+    options = options_from_preset()
+    assert options.resolved_model() == "small"
+    assert options.preset == "balanced"
 
 
 def test_a_non_english_language_switches_to_the_multilingual_model():

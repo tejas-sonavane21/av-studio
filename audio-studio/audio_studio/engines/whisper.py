@@ -8,9 +8,12 @@ a 4-core, GPU-less machine.
 Two behaviours are worth knowing, because both exist to protect *timing*:
 
 ``vad_filter``
-    Voice-activity gating, so a long instrumental stretch is silence rather than
-    hallucinated lyrics. Whisper invents text over music; VAD is the cheapest
-    way to stop it.
+    Off unless asked for. Voice-activity gating is tuned for speech, not for a
+    *sung* vocal, which it does not classify as voice: on the real fixture it
+    cut 224 words down to 2. Enable it only for spoken-word audio with long
+    instrumental stretches, where hallucinating over the music is the larger
+    risk. (Whisper does invent text over music, which is the trade-off; see
+    ``config.DEFAULT_VAD_FILTER``.)
 
 ``condition_on_previous_text=False``
     Whisper conditions each window on the previous window's text by default,

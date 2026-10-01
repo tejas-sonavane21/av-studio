@@ -108,7 +108,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         language=args.language,
         beam_size=args.beam,
         word_timestamps=False if args.no_word_timestamps else True,
-        vad_filter=False if args.no_vad else True,
+        vad_filter=True if args.vad else False,
     )
 
     if not args.no_decode and not args.quiet:
@@ -258,13 +258,17 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--stem", default=None, help="output file stem (default: the input's)")
     t.add_argument("--engine", default="whisper", choices=engine_names(), help="transcription backend")
     t.add_argument("--preset", default=DEFAULT_PRESET, choices=sorted(PRESETS), help="accuracy/speed preset")
-    t.add_argument("--model", default=None, help="override the preset's model (e.g. distil-large-v3, small)")
+    t.add_argument("--model", default=None, help="override the preset's model (e.g. small, medium, distil-large-v3)")
     t.add_argument("--language", default=None, help="force a language code (e.g. en); default: autodetect")
     t.add_argument("--beam", type=int, default=None, help="beam size (default: the preset's)")
     t.add_argument("--emit", type=_parse_kinds, default=list(DEFAULT_KINDS), help="comma list: json,veed,srt,vtt")
     t.add_argument("--word-level", action="store_true", help="one subtitle cue per word")
     t.add_argument("--emphasis", default="none", choices=("none", "all"), help="keyword highlighting in the Veed output")
-    t.add_argument("--no-vad", action="store_true", help="disable voice-activity filtering (worse over music)")
+    t.add_argument(
+        "--vad",
+        action="store_true",
+        help="voice-activity filtering; for spoken word only - VAD deletes sung vocals",
+    )
     t.add_argument("--no-word-timestamps", action="store_true", help="skip per-word timings (fast, but no word editing)")
     t.add_argument("--no-decode", action="store_true", help="do not decode the audio before transcribing")
     t.add_argument("--quiet", "-q", action="store_true", help="no progress output")

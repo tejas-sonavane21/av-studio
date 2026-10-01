@@ -109,6 +109,7 @@ class FakeEngine(Engine):
                 "name": self.name,
                 "model": "fake",
                 "preset": options.preset,
+                "vadFilter": options.vad_filter,
                 "note": "synthetic timings for tests and dry runs - not a transcription",
             },
         )

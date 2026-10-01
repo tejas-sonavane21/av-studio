@@ -2,12 +2,29 @@
 config.py — presets and defaults.
 
 Tuned for the machine this was built on: **4 logical cores, ~16 GB RAM, no
-GPU,** CPU-only. That single fact decides most of these numbers.
+GPU,** CPU-only. That single fact decides most of these numbers, and every
+number below was measured on the real fixture
+(``referece_material/The_Crimson_Burden.mp3``, a 182.5 s sung track) rather than
+copied from a benchmark table:
 
-``distil-large-v3`` is the default because it is the accuracy/speed sweet spot
-for English on CPU: near-``large`` accuracy at roughly 5-6x the speed, and at
-int8 it fits in well under a gigabyte of RAM. Non-English audio switches to
-``medium``, because distilled Whisper models are English-only.
+    model            wall time     throughput     lyric accuracy
+    base             ~25 s         ~7.3x          garbled
+    small            ~78 s         ~2.3x          correct
+    distil-large-v3  >400 s/30 s   <0.1x          n/a (too slow to finish)
+
+So ``small`` is the default: on four cores it is the smallest model whose text
+is actually usable, and it still finishes a three-minute song in about a
+minute. Systems with a GPU or many cores can pass ``--model distil-large-v3``
+(see ``QUALITY_MODEL_EN``), which is near-``large`` accuracy but not viable on
+CPU here.
+
+``vad_filter`` is **off by default**, which is the opposite of most Whisper
+recipes, and on purpose. Voice-activity detection is tuned for *speech*, and a
+sung vocal is not speech to it: on the fixture above, VAD found 0.74 s of
+"speech" in 182 s (2 words out of 224), silently discarding the entire song.
+This studio exists to caption sung tracks, so VAD is opt-in (``--vad``), for
+spoken-word files with long instrumental stretches where hallucination on the
+music is the bigger risk.
 """
 
 from __future__ import annotations
@@ -17,15 +34,25 @@ from typing import Optional
 
 APP_NAME = "audio-studio"
 
-#: English-only distilled model: the accuracy pick that still finishes on CPU.
-DEFAULT_MODEL_EN = "distil-large-v3"
+#: The default English model on a CPU-only box: the smallest model measured to
+#: transcribe a sung track correctly.
+DEFAULT_MODEL = "small"
 
-#: Multilingual equivalent when no English-only model applies.
+#: Multilingual equivalent when no English-only model applies. ``medium`` is
+#: also a safe accuracy pick for English.
 DEFAULT_MODEL_MULTILINGUAL = "medium"
+
+#: Near-``large`` accuracy, but only worth it with a GPU or many CPU cores:
+#: measured below 0.1x realtime on this 4-core machine.
+QUALITY_MODEL_EN = "distil-large-v3"
 
 DEFAULT_COMPUTE_TYPE = "int8"  # CTranslate2 int8 — the CPU quantization to use
 DEFAULT_BEAM_SIZE = 5
 DEFAULT_SAMPLE_RATE = 16000
+
+#: Off: VAD cannot "hear" a sung vocal and deletes the whole track. See module
+#: docstring for the measurement.
+DEFAULT_VAD_FILTER = False
 
 
 @dataclass
@@ -37,7 +64,7 @@ class TranscribeOptions:
     device: str = "cpu"
     compute_type: str = DEFAULT_COMPUTE_TYPE
     beam_size: int = DEFAULT_BEAM_SIZE
-    vad_filter: bool = True
+    vad_filter: bool = DEFAULT_VAD_FILTER
     word_timestamps: bool = True
     # Off by default: conditioning on previous text is what makes Whisper loop
     # and repeat a line across a long instrumental gap, and a music bed is
@@ -55,22 +82,19 @@ class TranscribeOptions:
             return self.model
         if self.language and not self.language.lower().startswith("en"):
             return DEFAULT_MODEL_MULTILINGUAL
-        return DEFAULT_MODEL_EN
+        return DEFAULT_MODEL
 
 
-#: Named starting points. ``accurate`` is the default — the studio exists to fix
-#: timing, so trading accuracy for speed by default would defeat it.
+#: Named starting points. ``balanced`` (``small``) is the default because it is
+#: the cheapest model measured to produce correct lyrics on this hardware;
+#: trading that away by default would defeat the studio's purpose.
 PRESETS: dict[str, dict] = {
-    "accurate": {
-        "model": None,  # language-dependent: distil-large-v3 / medium
-        "beam_size": 5,
-        "vad_filter": True,
-    },
-    "balanced": {"model": "small", "beam_size": 5, "vad_filter": True},
-    "fast": {"model": "base", "beam_size": 1, "vad_filter": True},
+    "fast": {"model": "base", "beam_size": 1, "vad_filter": False},
+    "balanced": {"model": "small", "beam_size": 5, "vad_filter": False},
+    "accurate": {"model": "medium", "beam_size": 5, "vad_filter": False},
 }
 
-DEFAULT_PRESET = "accurate"
+DEFAULT_PRESET = "balanced"
 
 
 def options_from_preset(preset: str = DEFAULT_PRESET, **overrides) -> TranscribeOptions:

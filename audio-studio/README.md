@@ -8,12 +8,13 @@ style, placement, the render — this studio owns the *audio* timeline: what was
 said, **when exactly each word was said**, where the silence is, and whether the
 transcript can be trusted.
 
-> **Status: Phase A complete and verified.** The transcript model, the four
-> emitters (native JSON, Veed-compatible master JSON, SRT, VTT), the engine
-> registry with a deterministic offline backend, and the CLI are built —
-> **95/95 tests pass with *zero* third-party packages installed**, so the pure
-> layers can never be blocked behind a model download. The local Whisper backend,
-> forced alignment, LLM validation and the HTTP server are the next phases.
+> **Status: Phases A and B complete and verified.** The transcript model, the
+> four emitters (native JSON, Veed-compatible master JSON, SRT, VTT), the engine
+> registry with a deterministic offline backend, the CLI, and **real local
+> transcription via `faster-whisper`** are built. The backend-free layers are
+> covered by **98 tests that pass with *zero* third-party packages installed**,
+> so the pure layers can never be blocked behind a model download. Forced
+> alignment, LLM validation and the HTTP server are the next phases.
 
 ## Why this exists
 
@@ -35,7 +36,7 @@ no GPU, no `ffmpeg` on `PATH`.**
 
 | Layer | Choice | Why it wins here |
 |---|---|---|
-| **Transcribe** | [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) (CTranslate2, int8) | No PyTorch, and the best throughput-per-core of the CPU-capable options. Default model `distil-large-v3`: near-`large` accuracy at ~5–6× the speed, ~750 MB at int8 |
+| **Transcribe** | [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) (CTranslate2, int8) | No PyTorch, and the best throughput-per-core of the CPU-capable options. Default model `small`: the cheapest model measured to transcribe a *sung* track correctly here |
 | **Align** *(the actual sync fix)* | `wav2vec2` forced alignment — optional `[align]` extra | Tightens word onsets to ~20–50 ms. We usually already *have* the words (an SRT/VTT), so we do not have to guess them — known text can be aligned to the waveform |
 | **Validate** | `google-genai` / OpenRouter — optional `[llm]` extra | Polices the transcript *text* (spelling, casing, punctuation) and emits an auditable ledger. Timings never depend on it |
 | **Decode** | PyAV, bundled with the `[asr]` extra | No system `ffmpeg` install; a system one is still used if it appears |
@@ -45,14 +46,31 @@ backend sits behind one interface (`engines/base.py`) so the choice can change
 without every caller changing with it. `doctor` reports what is actually usable
 rather than what was intended.
 
-Two backend defaults are deliberate, because both protect *timing*:
+The defaults were then **measured on the real fixture** —
+`referece_material/The_Crimson_Burden.mp3`, a 182.5 s sung track — rather than
+copied from a benchmark table:
 
-- **`vad_filter=True`** — voice-activity gating, so a musical stretch is silence
-  instead of hallucinated lyrics.
+| model | wall time | throughput | lyric accuracy |
+|---|---|---|---|
+| `base` | ~25 s | ~7.3× | garbled |
+| `small` | ~78 s | ~2.3× | correct |
+| `distil-large-v3` | >400 s / 30 s slice | <0.1× | never finishes |
+
+Three backend defaults fall out of that, and each protects *timing*:
+
+- **`vad_filter=False`** — the opposite of most Whisper recipes, and on purpose.
+  Voice-activity detection is tuned for *speech*, and a sung vocal is not speech
+  to it: on the fixture above VAD found **0.74 s of "speech" in 182 s (2 words
+  out of 224)** — it silently deleted the entire song. VAD is now opt-in
+  (`--vad`), for spoken-word files with long instrumental stretches where
+  hallucination over music is the larger risk.
 - **`condition_on_previous_text=False`** — Whisper otherwise conditions each
   window on the last one, which is what makes it emit a looping, repeated line
   across an instrumental break. Against a music bed that is a correctness bug,
   not a nuisance.
+- **`small` over `distil-large-v3`** — the "accurate" model is six times larger
+  and, on four CPU cores, too slow to return at all. `small` is the smallest
+  model whose lyrics are actually usable.
 
 ## The bridge to caption-studio
 
@@ -96,7 +114,7 @@ ranges at all.
 | Engine registry, lazy imports, no-dependency base install | ✅ `audio_studio/engines/base.py` |
 | Deterministic offline backend (`--engine fake`) | ✅ `audio_studio/engines/fake.py` |
 | CLI: `transcribe` / `emit` / `doctor` / `version` | ✅ `audio_studio/cli.py` |
-| Local Whisper transcription (`faster-whisper`) | ⏳ Phase B |
+| Local Whisper transcription (`faster-whisper`) | ✅ `audio_studio/engines/whisper.py` |
 | Forced alignment + re-timing | ⏳ Phase C |
 | LLM transcript validation + ledger | ⏳ Phase D |
 | HTTP server (job queue) for the browser | ⏳ Phase E |
@@ -138,21 +156,25 @@ Progress goes to **stderr**, so `--json` on stdout stays machine-parseable.
 transcript — useful for checking the file layout and the caption-studio import
 without downloading a model.
 
-Presets: `accurate` (default — `distil-large-v3`, or `medium` for non-English),
-`balanced` (`small`), `fast` (`base`).
+Presets: `balanced` (default — `small`), `accurate` (`medium`), `fast`
+(`base`). `--model distil-large-v3` is available but only sane with a GPU or
+many CPU cores; a 4-core machine will not finish it in a sitting. VAD is
+**off**; add `--vad` only for spoken-word audio.
 
 ## Test it
 
 ```bash
 cd audio-studio
 source .venv/Scripts/activate
-python -m pytest          # 95 tests, no model, no network, no browser
+python -m pytest          # 98 tests, no model, no network, no browser
 ```
 
 The suite is deliberately dependency-free: it runs on `pip install -e ".[dev]"`
 and nothing else. A test that needed a 750 MB model to catch a layout bug would
 not get run. Where a real audio file is needed, `tests/conftest.py` writes a
-valid 16-bit PCM WAV with the standard library `wave` module.
+valid 16-bit PCM WAV with the standard library `wave` module. The *model*
+choices above are pinned by tests too, so a future "remember to turn VAD on"
+regression has to argue with the numbers.
 
 Two tests exist specifically to lock the *interfaces* rather than the details:
 

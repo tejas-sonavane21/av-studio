@@ -87,6 +87,17 @@ def test_transcribe_output_imports_as_a_caption_document(wav_file, tmp_path):
         assert all("s" in w and "e" in w for w in subtitle["words"])
 
 
+def test_transcribe_does_not_enable_vad_unless_asked(wav_file, tmp_path):
+    """VAD deletes sung vocals, so it must stay off through the whole CLI path."""
+    out = tmp_path / "out"
+    assert main(["transcribe", str(wav_file), "--engine", "fake", "--no-decode", "--out", str(out), "-q"]) == 0
+    assert read(out / "clip.speech.json")["engine"]["vadFilter"] is False
+
+    out2 = tmp_path / "out2"
+    main(["transcribe", str(wav_file), "--engine", "fake", "--no-decode", "--out", str(out2), "--vad", "-q"])
+    assert read(out2 / "clip.speech.json")["engine"]["vadFilter"] is True
+
+
 def test_transcribe_stem_can_be_overridden(wav_file, tmp_path):
     out = tmp_path / "out"
     main(["transcribe", str(wav_file), "--engine", "fake", "--no-decode", "--out", str(out), "--stem", "song", "-q"])
