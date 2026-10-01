@@ -123,6 +123,70 @@
         Click a caption on the canvas (or a row in “Corrected blocks”) to edit just that one.
       </div>
 
+    <!-- ============ TRANSCRIBE (audio-studio) ============ -->
+    <section class="panel transcribe-panel">
+      <h2>
+        Transcribe
+        <span class="tag" id="transcribe-status">server unchecked</span>
+        <span class="spacer"></span>
+        <button class="ghost" id="transcribe-probe">Check server</button>
+      </h2>
+
+      <div class="field">
+        <label for="transcribe-url">audio-studio server</label>
+        <input type="text" id="transcribe-url" value="http://127.0.0.1:8756" spellcheck="false" />
+        <div class="hint">
+          The Python studio beside this one, which measures word timings from the audio instead of
+          inheriting them. Start it with <b>python -m audio_studio serve</b>. Its output lands in the
+          AI source below — so a TRUTH subtitle file still corrects the spelling exactly as before,
+          while the timings are now measured rather than borrowed.
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="transcribe-in">Recording to transcribe</label>
+        <input type="file" id="transcribe-in" accept="audio/*,video/*" />
+      </div>
+
+      <div class="style-bar">
+        <label class="field-inline">
+          <span>Preset</span>
+          <select id="transcribe-preset">
+            <option value="fast">fast — base model</option>
+            <option value="balanced" selected>balanced — small model</option>
+            <option value="accurate">accurate — medium model</option>
+          </select>
+        </label>
+        <label class="field-inline">
+          <span>Language</span>
+          <input type="text" id="transcribe-language" placeholder="auto" size="5" />
+        </label>
+        <label class="field-inline">
+          <span>Align</span>
+          <select id="transcribe-align">
+            <option value="off">off — the transcriber's timing</option>
+            <option value="wav2vec" selected>wav2vec — re-time to the audio</option>
+            <option value="fake">fake — offline, synthetic</option>
+          </select>
+        </label>
+        <label class="field-inline">
+          <span>Validate</span>
+          <select id="transcribe-validate">
+            <option value="off" selected>off</option>
+            <option value="rules">rules — offline</option>
+            <option value="llm">llm — needs a key</option>
+          </select>
+        </label>
+        <button class="primary" id="transcribe-btn" disabled>Transcribe</button>
+      </div>
+
+      <div class="progress"><div class="progress-bar" id="transcribe-bar"></div></div>
+      <div class="hint" id="transcribe-note">
+        Choose a recording and press Transcribe. A three-minute song takes about a minute to
+        transcribe and two more to align, on CPU.
+      </div>
+    </section>
+
     <!-- ============ SOURCES ============ -->
     <section class="panel">
       <h2>Sources</h2>

@@ -26,6 +26,7 @@ import { createStore } from './store/store.js';
 import { parseSRT } from './io/srt.js';
 import { parseVTT } from './io/vtt.js';
 import { importJSON } from './io/project-file.js';
+import { describeStudioAudit, health, optionsFor, transcribeFile } from './io/audio-studio-client.js';
 import { alignCaptions } from './align/aligner.js';
 import { validateDocument } from './model/document.js';
 import { createDefaultStyle } from './model/schema.js';
@@ -202,6 +203,132 @@ async function onTruth(file) {
   } finally {
     setStatus('idle');
     refreshAlignButton();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// transcribe — asking the Python studio next door for the timings
+// ---------------------------------------------------------------------------
+
+let transcribing = false;
+
+/**
+ * The one thing this module adds to the pipeline is a *source*.
+ *
+ * `caption-studio` corrects an AI transcript against a trusted subtitle file, and it is good at
+ * it — but it inherits its word timings from Veed, so every split, join and reveal inherits Veed's
+ * error. This section replaces the AI source with one measured from the audio, and then does
+ * nothing else: the document it produces is loaded through the very same `importJSON` a file from
+ * disk goes through, so the alignment and editing that follow are exactly the ones that already
+ * worked.
+ */
+function setTranscribeNote(text) {
+  $('#transcribe-note').textContent = text;
+}
+
+function setTranscribeProgress(fraction) {
+  const bar = $('#transcribe-bar');
+  bar.style.width = `${Math.max(0, Math.min(1, fraction)) * 100}%`;
+}
+
+function refreshTranscribeButton() {
+  $('#transcribe-btn').disabled = transcribing || !$('#transcribe-in').files?.length;
+}
+
+/** Ask the server what it can actually do here, before trusting it with a job. */
+async function onTranscribeProbe() {
+  const badge = $('#transcribe-status');
+  badge.textContent = 'checking…';
+  try {
+    const info = await health($('#transcribe-url').value);
+    const available = (list) => (list ?? []).filter((entry) => entry.available).map((entry) => entry.name);
+    const engines = available(info.engines);
+    const aligners = available(info.aligners);
+    const validators = available(info.validators);
+    badge.textContent = `audio-studio ${info.version}`;
+    log(`audio-studio ${info.version} — engines: ${engines.join(', ') || 'none'}`);
+    log(`  aligners: ${aligners.join(', ') || 'none'} · validators: ${validators.join(', ') || 'none'}`);
+    setTranscribeNote(
+      `audio-studio ${info.version} is up.\npresets: ${(info.presets ?? []).join(', ')} (default ${info.defaultPreset})\n` +
+        `aligners: ${aligners.join(', ') || 'none'}   validators: ${validators.join(', ') || 'none'}`,
+    );
+  } catch (err) {
+    badge.textContent = 'server unreachable';
+    log(`ERROR ${err.toString()}`);
+    setTranscribeNote(err.toString());
+  }
+}
+
+/**
+ * Transcribe a recording on the server and load the result as the AI source.
+ *
+ * The audio is also handed to the preview, because the track the captions were measured from is
+ * the one a person wants to hear while checking them.
+ */
+async function onTranscribe() {
+  const file = $('#transcribe-in').files?.[0];
+  if (!file || transcribing) return;
+
+  const options = optionsFor({
+    preset: $('#transcribe-preset').value,
+    language: $('#transcribe-language').value.trim(),
+    align: $('#transcribe-align').value,
+    validate: $('#transcribe-validate').value,
+    emit: 'json,veed,srt,vtt',
+  });
+
+  transcribing = true;
+  refreshTranscribeButton();
+  $('#transcribe-bar').classList.remove('failed');
+  $('#transcribe-bar').classList.add('busy');
+  $('#transcribe-status').textContent = 'transcribing…';
+  setTranscribeProgress(0);
+  setStatus('transcribing…');
+  log(
+    `transcribe: "${file.name}" (${(file.size / 1e6).toFixed(1)} MB)` +
+      `${options.align ? ` · align ${options.align}` : ''}${options.validate ? ` · validate ${options.validate}` : ''}`,
+  );
+
+  let lastLogged = -1;
+  try {
+    const { veed, text, job } = await transcribeFile($('#transcribe-url').value, file, options, {
+      onProgress: (fraction, message) => {
+        setTranscribeProgress(fraction);
+        setTranscribeNote(`${Math.floor(fraction * 100)}% — ${message}`);
+        const percent = Math.floor(fraction * 100);
+        if (percent >= lastLogged + 25) {
+          lastLogged = percent;
+          log(`  ${percent}% ${message}`);
+        }
+      },
+    });
+
+    const { document: doc, kind } = importJSON(text);
+    store.setState({ aiDoc: doc });
+    const words = doc.blocks.reduce((n, b) => n + b.words.length, 0);
+    const seconds = job.summary?.seconds ?? job.seconds;
+    log(`AI source: audio-studio → ${doc.blocks.length} blocks, ${words} words (${kind}${seconds ? `, ${seconds}s` : ''})`);
+
+    // The provenance the other studio wrote is the reason a person can trust these timings, so it
+    // is shown rather than swallowed.
+    const audit = describeStudioAudit(veed);
+    for (const line of audit) log(`  ${line}`);
+    setTranscribeNote(audit.join('\n'));
+    setTranscribeProgress(1);
+    $('#transcribe-status').textContent = 'done';
+
+    await onAudio(file);
+  } catch (err) {
+    $('#transcribe-bar').classList.add('failed');
+    $('#transcribe-status').textContent = 'failed';
+    log(`ERROR transcribe: ${err.toString()}`);
+    setTranscribeNote(err.toString());
+  } finally {
+    transcribing = false;
+    $('#transcribe-bar').classList.remove('busy');
+    refreshTranscribeButton();
+    refreshAlignButton();
+    setStatus('idle');
   }
 }
 
@@ -1168,6 +1295,11 @@ $('#audio-in').addEventListener('change', (e) => onAudio(e.target.files?.[0]));
 $('#ai-in').addEventListener('change', (e) => onAi(e.target.files?.[0]));
 $('#truth-in').addEventListener('change', (e) => onTruth(e.target.files?.[0]));
 $('#align-btn').addEventListener('click', runAlignment);
+
+$('#transcribe-in').addEventListener('change', refreshTranscribeButton);
+$('#transcribe-btn').addEventListener('click', onTranscribe);
+$('#transcribe-probe').addEventListener('click', onTranscribeProbe);
+refreshTranscribeButton();
 
 wirePreview();
 syncStyleControls(createDefaultStyle());

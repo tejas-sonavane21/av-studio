@@ -249,3 +249,19 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 .hint { font-size: 11px; color: var(--text-2); }
 .templates-panel .hint { margin-top: 10px; }
 
+/* A transcription is minutes long, so the bar is not decoration: it is the only thing that
+   distinguishes "working" from "wedged". */
+.transcribe-panel .progress {
+  margin-top: 12px; height: 6px; border-radius: 999px;
+  background: var(--bg-2); border: 1px solid var(--border); overflow: hidden;
+}
+.transcribe-panel .progress-bar {
+  height: 100%; width: 0%; background: var(--accent);
+  transition: width 0.25s ease-out;
+}
+.transcribe-panel .progress-bar.busy { background: var(--accent-dim); }
+.transcribe-panel .progress-bar.failed { background: #b91c1c; }
+.transcribe-panel #transcribe-note { margin-top: 8px; white-space: pre-wrap; font-family: var(--font-mono); }
+.transcribe-panel input[type='text'] { width: 100%; }
+.transcribe-panel .style-bar .field-inline input[type='text'] { width: auto; }
+
