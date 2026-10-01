@@ -253,7 +253,9 @@ async function onTranscribeProbe() {
         `aligners: ${aligners.join(', ') || 'none'}   validators: ${validators.join(', ') || 'none'}`,
     );
   } catch (err) {
-    badge.textContent = 'server unreachable';
+    // "Busy" and "absent" are different problems with different fixes, so the badge must not
+    // flatten them: the first click after the server starts can genuinely be a slow one.
+    badge.textContent = err.timedOut ? 'server busy — retry' : 'server unreachable';
     log(`ERROR ${err.toString()}`);
     setTranscribeNote(err.toString());
   }

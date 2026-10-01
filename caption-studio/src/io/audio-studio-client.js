@@ -27,6 +27,17 @@
 
 export const DEFAULT_BASE_URL = 'http://127.0.0.1:8756';
 
+/**
+ * How long the health probe waits before giving up.
+ *
+ * Not a tuned number — a *measured* one. Answering `/health` means asking every backend whether it
+ * is installed, which means importing its dependencies, and on this machine a cold `import torch`
+ * plus `import transformers` costs **6.3 s**. The server now resolves that in the background at
+ * startup, but the client has to survive a cold one too, and four seconds (the first attempt at this)
+ * guaranteed the very first click on a perfectly healthy server reported it as missing.
+ */
+export const HEALTH_TIMEOUT_MS = 20000;
+
 /** The request the server actually understands, and what each field means. */
 export const TRANSCRIBE_OPTIONS = {
   engine: 'transcription backend (whisper, fake)',
@@ -99,6 +110,20 @@ async function readError(response) {
 }
 
 function unreachable(baseUrl, cause) {
+  if (cause?.name === 'AbortError') {
+    // A server that is *busy* is not a server that is *absent*, and conflating the two sends the
+    // user off to start something that is already running. This distinction was added after the
+    // first `Check server` click on a healthy server reported it as unreachable: the probe had been
+    // abandoned at 4 s while the payload was still importing torch.
+    const error = new AudioStudioError(`audio-studio at ${baseUrl} did not answer in time`, {
+      hint:
+        'it is running but still busy — a cold start imports torch and transformers (a few seconds), ' +
+        'and a transcription job saturates the CPU. Wait a moment and press Check server again.',
+      detail: cause,
+    });
+    error.timedOut = true;
+    return error;
+  }
   return new AudioStudioError(`cannot reach audio-studio at ${baseUrl}`, {
     hint:
       'start it with:  python -m audio_studio serve   (in the audio-studio folder, inside .venv)',
@@ -123,7 +148,7 @@ async function withTimeout(fetchImpl, url, init, timeoutMs) {
  * Worth doing before a job rather than after one: `{aligners: [{name: 'wav2vec', available: false}]}`
  * is the difference between "alignment is not installed here" and a job that fails a minute later.
  */
-export async function health(baseUrl = DEFAULT_BASE_URL, { fetchImpl = fetch, timeoutMs = 4000 } = {}) {
+export async function health(baseUrl = DEFAULT_BASE_URL, { fetchImpl = fetch, timeoutMs = HEALTH_TIMEOUT_MS } = {}) {
   const base = normalizeBaseUrl(baseUrl);
   let response;
   try {

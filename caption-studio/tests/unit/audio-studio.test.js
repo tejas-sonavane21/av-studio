@@ -20,6 +20,7 @@ import path from 'node:path';
 import {
   AudioStudioError,
   DEFAULT_BASE_URL,
+  HEALTH_TIMEOUT_MS,
   buildQuery,
   describeStudioAudit,
   fetchArtifact,
@@ -127,6 +128,33 @@ test('a server that is not running says exactly that, and how to start it', asyn
       return true;
     },
   );
+});
+
+test('a server that is busy is not reported as a server that is missing', async () => {
+  /**
+   * The first `Check server` click on a perfectly healthy server used to report it as unreachable:
+   * the probe was abandoned at 4 s while the payload was still importing torch. "Busy" and "absent"
+   * have different fixes, so they must not produce the same message.
+   */
+  const aborted = Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' });
+  const fetchImpl = fakeFetch([['/health', { threw: aborted }]]);
+
+  await assert.rejects(
+    () => health('http://127.0.0.1:8756', { fetchImpl, timeoutMs: 50 }),
+    (error) => {
+      assert.match(error.message, /did not answer in time/);
+      assert.doesNotMatch(error.message, /cannot reach/);
+      assert.equal(error.timedOut, true);
+      assert.match(error.hint, /busy/);
+      return true;
+    },
+  );
+});
+
+test('the health probe allows for a cold import rather than the four seconds it first allowed', () => {
+  // Measured on the machine this was built on: a cold `import torch` plus `import transformers`
+  // costs 6.3 s, and the original 4000 ms deadline failed the very first click every single run.
+  assert.ok(HEALTH_TIMEOUT_MS > 6000, `the probe must outlast a cold import, got ${HEALTH_TIMEOUT_MS}ms`);
 });
 
 test('a refusal from the server is surfaced with the server’s own words', async () => {
