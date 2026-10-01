@@ -43,6 +43,7 @@ so this folder is self-contained.
 | Drag to place, snapping, keyboard nudge, per-block position | ✅ `src/editor/canvas-overlay.js`, `src/render/placement.js` |
 | Caption text editing — re-type a line, or fix a single word | ✅ `src/model/edit.js`, `src/main.js` |
 | Split a long caption in two / join it back (the line breaks) | ✅ `src/model/edit.js`, `src/main.js` |
+| Transcribe on the sibling studio (upload → poll → import) | ✅ `src/io/audio-studio-client.js` |
 | Timeline / export | ⏳ next phases |
 
 ## The renderer
@@ -181,6 +182,33 @@ keyword emphasis preserved, TRUTH spelling wins (`crush → catch`, `king → ki
 `soul → toll`), plus 30 punctuation and 21 case corrections, every one of them listed and auditable.
 The 22-second instrumental hole is reported as a timing gap and **not** stretched across.
 
+## The audio-studio bridge
+
+This studio corrects an AI transcript against a trusted subtitle file, and it is good at it — but it
+**inherits its word timings from Veed**, and a correction engine cannot repair a number it was handed.
+A split cuts at the midpoint of the silence between two words, so when the words themselves are badly
+timed, every split, join and reveal inherits the error.
+
+Its sibling [`audio-studio`](../audio-studio) measures the timings from the audio instead. The panel
+at the top of the page is where the two meet:
+
+1. **Check server** — `GET /health` reports the version and what can actually run here (which engines,
+   aligners and validators are installed), so a missing aligner is a fact up front rather than a
+   failure a minute into a job.
+2. **Transcribe** — the recording's bytes go over the wire as the request body (a browser cannot read
+   a path off the user's disk — deliberately), the job is polled with live progress, and the
+   Veed-shaped answer is handed to the **same `importJSON`** a file from disk goes through. Nothing
+   downstream changes: the alignment, the corrections and the editing all work exactly as before, on
+   better numbers.
+3. **The provenance is shown, not swallowed** — which model transcribed, which aligner re-timed it,
+   its confidence, how far the words moved, the validation ledger, and every warning the other studio
+   attached. None of that is needed to *render* a caption; it is needed to *trust* one.
+
+The transport lives in `src/io/audio-studio-client.js`, which holds no document, no state and no DOM:
+it is a function from (base URL, file, options) to (job, Veed JSON), with `fetch` injectable so the
+whole flow is testable without a Python process. The commonest failure by far is "the server is not
+running", so every error carries the command to start it.
+
 ## Run it (Windows 11)
 
 ```bash
@@ -202,8 +230,9 @@ with the server staying up (`/%zz` gives `400`).
 
 ```bash
 cd caption-studio
-npm test          # node --test "tests/unit/*.test.js" → 282 tests
-npm run ui        # headless-Chrome smoke test of the editor page (62 checks)
+npm test          # node --test "tests/unit/*.test.js" → 302 tests
+npm run ui        # headless-Chrome smoke test of the editor page (87 checks)
+npm run e2e       # the two studios on the real song — needs the Python venv (see below)
 ```
 
 All test suites are pure Node — no browser, no dependencies. The integration test runs against the
@@ -216,7 +245,7 @@ calculated by hand rather than mirrored from the implementation.
 
 ```bash
 cd caption-studio
-npm run ui        # → headless Chrome over CDP, 62 checks, exits non-zero on failure
+npm run ui        # → headless Chrome over CDP, 87 checks, exits non-zero on failure
 ```
 
 `src/main.js` is the one module no unit test can reach — it exists only as browser side effects on
@@ -232,6 +261,35 @@ any change to the editor wiring — the two bugs it caught were both invisible i
   `font loading` is async and the *last* application to finish won instead of the last one asked for;
 - `.overlay-canvas` lost to `.stage canvas` on CSS specificity, so the overlay became a second,
   relative grid item *below* the preview. It looked harmless and received no pointer events at all.
+- the harness once allowed 1.2 s for the demo document, which needs **~1.3 s** to lay out because
+  applying a document awaits font loading — so the whole suite reported "the demo document did not
+  load" on a build where it loaded perfectly. Two rules came out of that: a wait that gates an async
+  render is now a *condition* (`waitFor`) rather than a fixed sleep, and a fact about the harness
+  rather than the page has its own `assert()` — `check()` evaluates its expression **inside the
+  page**, so passing it a value instead of an expression silently sends that value as JavaScript
+  (it did: the string `recording.wav` reached the browser as an expression and threw).
+
+### The real end-to-end (the two studios, on the real song)
+
+```bash
+cd caption-studio
+npm run e2e                    # transcribe only            (~80 s)
+npm run e2e -- --align wav2vec # plus forced alignment       (~4 min)
+```
+
+`npm run ui` covers the browser wiring against a *stand-in* server, which is the right way to test a
+page — and it leaves one gap: nothing there proves the real Python studio emits what this studio
+reads. This closes it by removing the stand-in entirely. It starts `audio-studio`'s real HTTP server,
+uploads the real 182.5 s track with **this project's real client module**, and feeds the answer to
+**this project's real importer**. Nothing is stubbed and no fixture is replayed; every number it
+prints was measured on this machine a second earlier.
+
+Its last assertion is the one that matters. The reference `spidy.srt` supplies the *spelling*; the
+measurement supplies the *clock*. The two really do disagree about when the opening line starts — the
+cue opens at **12.00 s**, the measured onset is **13.18 s** — and after the quality correction the
+editor uses **13.40 s**. The measurement wins, which is the exact inversion of the drift this pair of
+studios exists to remove. It needs the sibling's virtualenv (`pip install -e ".[asr]"`, plus
+`".[align]"` for the alignment leg) and skips the correction leg when the reference data is absent.
 
 ### Verify the render against a reference
 

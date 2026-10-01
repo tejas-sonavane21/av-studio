@@ -8,14 +8,17 @@ style, placement, the render — this studio owns the *audio* timeline: what was
 said, **when exactly each word was said**, where the silence is, and whether the
 transcript can be trusted.
 
-> **Status: Phases A, B and E complete and verified.** The transcript model, the
-> four emitters (native JSON, Veed-compatible master JSON, SRT, VTT), the engine
-> registry with a deterministic offline backend, the CLI, **real local
-> transcription via `faster-whisper`**, and the **local HTTP job server** are
-> built. The backend-free layers are covered by **110 tests that pass with *zero*
-> third-party packages installed**, so the pure layers can never be blocked
-> behind a model download. Forced alignment and LLM validation are the next
-> phases.
+> **Status: Phases A–E complete, and verified against the real song.** The
+> transcript model, the four emitters (native JSON, Veed-compatible master JSON,
+> SRT, VTT), the engine registry with a deterministic offline backend, the CLI,
+> **real local transcription via `faster-whisper`**, the **local HTTP job
+> server**, **forced alignment** and the **validation layer with its corrections
+> ledger** are all built. **247 tests pass with *zero* third-party packages
+> installed**, so the pure layers can never be blocked behind a model download —
+> and the whole bridge is verified end-to-end against the real 182 s track by
+> [`caption-studio/tools/e2e-audio-studio.mjs`](../caption-studio/tools/e2e-audio-studio.mjs),
+> which runs the real server and imports the answer through caption-studio's own
+> client and importer.
 
 ## Why this exists
 
@@ -168,6 +171,30 @@ const veedMaster = await fetch(`http://127.0.0.1:8756/jobs/${jobId}/veed`).then(
 Responses carry `Access-Control-Allow-Origin: *` and answer `OPTIONS`, because
 the caller is a different origin and the browser will preflight without them.
 
+## The fix, measured on the real song
+
+Every number below came out of
+[`caption-studio/tools/e2e-audio-studio.mjs`](../caption-studio/tools/e2e-audio-studio.mjs),
+which starts this studio's real HTTP server, uploads the real 182.5 s track with
+caption-studio's real client module, and feeds the answer to caption-studio's real
+importer. 4 CPU cores, no GPU.
+
+| Step | Result |
+|---|---|
+| `--preset balanced` (`small`, int8) | 41 segments, 250 words, **82 s** wall (~2.2× realtime) |
+| `--align wav2vec` added | **239 s** total, first run of the acoustic model |
+| alignment coverage | 39/41 segments, mean confidence **0.585**, mean **onset shift 0.234 s** |
+| guards that fired | 8 words pulled back inside their own segment; 2 segments slid 0.06 s — and both were *reported* |
+| import fidelity | 250/250 words, every timing identical to < 1 µs, `validateDocument()` clean |
+
+Why the alignment matters is one comparison from that run. The opening line
+(sung *"Just an ordinary boy / Lost in the crowd"*) is **measured** at 13.18 s;
+the reference `spidy.srt` cue opens at 12.00 s; and after the quality correction
+the editor ends up using **13.40 s**. The measurement wins. That is the exact
+inversion of what used to happen when caption-studio inherited its word timings
+from Veed — where every word span was 0.08 s long and started up to 2 s late, so
+the midpoint a split cuts on was never on the audio.
+
 ## What works today
 
 | Area | Status |
@@ -180,11 +207,16 @@ the caller is a different origin and the browser will preflight without them.
 | SRT / VTT export, including word-level cues | ✅ `audio_studio/emit/srt.py`, `emit/vtt.py` |
 | Engine registry, lazy imports, no-dependency base install | ✅ `audio_studio/engines/base.py` |
 | Deterministic offline backend (`--engine fake`) | ✅ `audio_studio/engines/fake.py` |
-| CLI: `transcribe` / `emit` / `doctor` / `version` | ✅ `audio_studio/cli.py` |
+| CLI: `transcribe` / `emit` / `align` / `validate` / `doctor` / `serve` | ✅ `audio_studio/cli.py` |
 | Local Whisper transcription (`faster-whisper`) | ✅ `audio_studio/engines/whisper.py` |
-| Forced alignment + re-timing | ⏳ Phase C |
-| LLM transcript validation + ledger | ⏳ Phase D |
 | HTTP server (job queue) for the browser | ✅ `audio_studio/server.py` |
+| **Forced alignment** (`wav2vec2` CTC, 20 ms frames) | ✅ `audio_studio/align/wav2vec.py` |
+| Pure CTC core — no torch, no numpy, hand-testable | ✅ `audio_studio/align/ctc.py` |
+| Guarded re-timing (confidence / shift / window / shape) | ✅ `audio_studio/align/apply.py` |
+| Offline aligner (`--align fake`: no model, no decoder) | ✅ `audio_studio/align/fake.py` |
+| **Validation + corrections ledger** (offline `rules`) | ✅ `audio_studio/validate/rules.py`, `ledger.py` |
+| Hosted validation (`google-genai` / OpenRouter) | ✅ `audio_studio/validate/llm.py` |
+| Pass order: `transcribe → align → validate → emit` | ✅ `audio_studio/pipeline.py` |
 
 ## Install (Windows 11 · Git Bash)
 
@@ -216,7 +248,28 @@ python -m audio_studio transcribe song.mp3          # → out/song.{speech,veed}
 python -m audio_studio transcribe clip.mp4 --preset balanced --language en
 python -m audio_studio transcribe song.mp3 --emit veed --emphasis none --json
 python -m audio_studio emit out/song.speech.json --emit srt,vtt   # re-emit, no re-transcribe
+
+python -m audio_studio transcribe song.mp3 --align wav2vec            # re-time every word from the audio
+python -m audio_studio transcribe song.mp3 --align wav2vec --validate rules
+python -m audio_studio align out/song.speech.json --audio song.mp3    # re-time a saved transcript
+python -m audio_studio validate out/song.speech.json --validate llm   # needs a key
 ```
+
+`--align` and `--validate` are both **off** unless asked for: one downloads a
+360 MB acoustic model, the other can spend money. A default that did either would
+be worse than no default.
+
+The two passes have different authorities, and the split is the whole design:
+
+| | authority | may change |
+|---|---|---|
+| `align` (`wav2vec2` CTC) | **timing** | `start` / `end`, and nothing else |
+| `validate` (`rules`, `llm`) | **spelling** | `text`, and nothing else |
+
+Neither can do the other's job. Alignment never rewords a lyric — a pass that
+could would leave nothing to check it against — and a correction that would
+insert, delete or split a word is *refused and recorded*, because that changes the
+word count and therefore the timing of everything after it.
 
 Progress goes to **stderr**, so `--json` on stdout stays machine-parseable.
 `--engine fake` runs the whole pipeline with a deterministic synthetic
@@ -233,7 +286,7 @@ many CPU cores; a 4-core machine will not finish it in a sitting. VAD is
 ```bash
 cd audio-studio
 source .venv/Scripts/activate
-python -m pytest          # 110 tests, no model, no network, no browser
+python -m pytest          # 247 tests, no model, no network, no browser
 ```
 
 The suite is deliberately dependency-free: it runs on `pip install -e ".[dev]"`
@@ -242,6 +295,31 @@ not get run. Where a real audio file is needed, `tests/conftest.py` writes a
 valid 16-bit PCM WAV with the standard library `wave` module. The *model*
 choices above are pinned by tests too, so a future "remember to turn VAD on"
 regression has to argue with the numbers.
+
+What the newer tests are built around:
+
+- **The guards, not the model.** `tests/test_align.py` drives `apply_alignment`
+  with hand-written spans, so every branch is reachable in milliseconds:
+  a segment under the confidence floor, a word that would have to travel 17 s,
+  a span list of the wrong length, an unalignable word being interpolated, and
+  the window rule that stops a leak compounding into a lag. The last one
+  documents a real regression: an earlier version of `apply.py` paired the
+  aligned spans against the front of the word list, so a skipped word slid every
+  later span onto the wrong word and a 17 s misplacement passed a 1 s guard.
+  There is now a test with exactly that shape.
+- **The ledger's one promise.** `tests/test_validate.py` asserts that applying a
+  full ledger to an aligned transcript leaves *every timing byte-identical*,
+  that a proposal quoting the wrong text is `stale`, that a replacement with a
+  space in it is `unsafe`, and that two proposals for one word are a patch
+  series rather than a tally.
+- **The CTC core with no torch.** `tests/test_ctc.py` checks the trellis on
+  hand-written emissions: repeated labels, ties broken the same way every time,
+  the trailing-blank case, and the refusal to allocate an absurd window.
+- **The hosted path over real HTTP.** The Gemini free tier was returning 503 for
+  an entire session while this was written, so `tests/test_llm_transport.py`
+  stands up a **local provider** and points the *real* `google-genai` SDK at it.
+  The SDK's own request/response path is therefore covered without a network, a
+  key, or a good day at the provider.
 
 Two tests exist specifically to lock the *interfaces* rather than the details:
 
@@ -269,6 +347,10 @@ Two tests exist specifically to lock the *interfaces* rather than the details:
    the same bytes are then a real disagreement.
 4. **Never touch the system Python.** `.venv` or nothing.
 5. **Everything git-tracked.** No untracked working copies to lose.
+6. **One authority per property.** The aligner owns *when*; the validator owns
+   *what*. Neither may write the other's field, and both are tested on it —
+   because the single worst outcome for this suite is a "fix" that quietly
+   rewords a lyric or moves a caption it was only asked to spell-check.
 
 ## Document map
 
@@ -278,6 +360,9 @@ Two tests exist specifically to lock the *interfaces* rather than the details:
 | `audio_studio/artifact.py` | Load / save `*.speech.json` |
 | `audio_studio/emit/` | `native`, `veed` (the caption-studio bridge), `srt`, `vtt` |
 | `audio_studio/engines/` | Backend interface + registry; `whisper`, `fake` |
+| `audio_studio/align/` | `ctc` (pure trellis), `wav2vec`, `fake`, `apply` (the guards) |
+| `audio_studio/validate/` | `rules`, `llm`, `ledger` (the corrections audit trail) |
+| `audio_studio/pipeline.py` | The order the optional passes run in, in one place |
 | `audio_studio/media.py` | Decoding, hashing, duration probing |
 | `audio_studio/config.py` | Presets and defaults, tuned for CPU-only |
 | `audio_studio/cli.py` | The command line |
