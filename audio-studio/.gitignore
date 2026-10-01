@@ -22,3 +22,8 @@ models/
 out/
 *.decoded.wav
 *.decoded.mp3
+
+# The HTTP server's job store (its default --out). One folder per job, and the
+# folder holds a copy of the media that was *uploaded* to it — so an unignored
+# jobs/ is one `git add -A` away from committing a 50 MB video.
+jobs/
