@@ -11,6 +11,7 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +29,7 @@ for (let i = 2; i < process.argv.length; i++) {
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const children = [];
+let stubState = { polls: 0, uploadBytes: 0, uploads: [] };
 
 function launch(command, argv, options = {}) {
   const child = spawn(command, argv, { stdio: 'ignore', ...options });
@@ -131,12 +133,187 @@ async function evaluate(cdp, expression) {
 }
 
 const failures = [];
+
+/**
+ * Assert something about the *harness*, not the page.
+ *
+ * `check()` evaluates its expression inside the page, so it cannot see the stand-in server's own
+ * counters — and passing a value instead of an expression to it does not fail loudly, it evaluates
+ * the value as JavaScript. (It did: `"recording.wav"` reached the page as an expression and threw
+ * `ReferenceError`.) Anything the browser cannot observe belongs here.
+ */
+function assert(label, ok, detail = '') {
+  console.log(`${ok ? '  ✔' : '  ✖'} ${label}${ok ? '' : ` — ${detail}`}`);
+  if (!ok) failures.push(label);
+  return ok;
+}
+
 async function check(cdp, label, expression, predicate, describe) {
   const value = await evaluate(cdp, expression);
   const ok = predicate ? predicate(value) : Boolean(value);
   console.log(`${ok ? '  ✔' : '  ✖'} ${label}${ok ? '' : ` — got ${JSON.stringify(value)}${describe ? `, wanted ${describe}` : ''}`}`);
   if (!ok) failures.push(label);
   return value;
+}
+
+/**
+ * Wait until the page satisfies a condition, then return the value that satisfied it.
+ *
+ * A `delay()` before a check is a guess about how long the page needs, and a guess that is too
+ * short is a *false failure* — the worst kind, because it teaches the reader to distrust the run.
+ * Both things this harness waits on longest depend on font loading rather than on the code:
+ * laying out the demo document was measured at ~1.3 s while the check allowed 1.2 s, so the whole
+ * suite reported "the demo document did not load" on a build where it loaded fine. Every wait
+ * below is therefore a condition, so what is reported is whether it *ever* happened.
+ */
+async function waitFor(
+  cdp,
+  expression,
+  predicate = (v) => Boolean(v),
+  { attempts = 60, intervalMs = 100, describe = expression } = {},
+) {
+  let value;
+  for (let i = 0; i < attempts; i++) {
+    value = await evaluate(cdp, expression);
+    if (predicate(value)) return value;
+    await delay(intervalMs);
+  }
+  throw new Error(`waited ${((attempts * intervalMs) / 1000).toFixed(1)}s for ${describe}, last value ${JSON.stringify(value)}`);
+}
+
+/**
+ * A stand-in for the Python studio's HTTP surface.
+ *
+ * The wiring this exercises is browser-side, and the piece most likely to break is the part no unit
+ * test can reach: a real `fetch` from a real page, across origins, with a preflight, sending a
+ * `File` as the body, then polling. Stubbing the *provider* here is the point — the client, the
+ * importer and the editor are all the real ones.
+ */
+function startStubStudio() {
+  const veed = {
+    version: '3.0',
+    generator: 'audio-studio/stub',
+    engine: { name: 'faster-whisper', model: 'small', preset: 'balanced' },
+    projectId: 'stub',
+    canvas: { width: 1280, height: 720 },
+    style: { font: 'Inter', fontSize: 0.036, posX: 0.772, posY: 0.848, align: 'center' },
+    subtitles: [
+      {
+        start: 12.0,
+        end: 16.0,
+        words: [
+          { text: 'Just', s: 12.0, e: 12.6, p: 0.71 },
+          { text: 'an', s: 12.7, e: 12.9, p: 0.55 },
+          // deliberately wrong, so the TRUTH subtitle below has something to correct
+          { text: 'ordnary', s: 13.0, e: 13.8, p: 0.62 },
+          { text: 'boy', s: 14.0, e: 14.6, p: 0.8 },
+        ],
+        styles: [],
+      },
+      {
+        start: 16.0,
+        end: 20.0,
+        words: [
+          { text: 'lost', s: 16.0, e: 16.5, p: 0.7 },
+          { text: 'in', s: 16.6, e: 16.75, p: 0.6 },
+          { text: 'the', s: 16.8, e: 17.0, p: 0.9 },
+          { text: 'crowd', s: 17.2, e: 18.0, p: 0.75 },
+        ],
+        styles: [],
+      },
+    ],
+    audioStudio: {
+      alignment: {
+        aligner: 'wav2vec',
+        backend: 'wav2vec2',
+        model: 'facebook/wav2vec2-base-960h',
+        segments: 2,
+        segmentsAligned: 2,
+        wordsAligned: 8,
+        meanConfidence: 0.57,
+        meanShift: 0.21,
+        wordsClamped: 0,
+      },
+      validation: { passes: [{ validator: 'rules', corrections: 0, applied: 0, outcomes: {} }] },
+      corrections: [],
+      warnings: ['2 of 2 segments were aligned with a synthetic stand-in'],
+      language: 'en',
+      duration: 20.0,
+    },
+  };
+
+  const state = { polls: 0, uploadBytes: 0, uploads: [], requests: [] };
+  const server = createServer((req, res) => {
+    const send = (status, body, type = 'application/json; charset=utf-8') => {
+      const payload = typeof body === 'string' ? body : JSON.stringify(body);
+      res.writeHead(status, {
+        'content-type': type,
+        'content-length': String(Buffer.byteLength(payload)),
+        // the page is on a different origin, exactly as it is in real life
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
+        'access-control-allow-headers': 'Content-Type',
+      });
+      res.end(payload);
+    };
+
+    const url = new URL(req.url, 'http://127.0.0.1');
+    state.requests.push(`${req.method} ${url.pathname}`);
+
+    if (req.method === 'OPTIONS') return send(204, '');
+
+    if (url.pathname === '/health') {
+      return send(200, {
+        ok: true,
+        version: '9.9.9',
+        engines: [{ name: 'whisper', backend: 'faster-whisper', available: true, reason: 'stand-in' }],
+        aligners: [{ name: 'wav2vec', backend: 'wav2vec2', available: true, reason: 'stand-in' }],
+        validators: [{ name: 'rules', backend: 'rules', available: true, reason: 'stand-in' }],
+        presets: ['fast', 'balanced', 'accurate'],
+        defaultPreset: 'balanced',
+        emitKinds: ['json', 'veed', 'srt', 'vtt'],
+      });
+    }
+
+    if (url.pathname === '/transcribe/upload') {
+      const chunks = [];
+      req.on('data', (chunk) => chunks.push(chunk));
+      req.on('end', () => {
+        state.uploadBytes = Buffer.concat(chunks).length;
+        state.uploads.push({ name: url.searchParams.get('name'), query: url.search });
+        send(202, { jobId: 'stub-job', status: 'queued', progress: 0, align: url.searchParams.get('align') });
+      });
+      return undefined;
+    }
+
+    if (url.pathname === '/jobs/stub-job') {
+      state.polls += 1;
+      if (state.polls === 1) {
+        return send(200, { jobId: 'stub-job', status: 'running', progress: 0.5, message: 'halfway' });
+      }
+      return send(200, {
+        jobId: 'stub-job',
+        status: 'done',
+        progress: 1,
+        message: 'done',
+        seconds: 1.25,
+        files: { veed: 'stub.veed.json' },
+        urls: { veed: '/jobs/stub-job/veed' },
+        summary: { segments: 2, words: 8, seconds: 1.25, warnings: ['a stand-in wrote this'] },
+      });
+    }
+
+    if (url.pathname === '/jobs/stub-job/veed') return send(200, veed);
+
+    return send(404, { error: `no route for ${url.pathname}` });
+  });
+
+  return new Promise((resolveStart) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      resolveStart({ port, state, close: () => server.close() });
+    });
+  });
 }
 
 async function main() {
@@ -224,7 +401,9 @@ async function main() {
 
   console.log('\n■ demo document');
   await evaluate(cdp, 'document.querySelector("#demo-btn").click()');
-  await delay(1200);
+  await waitFor(cdp, 'document.querySelector("#stage").className', (v) => String(v).includes('has-content'), {
+    describe: 'the demo document to be laid out',
+  });
   await check(cdp, 'the stage reports content', 'document.querySelector("#stage").className', (v) => String(v).includes('has-content'));
   await check(
     cdp,
@@ -257,7 +436,9 @@ async function main() {
 
   console.log('\n■ templates');
   await evaluate(cdp, '[...document.querySelectorAll("#templates .tile")].find(t=>t.dataset.id==="veed-karaoke").click()');
-  await delay(800);
+  await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => String(v).includes('Karaoke'), {
+    describe: 'the karaoke template to be applied',
+  });
   await check(
     cdp,
     'clicking a tile applies it',
@@ -274,7 +455,9 @@ async function main() {
   // A burst of clicks is the re-entrancy case: every `useTemplate` awaits font loading, so without a
   // guard the last one to *finish* would own the UI rather than the last one to be asked for.
   await evaluate(cdp, '(()=>{for(const t of [...document.querySelectorAll("#templates .tile")])t.click();})()');
-  await delay(2000);
+  await waitFor(cdp, 'document.querySelector("#templates .tile.active").dataset.id', (v) => v === 'shorts-impact', {
+    describe: 'the burst of template clicks to settle on the last one asked for',
+  });
   await check(cdp, 'a burst of template clicks settles on the last one asked for', 'document.querySelector("#templates .tile.active").dataset.id', (v) => v === 'shorts-impact');
   await check(
     cdp,
@@ -292,7 +475,9 @@ async function main() {
 
   console.log('\n■ per-block overrides');
   await evaluate(cdp, '[...document.querySelectorAll("#templates .tile")].find(t=>t.dataset.id==="veed-auto-highlight").click()');
-  await delay(600);
+  await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => String(v).includes('Veed'), {
+    describe: 'the parity template to be applied again',
+  });
   const fillIndex = await evaluate(
     cdp,
     '[...document.querySelectorAll("#block-inspector .field-inline")].findIndex(f=>f.textContent.trim().startsWith("Fill"))',
@@ -385,11 +570,13 @@ async function main() {
     '(()=>{document.querySelector("#reset-block").click();return document.querySelector("#block-status").textContent})()',
     (v) => String(v).includes('inherit'),
   );
-  await check(
-    cdp,
-    'the parity reset button restores the verified look',
-    '(()=>{document.querySelector("#reset-style").click();return true})()',
-  );
+  await evaluate(cdp, 'document.querySelector("#reset-style").click()');
+  // Applying a template awaits font loading, so the status line is read as a
+  // condition rather than after a guessed pause.
+  await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => String(v).includes('Veed'), {
+    describe: 'the parity reset to be applied',
+  });
+  await check(cdp, 'the parity reset button restores the verified look', 'document.querySelector("#template-status").textContent', (v) => String(v).includes('Veed'));
 
   console.log('\n■ document style edits');
   await check(
@@ -402,7 +589,9 @@ async function main() {
     cdp,
     '(()=>{const i=document.querySelector("#font-size");i.value="0.05";i.dispatchEvent(new Event("input"));})()',
   );
-  await delay(800);
+  await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => String(v).includes('edited'), {
+    describe: 'the style-bar edit to mark the template edited',
+  });
   await check(
     cdp,
     'a style-bar edit marks the template edited, without losing its name',
@@ -410,7 +599,9 @@ async function main() {
     (v) => String(v).includes('Veed') && String(v).includes('edited'),
   );
   await evaluate(cdp, 'document.querySelector("#reset-style").click()');
-  await delay(800);
+  await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => !String(v).includes('edited'), {
+    describe: 'the reset to clear the edited flag',
+  });
   await check(
     cdp,
     'and resetting restores both the look and the unedited flag',
@@ -667,6 +858,202 @@ async function main() {
     'document.querySelector("#join-previous").disabled',
     (v) => v === true,
   );
+
+  console.log('\n■ transcribe from the audio-studio server');
+  // The one thing no unit test can reach: a real page, a real fetch, a cross-origin preflight, a
+  // File as the request body, and the polling that follows. The server is a stand-in; everything
+  // on this side of the wire is the real client, importer and editor.
+  const stub = await startStubStudio();
+  stubState = stub.state;
+  const stubPort = stub.port;
+
+  await evaluate(cdp, `(()=>{const i=document.querySelector('#transcribe-url');i.value='http://127.0.0.1:${stubPort}';return i.value})()`);
+  await check(
+    cdp,
+    '“check server” reaches the server and reports its version',
+    '(()=>{document.querySelector("#transcribe-probe").click();return true})()',
+  );
+  await delay(700);
+  await check(
+    cdp,
+    'the badge names the version the server reported',
+    'document.querySelector("#transcribe-status").textContent',
+    (v) => v === 'audio-studio 9.9.9',
+  );
+  await check(
+    cdp,
+    'and the log carries what the server can actually do',
+    'document.querySelector("#log").textContent.includes("audio-studio 9.9.9")',
+    (v) => v === true,
+  );
+
+  // A synthetic WAV again: the smoke test must not depend on the (gitignored) reference workspace.
+  const pickRecording = `(() => {
+    const rate = 8000, samples = rate * 0.2;
+    const bytes = new Uint8Array(44 + samples * 2);
+    const dv = new DataView(bytes.buffer);
+    const ascii = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+    ascii(0, 'RIFF'); dv.setUint32(4, 36 + samples * 2, true); ascii(8, 'WAVE');
+    ascii(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+    dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+    ascii(36, 'data'); dv.setUint32(40, samples * 2, true);
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'recording.wav', { type: 'audio/wav' }));
+    const input = document.querySelector('#transcribe-in');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change'));
+    return input.files.length;
+  })()`;
+  await check(cdp, 'a recording can be chosen', pickRecording, (v) => v === 1);
+  await check(
+    cdp,
+    'and that alone enables the button',
+    'document.querySelector("#transcribe-btn").disabled',
+    (v) => v === false,
+  );
+
+  await evaluate(cdp, 'document.querySelector("#transcribe-btn").click()');
+  await check(
+    cdp,
+    'the button reports progress while it waits',
+    '(()=>{const b=document.querySelector("#transcribe-bar");return b.classList.contains("busy")||b.style.width!==""})()',
+    (v) => v === true,
+  );
+  // The stand-in answers the first poll with "running" and the second with "done", so waiting on
+  // the page's own status exercises the real polling loop rather than a fixed sleep.
+  await waitFor(cdp, 'document.querySelector("#transcribe-status").textContent', (v) => v === 'done', {
+    attempts: 80,
+    describe: 'the transcribe job to finish polling',
+  });
+
+  assert(
+    'the recording really was uploaded as the request body',
+    stubState.uploadBytes > 40,
+    `only ${stubState.uploadBytes} byte(s) arrived`,
+  );
+  assert(
+    'with its name in the query string',
+    stubState.uploads[0]?.name === 'recording.wav',
+    `got ${JSON.stringify(stubState.uploads[0]?.name)}`,
+  );
+  assert(
+    'and the options the user chose rode along',
+    String(stubState.uploads[0]?.query ?? '').includes('align=wav2vec'),
+    `query was ${JSON.stringify(stubState.uploads[0]?.query)}`,
+  );
+  assert('the job was polled to completion', stubState.polls >= 2, `polled ${stubState.polls} time(s)`);
+  assert('the file crossed the wire exactly once', stubState.uploads.length === 1, `${stubState.uploads.length} uploads`);
+  await check(
+    cdp,
+    'the app says it is done',
+    'document.querySelector("#transcribe-status").textContent',
+    (v) => v === 'done',
+  );
+  await check(
+    cdp,
+    'the progress bar filled',
+    'document.querySelector("#transcribe-bar").style.width',
+    (v) => v === '100%',
+  );
+
+  console.log('\n■ the provenance the other studio wrote');
+  // Nothing here is needed to *render* a caption — it is what a person needs to trust one, so it is
+  // shown rather than swallowed.
+  await check(
+    cdp,
+    'the audit lines are shown beside the progress bar',
+    'document.querySelector("#transcribe-note").textContent',
+    (v) => String(v).includes('alignment wav2vec'),
+  );
+  await check(
+    cdp,
+    'and they name the engine, the segments and the shift',
+    'document.querySelector("#transcribe-note").textContent',
+    (v) => String(v).includes('faster-whisper/small') && String(v).includes('2/2 segments') && String(v).includes('mean shift 0.21s'),
+  );
+  await check(
+    cdp,
+    'the warnings the other studio attached are carried through',
+    'document.querySelector("#log").textContent',
+    (v) => String(v).includes('a synthetic stand-in'),
+  );
+  await check(
+    cdp,
+    'the track is loaded into the preview, so the captions can be checked against what was sung',
+    'document.querySelector("#audio-tag").textContent',
+    (v) => v === 'recording.wav',
+  );
+
+  console.log('\n■ and the timings survive the rest of the pipeline');
+  // The AI source is a *source*: it reaches the editor through the quality correction, exactly as a
+  // file from disk does. `#align-btn` enabling is itself the proof that the transcribe really left
+  // an AI document in the store, because that is the only thing that unlocks it.
+  const truth = `1\n00:00:12,000 --> 00:00:16,000\nJust an ordinary boy,\n\n2\n00:00:16,000 --> 00:00:20,000\nLost in the crowd.\n`;
+  await evaluate(
+    cdp,
+    `(()=>{const dt=new DataTransfer();dt.items.add(new File([${JSON.stringify(truth)}], 'truth.srt', {type:'text/plain'}));const i=document.querySelector('#truth-in');i.files=dt.files;i.dispatchEvent(new Event('change'));return i.files.length})()`,
+  );
+  await delay(400);
+  await check(
+    cdp,
+    'the transcribed AI source unlocks the correction',
+    'document.querySelector("#align-btn").disabled',
+    (v) => v === false,
+  );
+  await evaluate(cdp, 'document.querySelector("#align-btn").click()');
+  await waitFor(cdp, 'document.querySelector("#report").textContent.includes("Anchors")', (v) => v === true, {
+    describe: 'the quality correction to finish',
+  });
+  await check(
+    cdp,
+    'the correction ran against the measured timings',
+    'document.querySelectorAll("#blocks .row").length',
+    (v) => v > 0,
+  );
+
+  // The payoff, and the whole reason the two studios exist. The captions below are these four
+  // facts at once: the words are the server's, the spelling is the TRUTH file's, and the numbers
+  // are the onsets the *aligner measured* — 12.00-12.60, 12.70-12.90, 13.00-13.80, 14.00-14.60 —
+  // which is a different clock from the demo's invented timings and from the TRUTH cue
+  // boundaries, so nothing else could have produced them.
+  await check(
+    cdp,
+    'the captions are the server\'s words with the TRUTH file\'s spelling',
+    '[...document.querySelectorAll("#blocks .row")].map(r=>r.querySelector(".body").childNodes[0].textContent).join(" | ")',
+    (v) => v === 'Just an ordinary boy, | Lost in the crowd.',
+  );
+  await check(
+    cdp,
+    'the block windows are the measured onsets, not the demo\'s and not the cue boundaries',
+    '[...document.querySelectorAll("#blocks .row")].map(r=>r.querySelector(".t").textContent.replace(/\\s/g,"")).join(" | ")',
+    (v) => v === '12.00–14.60 | 16.00–18.00',
+  );
+  await check(
+    cdp,
+    'and every word kept the onset the aligner measured',
+    '[...document.querySelectorAll("#word-editor .word-chip .word-time")].map(e=>e.textContent.replace(/\\s/g,"")).join(" | ")',
+    (v) => v === '12.00–12.60 | 12.70–12.90 | 13.00–13.80 | 14.00–14.60',
+  );
+  await check(
+    cdp,
+    'the correction relabelled the words without inserting or deleting a single one',
+    'document.querySelector("#report").textContent.replace(/\\s/g,"")',
+    (v) => /Matched8/.test(v) && /Inserted0/.test(v) && /Deleted0/.test(v),
+    'Matched8 … Inserted0 … Deleted0',
+  );
+  await check(
+    cdp,
+    'the TRUTH spelling wins, exactly as it did before the timing authority changed',
+    '[...document.querySelectorAll("#blocks .row")].map(r=>r.querySelector(".body").childNodes[0].textContent).join(" ")',
+    (v) => String(v).includes('ordinary') && !String(v).includes('ordnary'),
+  );
+  await check(
+    cdp,
+    'the corrections panel lists the change',
+    'Number(document.querySelector("#cor-count").textContent)',
+    (v) => Number(v) > 0,
+  );
+  stub.close();
 
   console.log('\n■ console health');
   await check(cdp, 'the font-size readout resolved to pixels', '/\\d+px/.test(document.querySelector("#size-out").textContent)');
