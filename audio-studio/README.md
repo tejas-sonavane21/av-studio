@@ -8,13 +8,14 @@ style, placement, the render — this studio owns the *audio* timeline: what was
 said, **when exactly each word was said**, where the silence is, and whether the
 transcript can be trusted.
 
-> **Status: Phases A and B complete and verified.** The transcript model, the
+> **Status: Phases A, B and E complete and verified.** The transcript model, the
 > four emitters (native JSON, Veed-compatible master JSON, SRT, VTT), the engine
-> registry with a deterministic offline backend, the CLI, and **real local
-> transcription via `faster-whisper`** are built. The backend-free layers are
-> covered by **98 tests that pass with *zero* third-party packages installed**,
-> so the pure layers can never be blocked behind a model download. Forced
-> alignment, LLM validation and the HTTP server are the next phases.
+> registry with a deterministic offline backend, the CLI, **real local
+> transcription via `faster-whisper`**, and the **local HTTP job server** are
+> built. The backend-free layers are covered by **110 tests that pass with *zero*
+> third-party packages installed**, so the pure layers can never be blocked
+> behind a model download. Forced alignment and LLM validation are the next
+> phases.
 
 ## Why this exists
 
@@ -28,6 +29,21 @@ ourselves, from the audio.**
 
 The two studios are siblings, not a pipeline with a head and a tail. Each runs
 standalone; this one's artifacts are importable by that one.
+
+The drift is measurable, so it was measured. Diffing the Veed master JSON for
+the reference track against timings taken from the waveform itself:
+
+| | Veed (inherited) | measured (this studio) |
+|---|---|---|
+| mean word span | **0.238 s**, floor 0.08 s | 0.569 s |
+| first word of line 1 | starts 15.20 s | starts 13.18 s |
+| `Just` | 15.20 → 15.28 (0.08 s) | 13.18 → 14.42 (1.24 s) |
+
+A word span that is *the same 0.08 s for `Just`, `an`, `ordinary` and `boy`* is
+a marker, not a duration — Veed is not measuring the waveform. Those spans are
+exactly what a split uses: the cut lands on the midpoint between two words, so a
+timing that is 0.2–0.8 s early makes every split, join and reveal inherit the
+authority to place text somewhere it was never sung.
 
 ## The engine decisions, and why
 
@@ -101,6 +117,57 @@ be the silent guessing this suite forbids. The default emits none; if you want
 karaoke highlighting, `caption-studio`'s `emphasis.source = 'active'` needs no
 ranges at all.
 
+## The server (how `caption-studio` actually calls this)
+
+A browser app cannot spawn a Python process, so the studio it hands audio to has
+to answer over HTTP. `python -m audio_studio serve` does that, and it is the only
+network surface in the suite.
+
+```bash
+python -m audio_studio serve --port 8756            # binds 127.0.0.1 by default
+python -m audio_studio serve --preset balanced      # the engine/preset jobs inherit
+```
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/health` | version, usable engines, presets, emit kinds |
+| `POST` | `/transcribe` | `{path, engine?, preset?, model?, language?, emit?, emphasis?}` → `202 {jobId}` |
+| `GET` | `/jobs/{id}` | status, progress, and (when done) `files` + `urls` |
+| `GET` | `/jobs/{id}/{kind}` | the artifact itself — `kind` is `json`, `veed`, `srt` or `vtt` |
+| `GET` | `/jobs` | every job, newest first |
+| `DELETE` | `/jobs/{id}` | forget a job (its files stay on disk) |
+
+Three properties are deliberate:
+
+- **Loopback only, by default.** Nothing here is meant to be exposed; the
+default should not tempt anyone to try.
+- **Stdlib only.** `http.server` and one thread — no Flask. The base install has
+to stay instant.
+- **One worker.** Transcription saturates four cores, so two jobs in parallel
+  would finish later than the same jobs in sequence. Jobs queue.
+
+The workflow mirrors how the browser already thinks: POST a job, poll it, then
+fetch the artifact. `GET /jobs/{id}/veed` returns the very payload the importer
+already understands, so connecting the two studios is one `fetch`:
+
+```js
+const { jobId } = await fetch("http://127.0.0.1:8756/transcribe", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ path: "C:/media/song.mp3", language: "en" }),
+}).then((r) => r.json());
+
+let job;
+while ((job = await fetch(`http://127.0.0.1:8756/jobs/${jobId}`).then((r) => r.json())).status !== "done") {
+  await new Promise((r) => setTimeout(r, 500));   // job.progress is 0..1
+}
+
+const veedMaster = await fetch(`http://127.0.0.1:8756/jobs/${jobId}/veed`).then((r) => r.json());
+```
+
+Responses carry `Access-Control-Allow-Origin: *` and answer `OPTIONS`, because
+the caller is a different origin and the browser will preflight without them.
+
 ## What works today
 
 | Area | Status |
@@ -117,7 +184,7 @@ ranges at all.
 | Local Whisper transcription (`faster-whisper`) | ✅ `audio_studio/engines/whisper.py` |
 | Forced alignment + re-timing | ⏳ Phase C |
 | LLM transcript validation + ledger | ⏳ Phase D |
-| HTTP server (job queue) for the browser | ⏳ Phase E |
+| HTTP server (job queue) for the browser | ✅ `audio_studio/server.py` |
 
 ## Install (Windows 11 · Git Bash)
 
@@ -166,7 +233,7 @@ many CPU cores; a 4-core machine will not finish it in a sitting. VAD is
 ```bash
 cd audio-studio
 source .venv/Scripts/activate
-python -m pytest          # 98 tests, no model, no network, no browser
+python -m pytest          # 110 tests, no model, no network, no browser
 ```
 
 The suite is deliberately dependency-free: it runs on `pip install -e ".[dev]"`
@@ -214,4 +281,5 @@ Two tests exist specifically to lock the *interfaces* rather than the details:
 | `audio_studio/media.py` | Decoding, hashing, duration probing |
 | `audio_studio/config.py` | Presets and defaults, tuned for CPU-only |
 | `audio_studio/cli.py` | The command line |
+| `audio_studio/server.py` | The local HTTP job server for `caption-studio` |
 | `pyproject.toml` | Packaging and the optional-dependency extras |
