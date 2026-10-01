@@ -17,6 +17,12 @@ caption-studio/docs/KNOWLEDGE-BASE.internal.md
 Gemini-Local HTML5 Subtitle Renderer-20260926-1210.md
 VEED-Subtitle-Replication-Complete-Understanding.md
 
+# ---- Local secrets ----
+# Never commit an API key. audio-studio's optional [llm] validation extra reads
+# one from here (or from GEMINI_API_KEY / OPENROUTER_API_KEY in the env).
+gemini_api_key.txt
+*.api_key
+
 # ---- Machine-specific / OS junk ----
 *.lnk
 .DS_Store
