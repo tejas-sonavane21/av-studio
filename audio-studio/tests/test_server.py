@@ -76,8 +76,77 @@ def test_health_reports_version_and_usable_engines(server):
     assert body["ok"] is True
     assert body["version"] == __version__
     assert {e["name"] for e in body["engines"]} == {"fake", "whisper"}
+    assert {a["name"] for a in body["aligners"]} == {"fake", "wav2vec"}
+    assert {v["name"] for v in body["validators"]} == {"rules", "llm"}
     assert "balanced" in body["presets"]
     assert set(body["emitKinds"]) == {"json", "veed", "srt", "vtt"}
+
+
+# --------------------------------------------------------------------------- #
+# uploading the file itself
+# --------------------------------------------------------------------------- #
+
+
+def upload(url: str, name: str, data: bytes) -> tuple[int, dict | str]:
+    """POST a file's bytes as the body, with the options in the query string."""
+    req = urllib.request.Request(f"{url}?name={name}", data=data, method="POST")
+    req.add_header("Content-Type", "application/octet-stream")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            body, status = response.read().decode("utf-8"), response.status
+    except urllib.error.HTTPError as exc:
+        body, status = exc.read().decode("utf-8"), exc.code
+    try:
+        return status, json.loads(body)
+    except json.JSONDecodeError:
+        return status, body
+
+
+def test_the_browser_can_send_the_file_instead_of_a_path(server, wav_file):
+    """
+    A page cannot read a path off the user's disk, so the endpoint that takes the
+    bytes is the one caption-studio can actually use.
+    """
+    base, store = server
+    status, job = upload(f"{base}/transcribe/upload", "clip.wav", wav_file.read_bytes())
+    assert status == 202
+    job_id = job["jobId"]
+    done = wait_for(base, job_id)
+    assert done["status"] == "done", done.get("error")
+    assert done["summary"]["words"] > 0
+    # the uploaded file lives inside the job's own directory
+    assert (store.root / job_id / "source.wav").exists()
+    assert done["source"].endswith("source.wav")
+
+
+def test_upload_options_ride_in_the_query_string(server, wav_file):
+    base, _ = server
+    req = urllib.request.Request(
+        f"{base}/transcribe/upload?name=clip.wav&preset=fast&align=fake&emit=veed",
+        data=wav_file.read_bytes(),
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        job = json.loads(response.read().decode("utf-8"))
+    done = wait_for(base, job["jobId"])
+    assert done["status"] == "done", done.get("error")
+    assert done["preset"] == "fast"
+    assert done["align"] == "fake"
+    assert set(done["files"]) == {"veed"}
+
+
+def test_an_upload_of_a_file_type_we_do_not_read_is_refused(server):
+    base, _ = server
+    status, body = upload(f"{base}/transcribe/upload", "payload.exe", b"MZ" + b"\x00" * 64)
+    assert status == 400
+    assert ".exe" in body["error"]
+
+
+def test_an_empty_upload_is_refused(server):
+    base, _ = server
+    status, body = upload(f"{base}/transcribe/upload", "clip.wav", b"")
+    assert status == 400
+    assert "empty" in body["error"]
 
 
 def test_the_root_and_health_are_the_same_thing(server):
@@ -139,6 +208,55 @@ def test_the_job_list_is_newest_first(server, wav_file):
     _, body = request(f"{base}/jobs")
     ids = [job["jobId"] for job in body["jobs"]]
     assert ids.index(second) < ids.index(first)
+
+
+def test_a_job_can_ask_for_the_optional_passes(server, wav_file):
+    """The alignment and validation passes are per-job, and the artifact says so."""
+    base, _ = server
+    status, job = request(
+        f"{base}/transcribe",
+        "POST",
+        {"path": str(wav_file), "engine": "fake", "align": "fake", "validate": "rules"},
+    )
+    assert status == 202
+    assert job["align"] == "fake"
+    done = wait_for(base, job["jobId"])
+    assert done["status"] == "done", done.get("error")
+    assert done["summary"]["alignment"]["aligner"] == "fake"
+    assert done["summary"]["validation"]["passes"][0]["validator"] == "rules"
+
+
+def test_an_unknown_aligner_or_validator_is_refused_by_name(server, wav_file):
+    base, _ = server
+    status, body = request(
+        f"{base}/transcribe", "POST", {"path": str(wav_file), "engine": "fake", "align": "nope"}
+    )
+    assert status == 400
+    assert "nope" in body["error"]
+
+    status, body = request(
+        f"{base}/transcribe", "POST", {"path": str(wav_file), "engine": "fake", "validate": "nope"}
+    )
+    assert status == 400
+    assert "nope" in body["error"]
+
+
+def test_a_pass_that_cannot_run_fails_the_job_with_the_reason(server, wav_file, monkeypatch):
+    """A missing backend must not quietly return a transcript that was never aligned."""
+    from audio_studio import server as server_module
+    from audio_studio.pipeline import PassUnavailable
+
+    def refuse(*args, **kwargs):
+        raise PassUnavailable("the aligner is not installed")
+
+    monkeypatch.setattr(server_module, "post_process", refuse)
+    base, _ = server
+    job_id = request(
+        f"{base}/transcribe", "POST", {"path": str(wav_file), "engine": "fake", "align": "fake"}
+    )[1]["jobId"]
+    done = wait_for(base, job_id)
+    assert done["status"] == "error"
+    assert "not installed" in done["error"]
 
 
 def test_a_finished_job_can_be_deleted(server, wav_file):

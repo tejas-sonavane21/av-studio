@@ -24,12 +24,22 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .align import DEFAULT_ALIGNER, aligner_names, available_aligners
 from .artifact import ArtifactError, load
-from .config import PRESETS, DEFAULT_PRESET, options_from_preset
+from .config import (
+    DEFAULT_ALIGN_MODEL,
+    DEFAULT_PRESET,
+    PRESETS,
+    AlignOptions,
+    ValidateOptions,
+    options_from_preset,
+)
 from .emit import DEFAULT_KINDS, kinds, write_bundle
 from .engines import available_engines, engine_names, get_engine
 from .media import MediaError, describe, load_audio
 from .model import validate
+from .pipeline import PassUnavailable, PipelineOptions, post_process, summarise_passes
+from .validate import DEFAULT_VALIDATOR, available_validators, validator_names
 
 
 def _err(message: str) -> None:
@@ -72,6 +82,7 @@ def _summarise(transcript) -> str:
     if transcript.gaps:
         longest = max(g.duration for g in transcript.gaps)
         lines.append(f"  gaps           {len(transcript.gaps)} (longest {longest:.2f}s)")
+    lines.extend(summarise_passes(transcript))
     report = validate(transcript)
     if report["errors"]:
         lines.append(f"  ERRORS         {len(report['errors'])}")
@@ -119,6 +130,17 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001 - a failed job must not traceback at the user
         _err(f"transcription failed ({args.engine}): {exc}")
         return 1
+
+    passes = _pipeline_options(args)
+    if passes.enabled():
+        try:
+            transcript = post_process(transcript, audio, passes, _progress_factory(args.quiet))
+        except PassUnavailable as exc:
+            _err(str(exc))
+            return 1
+        except Exception as exc:  # noqa: BLE001 - a failed pass must not traceback either
+            _err(f"post-processing failed: {exc}")
+            return 1
 
     stem = args.stem or Path(args.audio).stem
     written = write_bundle(
@@ -198,7 +220,8 @@ def _module_version(name: str) -> str | None:
 def build_doctor_report() -> dict:
     in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
     packages = {
-        name: _module_version(name) for name in ("numpy", "faster_whisper", "torch", "torchaudio", "google.genai", "httpx")
+        name: _module_version(name)
+        for name in ("numpy", "faster_whisper", "torch", "torchaudio", "transformers", "google.genai", "httpx")
     }
     return {
         "audioStudio": __version__,
@@ -210,8 +233,12 @@ def build_doctor_report() -> dict:
         "ffmpeg": shutil.which("ffmpeg"),
         "packages": packages,
         "engines": available_engines(),
+        "aligners": available_aligners(),
+        "validators": available_validators(),
         "presets": sorted(PRESETS),
         "defaultPreset": DEFAULT_PRESET,
+        "defaultAligner": DEFAULT_ALIGNER,
+        "defaultValidator": DEFAULT_VALIDATOR,
     }
 
 
@@ -233,6 +260,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for engine in report["engines"]:
         mark = "ok " if engine["available"] else "no "
         print(f"    [{mark}] {engine['name']:<16} {engine['reason']}")
+    print("  aligners")
+    for aligner in report["aligners"]:
+        mark = "ok " if aligner["available"] else "no "
+        print(f"    [{mark}] {aligner['name']:<16} {aligner['reason']}")
+    print("  validators")
+    for validator in report["validators"]:
+        mark = "ok " if validator["available"] else "no "
+        print(f"    [{mark}] {validator['name']:<16} {validator['reason']}")
     print(f"  presets       {', '.join(report['presets'])} (default: {report['defaultPreset']})")
     if not report["virtualenv"]:
         print("\n  ! Not inside a virtualenv. Create one with: python -m venv .venv")
@@ -242,6 +277,84 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # parser
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# the optional passes (shared by transcribe / align / validate)
+# --------------------------------------------------------------------------- #
+
+
+def _pipeline_options(args: argparse.Namespace) -> PipelineOptions:
+    """Read the pass flags off a parsed namespace, so all three commands agree."""
+    return PipelineOptions(
+        align=getattr(args, "align", None),
+        align_options=AlignOptions(
+            model=getattr(args, "align_model", None) or DEFAULT_ALIGN_MODEL,
+            min_confidence=getattr(args, "align_min_confidence", 0.35),
+            window_pad=getattr(args, "align_pad", 0.30),
+            max_shift=getattr(args, "align_max_shift", 2.0),
+        ),
+        validate=getattr(args, "validate", None),
+        validate_options=ValidateOptions(
+            provider=getattr(args, "llm_provider", "auto"),
+            model=getattr(args, "llm_model", None),
+            api_key=getattr(args, "api_key", None),
+            min_confidence=getattr(args, "llm_min_confidence", 0.6),
+        ),
+    )
+
+
+def _add_align_arguments(parser: argparse.ArgumentParser, default: str | None = None) -> None:
+    parser.add_argument(
+        "--align",
+        default=default,
+        choices=aligner_names(),
+        help="re-time words against the audio (wav2vec: ~20 ms; fake: offline, synthetic)",
+    )
+    parser.add_argument("--align-model", default=None, help=f"acoustic model (default: {DEFAULT_ALIGN_MODEL})")
+    parser.add_argument(
+        "--align-min-confidence",
+        type=float,
+        default=0.35,
+        help="below this mean posterior a segment keeps its original timings",
+    )
+    parser.add_argument("--align-pad", type=float, default=0.30, help="seconds of context either side of a segment")
+    parser.add_argument(
+        "--align-max-shift",
+        type=float,
+        default=2.0,
+        help="a word may not move further than this from the transcriber's timing",
+    )
+
+
+def _add_validate_arguments(parser: argparse.ArgumentParser, default: str | None = None) -> None:
+    parser.add_argument(
+        "--validate",
+        default=default,
+        choices=validator_names(),
+        help="police the transcript text (rules: offline; llm: hosted, needs a key)",
+    )
+    parser.add_argument("--llm-provider", default="auto", choices=("auto", "google", "openrouter"))
+    parser.add_argument("--llm-model", default=None, help="model name, e.g. gemini-2.0-flash")
+    parser.add_argument(
+        "--llm-min-confidence",
+        type=float,
+        default=0.6,
+        help="a correction below this confidence is recorded but not applied",
+    )
+    parser.add_argument("--api-key", default=None, help="override the environment / key file")
+
+
+def _add_emit_arguments(parser: argparse.ArgumentParser, *, audio: bool = False) -> None:
+    parser.add_argument("--out", default="out", help="output directory (default: ./out)")
+    parser.add_argument("--stem", default=None, help="output file stem (default: the input's)")
+    parser.add_argument("--emit", type=_parse_kinds, default=list(DEFAULT_KINDS), help="comma list: json,veed,srt,vtt")
+    parser.add_argument("--word-level", action="store_true", help="one subtitle cue per word")
+    parser.add_argument("--emphasis", default="none", choices=("none", "all"), help="keyword highlighting in the Veed output")
+    parser.add_argument("--json", action="store_true", help="machine-readable output on stdout")
+    parser.add_argument("--quiet", "-q", action="store_true", help="no progress output")
+    if audio:
+        parser.add_argument("--no-decode", action="store_true", help="do not decode the audio before aligning")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -273,6 +386,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--no-decode", action="store_true", help="do not decode the audio before transcribing")
     t.add_argument("--quiet", "-q", action="store_true", help="no progress output")
     t.add_argument("--json", action="store_true", help="machine-readable summary on stdout")
+    _add_align_arguments(t)
+    _add_validate_arguments(t)
     t.set_defaults(func=cmd_transcribe)
 
     e = sub.add_parser("emit", help="re-emit a saved transcript")
@@ -288,6 +403,21 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="report installed packages and usable engines")
     d.add_argument("--json", action="store_true", help="machine-readable report on stdout")
     d.set_defaults(func=cmd_doctor)
+
+    a = sub.add_parser("align", help="re-time a saved transcript against its audio")
+    a.add_argument("artifact", help="path to a *.speech.json")
+    a.add_argument("--audio", required=True, help="the audio (or video) it was transcribed from")
+    _add_emit_arguments(a, audio=True)
+    _add_align_arguments(a, default=DEFAULT_ALIGNER)
+    _add_validate_arguments(a)
+    a.set_defaults(func=cmd_align)
+
+    va = sub.add_parser("validate", help="review a saved transcript and record the ledger")
+    va.add_argument("artifact", help="path to a *.speech.json")
+    _add_emit_arguments(va)
+    _add_align_arguments(va)
+    _add_validate_arguments(va, default=DEFAULT_VALIDATOR)
+    va.set_defaults(func=cmd_validate)
 
     v = sub.add_parser("version", help="print the version")
     v.set_defaults(func=cmd_version)
@@ -306,6 +436,84 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_version(_args: argparse.Namespace) -> int:
     print(__version__)
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# align / validate — the passes, on their own
+# --------------------------------------------------------------------------- #
+
+
+def _reprocess(args: argparse.Namespace, needs_audio: bool) -> int:
+    """Shared body of ``align`` and ``validate``: load, pass, write, report."""
+    try:
+        transcript = load(args.artifact)
+    except (ArtifactError, OSError) as exc:
+        _err(str(exc))
+        return 1
+
+    options = _pipeline_options(args)
+    if not options.enabled():
+        _err("nothing to do: pass --align <name> or --validate <name>")
+        return 1
+
+    audio = None
+    if needs_audio or options.align:
+        source = getattr(args, "audio", None)
+        if not source:
+            _err("this pass needs the audio: pass --audio <file>")
+            return 1
+        try:
+            audio = load_audio(source, decode=not getattr(args, "no_decode", False))
+        except (MediaError, OSError) as exc:
+            _err(str(exc))
+            return 1
+
+    try:
+        transcript = post_process(transcript, audio, options, _progress_factory(args.quiet))
+    except PassUnavailable as exc:
+        _err(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001 - a failed pass must not traceback at the user
+        _err(f"the pass failed: {exc}")
+        return 1
+
+    stem = args.stem or Path(args.artifact).name.split(".")[0]
+    written = write_bundle(
+        transcript,
+        args.out,
+        stem=stem,
+        kinds_selected=args.emit,
+        word_level=args.word_level,
+        emphasis=args.emphasis,
+    )
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "alignment": transcript.alignment,
+                    "validation": transcript.validation,
+                    "corrections": transcript.corrections,
+                    "warnings": transcript.warnings,
+                    "files": [str(p) for p in written],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(_summarise(transcript))
+    print("  wrote")
+    for path in written:
+        print(f"    - {path}")
+    return 0
+
+
+def cmd_align(args: argparse.Namespace) -> int:
+    return _reprocess(args, needs_audio=True)
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    return _reprocess(args, needs_audio=False)
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:

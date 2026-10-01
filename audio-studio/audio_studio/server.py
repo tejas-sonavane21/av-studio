@@ -18,14 +18,23 @@ fetch the artifact. A job's artifacts are the same files the CLI writes, so
 ``caption-studio`` can load the Veed-shaped one exactly as it would a file from
 disk — the server is a transport, not a second implementation.
 
-    POST /transcribe  {path, engine?, preset?, model?, language?, emit?, emphasis?}
+    POST /transcribe  {path, engine?, preset?, model?, language?, emit?, emphasis?,
+                       align?, validate?, alignModel?, llmProvider?, llmModel?}
                       → 202 {jobId}
+    POST /transcribe/upload?name=<file>
+                      the file itself as the request body → 202 {jobId}
     GET  /jobs/{id}   → the job's status, progress and (when done) file list
     GET  /jobs/{id}/{kind}
                       → the artifact bytes: kind is json | veed | srt | vtt
     GET  /jobs        → every job, newest first
     DELETE /jobs/{id} → forget a job (does not delete its files)
-    GET  /health      → version, usable engines, presets
+    GET  /health      → version, usable engines, aligners, validators, presets
+
+The second POST is not a convenience. A browser cannot read a file's path off the
+user's disk — deliberately — so a page that only accepted ``{path}`` would make its
+user type an absolute path from memory. Uploading the bytes it already has is the
+honest way for the two studios to meet, and the cap plus the extension allow-list
+below is what keeps a loopback endpoint from becoming an open write to disk.
 """
 
 from __future__ import annotations
@@ -42,10 +51,13 @@ from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from .config import DEFAULT_PRESET, PRESETS, options_from_preset
+from .align import aligner_names, available_aligners
+from .config import DEFAULT_ALIGN_MODEL, DEFAULT_PRESET, PRESETS, AlignOptions, ValidateOptions, options_from_preset
 from .emit import DEFAULT_KINDS, filename, kinds, write_bundle
 from .engines import available_engines, engine_names, get_engine
-from .media import MediaError, load_audio
+from .media import AUDIO_EXTENSIONS, MediaError, load_audio
+from .pipeline import PipelineOptions, post_process
+from .validate import available_validators, validator_names
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8756
@@ -58,7 +70,13 @@ CONTENT_TYPES = {
     "vtt": "text/vtt; charset=utf-8",
 }
 
-MAX_BODY = 1 << 20  # a job request is a few hundred bytes; refuse the rest
+MAX_BODY = 1 << 20  # a JSON job request is a few hundred bytes; refuse the rest
+
+#: An uploaded source file, by contrast, is the media itself. Half a gigabyte
+#: covers a long session recording and still bounds what a stray client can write.
+MAX_UPLOAD = 512 << 20
+
+UPLOAD_CHUNK = 1 << 20
 
 
 class JobError(RuntimeError):
@@ -78,6 +96,11 @@ class Job:
     emit: list[str] = field(default_factory=lambda: list(DEFAULT_KINDS))
     emphasis: str = "none"
     word_level: bool = False
+    align: Optional[str] = None
+    validate: Optional[str] = None
+    align_model: Optional[str] = None
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
     status: str = "queued"  # queued | running | done | error
     progress: float = 0.0
     message: str = ""
@@ -102,6 +125,8 @@ class Job:
             "model": self.model,
             "language": self.language,
             "emit": list(self.emit),
+            "align": self.align,
+            "validate": self.validate,
             "created": round(self.created, 3),
             "started": round(self.started, 3) if self.started else None,
             "finished": round(self.finished, 3) if self.finished else None,
@@ -153,8 +178,9 @@ class Jobs:
 
     # -- store -------------------------------------------------------------- #
 
-    def submit(self, payload: dict) -> Job:
-        source = payload.get("path")
+    def submit(self, payload: dict, *, job_id: Optional[str] = None, path: Optional[str] = None) -> Job:
+        """Validate a request and queue it. ``path`` and ``job_id`` are for uploads."""
+        source = path or payload.get("path")
         if not source or not isinstance(source, str):
             raise JobError("a 'path' to an audio or video file is required")
         if not Path(source).exists():
@@ -168,6 +194,14 @@ class Jobs:
         if preset not in PRESETS:
             raise JobError(f"unknown preset {preset!r}; expected one of {sorted(PRESETS)}")
 
+        align = payload.get("align") or None
+        if align is not None and align not in aligner_names():
+            raise JobError(f"unknown aligner {align!r}; expected one of {aligner_names()}")
+
+        validate = payload.get("validate") or None
+        if validate is not None and validate not in validator_names():
+            raise JobError(f"unknown validator {validate!r}; expected one of {validator_names()}")
+
         selected = payload.get("emit") or list(DEFAULT_KINDS)
         if isinstance(selected, str):
             selected = [part.strip() for part in selected.split(",") if part.strip()]
@@ -176,7 +210,7 @@ class Jobs:
             raise JobError(f"unknown emit kind(s) {unknown}; expected one of {kinds()}")
 
         job = Job(
-            id=uuid.uuid4().hex[:12],
+            id=job_id or uuid.uuid4().hex[:12],
             source=source,
             engine=engine,
             preset=preset,
@@ -185,6 +219,11 @@ class Jobs:
             emit=list(selected),
             emphasis=payload.get("emphasis") or "none",
             word_level=bool(payload.get("wordLevel") or payload.get("word_level")),
+            align=align,
+            validate=validate,
+            align_model=payload.get("alignModel"),
+            llm_provider=payload.get("llmProvider"),
+            llm_model=payload.get("llmModel"),
             stem=Path(source).stem,
         )
         job.outdir = self.root / job.id
@@ -196,6 +235,53 @@ class Jobs:
         self.start()
         self._queue.put(job.id)
         return job
+
+    def upload(
+        self,
+        filename: str,
+        stream,
+        length: int,
+        payload: Optional[dict] = None,
+    ) -> Job:
+        """
+        Take a source file off the wire and queue it.
+
+        The file lands in the job's own directory, so a job is one folder and
+        deleting the job's files is deleting one folder. The extension is checked
+        against the media allow-list before a single byte is written: this is a
+        loopback endpoint, not an invitation to use somebody's disk as scratch
+        space.
+        """
+        payload = dict(payload or {})
+        name = Path(str(filename or "upload")).name
+        suffix = Path(name).suffix.lower()
+        if suffix and suffix not in AUDIO_EXTENSIONS:
+            raise JobError(f"{suffix} is not an audio or video extension we accept")
+        if length <= 0:
+            raise JobError("the upload is empty")
+        if length > MAX_UPLOAD:
+            raise JobError(f"the upload is larger than the {MAX_UPLOAD >> 20} MB limit")
+
+        job_id = uuid.uuid4().hex[:12]
+        directory = self.root / job_id
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"source{suffix or '.bin'}"
+
+        written = 0
+        remaining = length
+        with open(target, "wb") as handle:
+            while remaining > 0:
+                block = stream.read(min(UPLOAD_CHUNK, remaining))
+                if not block:
+                    break
+                handle.write(block)
+                written += len(block)
+                remaining -= len(block)
+        if written != length:
+            raise JobError(f"the upload was truncated: {written} of {length} bytes arrived")
+
+        payload.pop("path", None)
+        return self.submit(payload, job_id=job_id, path=str(target))
 
     def get(self, job_id: str) -> Optional[Job]:
         with self._lock:
@@ -243,8 +329,24 @@ class Jobs:
                 job.progress = fraction
                 job.message = message
 
+            # A pass the client asked for but that is not installed fails the job
+            # with the reason, rather than quietly returning a transcript that was
+            # never aligned. `PassUnavailable` is already a RuntimeError, so the
+            # handler below catches it like any other failure.
+            passes = PipelineOptions(
+                align=job.align,
+                align_options=AlignOptions(model=job.align_model or DEFAULT_ALIGN_MODEL),
+                validate=job.validate,
+                validate_options=ValidateOptions(
+                    provider=job.llm_provider or "auto",
+                    model=job.llm_model,
+                ),
+            )
+
             job.outdir.mkdir(parents=True, exist_ok=True)
             transcript = engine.transcribe(audio, options, on_progress)
+            if passes.enabled():
+                transcript = post_process(transcript, audio, passes, on_progress)
             write_bundle(
                 transcript,
                 job.outdir,
@@ -263,6 +365,9 @@ class Jobs:
                 "language": transcript.language,
                 "warnings": list(transcript.warnings),
                 "engine": transcript.engine,
+                "alignment": transcript.alignment,
+                "validation": transcript.validation,
+                "corrections": len(transcript.corrections),
             }
             job.progress, job.message, job.status = 1.0, "done", "done"
         except Exception as exc:  # noqa: BLE001 - a failed job must not kill the worker
@@ -344,6 +449,8 @@ def make_handler(store: Jobs):
                         "ok": True,
                         "version": __version__,
                         "engines": available_engines(),
+                        "aligners": available_aligners(),
+                        "validators": available_validators(),
                         "presets": sorted(PRESETS),
                         "defaultPreset": DEFAULT_PRESET,
                         "emitKinds": kinds(),
@@ -369,11 +476,31 @@ def make_handler(store: Jobs):
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if parsed.path == "/transcribe/upload":
+                return self._upload(parse_qs(parsed.query))
             if parsed.path != "/transcribe":
                 return self._json(404, {"error": f"no route for {parsed.path}"})
             try:
                 payload = self._read_json()
                 job = store.submit(payload)
+            except JobError as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(202, job.to_dict())
+
+        def _upload(self, query: dict) -> None:
+            """
+            A source file in the body, with its options in the query string.
+
+            The body is the media, so it cannot also be the request JSON — hence
+            ``?name=song.mp3&preset=balanced&align=wav2vec`` rather than a multipart
+            form. The options are the same names ``POST /transcribe`` uses, and the
+            same validator accepts them, so there is one place a job is defined.
+            """
+            length = int(self.headers.get("Content-Length") or 0)
+            name = (query.get("name") or ["upload"])[0]
+            payload = {key: _coerce(values[0]) for key, values in query.items() if key != "name" and values}
+            try:
+                job = store.upload(name, self.rfile, length, payload)
             except JobError as exc:
                 return self._json(400, {"error": str(exc)})
             return self._json(202, job.to_dict())
@@ -416,6 +543,16 @@ def make_handler(store: Jobs):
             return self._send(200, path.read_bytes(), CONTENT_TYPES.get(kind, "application/octet-stream"))
 
     return Handler
+
+
+def _coerce(value: str):
+    """Query strings carry text; turn the two obvious booleans back into booleans."""
+    lowered = value.strip().lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    return value
 
 
 def create_server(

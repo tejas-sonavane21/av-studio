@@ -161,6 +161,29 @@ def test_veed_declares_its_provenance_without_breaking_the_importer():
     assert data["engine"] == {"name": "fake"}
 
 
+def test_veed_carries_the_passes_ledger_in_a_namespace_of_our_own():
+    """
+    This is the one file that crosses between the two studios, so it is the one
+    that has to say where its timings came from and what the validation did. It
+    lives under ``audioStudio`` so no Veed field can ever collide with it, and
+    ``parseVeedJSON`` ignores unknown keys, so the bridge pays nothing for it.
+    """
+    transcript = sample()
+    transcript.alignment = {"aligner": "wav2vec", "segmentsAligned": 2}
+    transcript.validation = {"passes": [{"validator": "llm", "applied": 1}]}
+    transcript.corrections = [{"index": 0, "from": "wae", "to": "we", "applied": True}]
+    transcript.warnings = ["a quiet stretch"]
+
+    data = emit.veed.to_veed_master(transcript)
+    audit = data["audioStudio"]
+    assert audit["alignment"]["aligner"] == "wav2vec"
+    assert audit["validation"]["passes"][0]["validator"] == "llm"
+    assert audit["corrections"][0]["to"] == "we"
+    assert audit["warnings"] == ["a quiet stretch"]
+    assert audit["language"] == transcript.language
+    assert "alignment" not in data  # namespaced, not smeared across the document
+
+
 # --------------------------------------------------------------------------- #
 # native + registry + bundle
 # --------------------------------------------------------------------------- #

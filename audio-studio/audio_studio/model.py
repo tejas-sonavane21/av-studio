@@ -427,8 +427,8 @@ def normalize_transcript(transcript: Transcript, min_gap: float = 1.0) -> Transc
     then de-overlapped by *sliding* a late segment forward — mirroring the
     safety net in ``caption-studio/src/align/aligner.js``. Sliding preserves each
     segment's duration, while clamping to a boundary would quietly shorten a
-    caption; the warnings flag it either way, because "no silent guessing"
-    applies to timing exactly as much as it does to spelling.
+    caption. Every slide is named in ``warnings``, because a repair that moves a
+    caption in time without saying so is the failure this studio exists to remove.
     """
     segments: list[Segment] = []
     for raw in transcript.segments:
@@ -442,11 +442,13 @@ def normalize_transcript(transcript: Transcript, min_gap: float = 1.0) -> Transc
     segments.sort(key=lambda s: (s.start, s.end))
 
     cursor = -1.0
-    for seg in segments:
+    slid: list[tuple[int, float]] = []
+    for index, seg in enumerate(segments):
         if cursor >= 0 and seg.start < cursor:
             delta = cursor - seg.start
-            slid = seg.shifted(delta)
-            seg.start, seg.end, seg.words = slid.start, slid.end, slid.words
+            moved = seg.shifted(delta)
+            seg.start, seg.end, seg.words = moved.start, moved.end, moved.words
+            slid.append((index, delta))
         cursor = max(cursor, seg.end)
 
     transcript.segments = segments
@@ -456,6 +458,32 @@ def normalize_transcript(transcript: Transcript, min_gap: float = 1.0) -> Transc
     assign_ids(transcript)
     transcript.gaps = find_gaps(transcript, min_duration=min_gap)
     transcript.warnings = _structural_warnings(transcript)
+
+    # The slide itself has to be reported. `_structural_warnings` looks at the
+    # document *after* it was repaired, so on its own it would find nothing wrong
+    # and a segment could be moved a second later than the transcriber put it
+    # without a word of explanation — precisely the silent guessing this module
+    # refuses. 'No silent guessing' applies to timing as much as to spelling.
+    #
+    # The record is kept in `meta` rather than passed straight into `warnings`
+    # because this function has to stay idempotent: a second normalisation of an
+    # already-normalised transcript no longer slides anything, so a warning that
+    # came only from *doing* the slide would vanish on the second pass and the
+    # output would stop being byte-identical. `meta` survives the round trip, so
+    # the report is reproduced rather than remembered.
+    recorded = [dict(entry) for entry in (transcript.meta.get("slides") or [])]
+    for index, delta in slid:
+        label = transcript.segments[index].id or f"segment #{index + 1}"
+        entry = {"segment": label, "delta": round_time(delta)}
+        if entry not in recorded:
+            recorded.append(entry)
+    if recorded:
+        transcript.meta["slides"] = recorded
+        for entry in recorded:
+            transcript.warnings.append(
+                f"{entry['segment']}: slid forward {entry['delta']:.3f}s to resolve an overlap "
+                "with the segment before it"
+            )
     return transcript
 
 

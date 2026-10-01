@@ -87,6 +87,24 @@ def test_overlapping_segments_are_slid_forward_and_keep_their_duration():
     assert out.segments[1].words[0].start == 2.0
 
 
+def test_a_slide_is_reported_rather_than_done_quietly():
+    """
+    The overlap safety net moves a caption in time, so it has to say so. The
+    structural warnings are computed *after* the repair, so on their own they
+    would find nothing wrong and a segment could end up a second later than the
+    transcriber put it with no explanation at all — which is the silent guessing
+    this module refuses everywhere else.
+    """
+    first = line(0.0, 2.0, [("one", 0.0, 2.0)])
+    second = line(1.0, 3.0, [("two", 1.0, 3.0)])
+    out = normalize_transcript(Transcript(segments=[first, second]))
+
+    assert out.meta["slides"] == [{"segment": "seg-0002", "delta": 1.0}]
+    assert any("slid forward 1.000s" in warning for warning in out.warnings)
+    # and the report survives the round trip, so a reader of the artifact sees it
+    assert Transcript.from_dict(out.to_dict()).meta["slides"] == out.meta["slides"]
+
+
 def test_words_inside_a_segment_are_made_monotonic():
     seg = Segment(
         start=0.0,

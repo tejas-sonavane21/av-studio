@@ -174,6 +174,91 @@ def test_emit_round_trips_the_native_artifact_unchanged(wav_file, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def test_transcribe_runs_the_optional_passes_when_asked(wav_file, tmp_path, capsys):
+    out = tmp_path / "out"
+    code = main(
+        [
+            "transcribe", str(wav_file), "--engine", "fake", "--no-decode",
+            "--align", "fake", "--validate", "rules", "--out", str(out),
+        ]
+    )
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "alignment" in printed and "validation" in printed
+
+    data = json.loads((out / "clip.speech.json").read_text(encoding="utf-8"))
+    assert data["alignment"]["aligner"] == "fake"
+    assert data["validation"]["passes"][0]["validator"] == "rules"
+
+
+def test_align_re_times_a_saved_artifact_without_rewording_it(wav_file, tmp_path, capsys):
+    out = tmp_path / "out"
+    assert main(["transcribe", str(wav_file), "--engine", "fake", "--no-decode", "--out", str(out), "-q"]) == 0
+    capsys.readouterr()  # drop the transcribe summary; only the align JSON is under test
+    artifact = out / "clip.speech.json"
+    before = json.loads(artifact.read_text(encoding="utf-8"))
+
+    code = main(
+        [
+            "align", str(artifact), "--audio", str(wav_file), "--no-decode", "--align", "fake",
+            "--out", str(out), "--emit", "json", "-q", "--json",
+        ]
+    )
+    assert code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["alignment"]["aligner"] == "fake"
+    assert summary["alignment"]["segmentsAligned"] >= 1
+
+    after = json.loads(artifact.read_text(encoding="utf-8"))
+    words_before = [(w["text"], w["start"]) for s in before["segments"] for w in s["words"]]
+    words_after = [(w["text"], w["start"]) for s in after["segments"] for w in s["words"]]
+    assert [text for text, _ in words_after] == [text for text, _ in words_before]
+    assert words_after != words_before
+    assert after["stats"] == before["stats"]
+
+
+def test_validate_records_a_ledger_for_a_saved_artifact(wav_file, tmp_path, capsys):
+    out = tmp_path / "out"
+    assert main(["transcribe", str(wav_file), "--engine", "fake", "--no-decode", "--out", str(out), "-q"]) == 0
+    capsys.readouterr()  # drop the transcribe summary; only the validate JSON is under test
+    code = main(
+        ["validate", str(out / "clip.speech.json"), "--validate", "rules", "--out", str(out), "--emit", "json", "-q", "--json"]
+    )
+    assert code == 0
+    summary = json.loads(capsys.readouterr().out)
+    record = summary["validation"]["passes"][0]
+    assert record["validator"] == "rules"
+    assert record["corrections"] == len(summary["corrections"])
+    # The offline validator reports; it never proposes a replacement, so a
+    # ledger entry from it can only ever be a finding.
+    assert all(entry["outcome"] == "reported" for entry in summary["corrections"])
+    assert all(entry["applied"] is False and "to" not in entry for entry in summary["corrections"])
+
+
+def test_align_asks_its_audio_to_be_given():
+    """The command is meaningless without the recording it is aligning against."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["align", "out/x.speech.json"])
+
+
+def test_a_pass_that_needs_the_audio_says_so_rather_than_guessing(wav_file, tmp_path, capsys):
+    artifact = tmp_path / "x.speech.json"
+    artifact.write_text(native.render(_sample_transcript()), encoding="utf-8")
+    # --no-decode leaves no samples behind, and a real aligner listens to the audio.
+    code = main(["align", str(artifact), "--audio", str(wav_file), "--no-decode", "--out", str(tmp_path), "-q"])
+    assert code == 1
+    stderr = capsys.readouterr().err
+    assert "aligner" in stderr
+    assert "audio-studio:" in stderr
+
+
+def _sample_transcript():
+    from audio_studio.model import Segment, Transcript, Word
+
+    words = [Word(text="we", start=0.0, end=0.4), Word(text="rise", start=0.4, end=0.9)]
+    return Transcript.from_segments([Segment(start=0.0, end=0.9, words=words)], language="en", duration=2.0)
+
+
 def test_every_subcommand_is_registered():
     parser = build_parser()
     actions = [a for a in parser._actions if hasattr(a, "choices") and a.choices]
@@ -181,7 +266,7 @@ def test_every_subcommand_is_registered():
     for action in actions:
         if hasattr(action, "_name_parser_map"):
             subcommands |= set(action._name_parser_map)
-    assert subcommands == {"transcribe", "emit", "doctor", "serve", "version"}
+    assert subcommands == {"transcribe", "emit", "align", "validate", "doctor", "serve", "version"}
 
 
 def test_serve_is_wired_to_a_handler():

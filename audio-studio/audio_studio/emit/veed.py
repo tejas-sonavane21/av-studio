@@ -126,6 +126,26 @@ def to_veed_master(
             }
         )
     out["subtitles"] = subtitles
+
+    # An audit block, in a namespace no Veed field uses. The importer ignores
+    # unknown keys, so this costs the bridge nothing — but it means the one file
+    # that actually crosses between the two studios still says where its timings
+    # came from, which pass moved them, and what the validation ledger did. A
+    # timing artifact with no provenance is a number nobody can argue with.
+    audit: dict = {}
+    if transcript.alignment:
+        audit["alignment"] = dict(transcript.alignment)
+    if transcript.validation:
+        audit["validation"] = dict(transcript.validation)
+    if transcript.corrections:
+        audit["corrections"] = list(transcript.corrections)
+    if transcript.warnings:
+        audit["warnings"] = list(transcript.warnings)
+    if transcript.source:
+        audit["source"] = dict(transcript.source)
+    audit["language"] = transcript.language
+    audit["duration"] = round(float(transcript.duration or 0.0), 3)
+    out["audioStudio"] = audit
     return out
 
 

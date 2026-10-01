@@ -20,9 +20,17 @@ asr = [
 ]
 # Forced alignment: tightens word onsets to ~20-50 ms when we already trust the
 # text (we do - an SRT/VTT is usually available). This is the sync fix.
+#
+# `transformers` rather than `torchaudio`: it supplies the acoustic checkpoint
+# *and* the vocabulary, so a different checkpoint (a multilingual one, say) is a
+# model name rather than a new integration. On a machine with no GPU, install
+# torch from the CPU wheel index first - it is ~10x smaller than the default
+# build, which drags CUDA in:
+#     pip install "torch>=2.2" --index-url https://download.pytorch.org/whl/cpu
+#     pip install -e ".[align]"
 align = [
     "torch>=2.2",
-    "torchaudio>=2.2",
+    "transformers>=4.40",
     "numpy>=1.24",
 ]
 # Transcript validation / cleanup through a hosted LLM. Optional on purpose:

@@ -106,3 +106,99 @@ def options_from_preset(preset: str = DEFAULT_PRESET, **overrides) -> Transcribe
         if value is not None:
             merged[key] = value
     return TranscribeOptions(preset=preset, **{k: v for k, v in merged.items() if k != "extra"})
+
+
+# --------------------------------------------------------------------------- #
+# Phase C — forced alignment
+# --------------------------------------------------------------------------- #
+
+#: The acoustic model the alignment pass runs on. It is a *character*-level CTC
+#: model, which is the whole point: it re-locates words we already have, it never
+#: guesses what was said. ``960h`` is English; pass another checkpoint (a
+#: multilingual one, e.g. ``facebook/wav2vec2-large-xlsr-53``) for other languages.
+DEFAULT_ALIGN_MODEL = "facebook/wav2vec2-base-960h"
+
+#: wav2vec2 emits one frame per 320 input samples at 16 kHz, i.e. every 20 ms.
+#: That is the resolution ceiling of the alignment, and it is what makes it
+#: roughly ten times finer than the timings it replaces.
+ALIGN_FRAME_HOP = 320
+
+
+@dataclass
+class AlignOptions:
+    """
+    Knobs for the alignment pass.
+
+    The three guards exist because a CTC path is confident even when it is wrong,
+    and a wrongly-confident onset is the drift this studio exists to remove.
+    """
+
+    model: str = DEFAULT_ALIGN_MODEL
+    device: str = "cpu"
+    #: A segment whose mean per-word posterior is below this keeps its original
+    #: timings. Alignment is an improvement, not a replacement: a segment that
+    #: does not clearly improve is left exactly as it was.
+    min_confidence: float = 0.35
+    #: Seconds of acoustic context either side of a segment, available **only
+    #: where there is silence to spend**. Two contiguous segments have nothing
+    #: between them, so neither may reach into the other: that is what stops a
+    #: small per-segment error from compounding into a lag down the whole file.
+    #: Where there is a gap, a word that really does start early can use it.
+    window_pad: float = 0.30
+    #: No word's **onset** may move further than this from where the transcriber
+    #: put it. A word that has to travel half a second to fit the audio was not
+    #: heard there. Starts only: a transcriber's word *ends* are the softest thing
+    #: it reports, and rejecting a segment because the aligner stretched one would
+    #: throw away good onsets to protect a number nobody trusts.
+    max_shift: float = 2.0
+    extra: dict = field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------- #
+# Phase D — transcript validation
+# --------------------------------------------------------------------------- #
+
+#: The default validator is the offline, deterministic one: it needs no key, no
+#: network and no money, so it is always safe to run.
+DEFAULT_VALIDATOR = "rules"
+
+#: Default hosted model per provider, when the caller does not name one.
+#:
+#: The ``-latest`` aliases are chosen deliberately over dated names. A dated
+#: model name rots: this studio's first default, ``gemini-2.0-flash``, answered
+#: with a 404 telling us it is "no longer available" and to use a newer one — a
+#: broken run for anyone who installed the studio a few months after it was
+#: written, with nothing in the code to blame.
+DEFAULT_LLM_MODELS = {
+    "google": "gemini-flash-latest",
+    "openrouter": "google/gemini-flash-latest",
+}
+
+#: Tried, in order, when a provider says the named model does not exist any more.
+#: Not a retry (a retired model will not come back) but a hedge against exactly the
+#: rot above, so an installed studio keeps working without an upgrade.
+LLM_MODEL_FALLBACKS = {
+    "google": ("gemini-3.8-flash",),
+    "openrouter": ("google/gemini-3.8-flash",),
+}
+
+#: A file holding the key, if the environment variable is not set. It lives at the
+#: repository root and is gitignored.
+API_KEY_FILENAME = "gemini_api_key.txt"
+
+
+@dataclass
+class ValidateOptions:
+    """Knobs for the validation pass. Timings never depend on any of this."""
+
+    provider: str = "auto"  # auto | google | openrouter
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    #: A correction below this confidence is reported but not applied. A language
+    #: model asked to fix a lyric will always volunteer something; the threshold
+    #: is what stops it from volunteering it into the file.
+    min_confidence: float = 0.6
+    #: Words per request. Keeps a long transcript inside one context window and
+    #: makes the model's answer cheap to check against the input.
+    batch_words: int = 220
+    extra: dict = field(default_factory=dict)
