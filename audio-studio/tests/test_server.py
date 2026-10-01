@@ -83,6 +83,148 @@ def test_health_reports_version_and_usable_engines(server):
 
 
 # --------------------------------------------------------------------------- #
+# the health probe: expensive once, and never on a request's clock
+# --------------------------------------------------------------------------- #
+
+
+def test_health_is_memoised_so_the_registries_are_probed_at_most_once(monkeypatch):
+    """
+    Answering /health means asking each backend whether it is installed, which means
+    importing its dependencies — and on this machine a cold ``import torch`` plus
+    ``import transformers`` measured **6.3 s**, against a browser that gives up at 4.
+    So it is resolved once and reused, not rebuilt per request.
+    """
+    from audio_studio import server as server_module
+
+    calls: list[int] = []
+    real = server_module.build_health_report
+
+    def counted():
+        calls.append(1)
+        return real()
+
+    monkeypatch.setattr(server_module, "build_health_report", counted)
+    monkeypatch.setattr(server_module, "_HEALTH", None)
+
+    first = server_module.health_report()
+    second = server_module.health_report()
+
+    assert len(calls) == 1
+    assert first is second, "the cached payload should be returned, not rebuilt"
+    assert first["ok"] is True
+
+
+def test_a_health_request_never_probes_the_registries_itself(monkeypatch, server):
+    """However cold the process is, the route must not be able to do the slow thing."""
+    from audio_studio import server as server_module
+
+    base, _ = server
+    status, warm = request(f"{base}/health")
+    assert status == 200
+
+    def explode():
+        raise AssertionError("a request must never probe the registries")
+
+    monkeypatch.setattr(server_module, "build_health_report", explode)
+    status, again = request(f"{base}/health")
+    assert status == 200
+    assert again == warm
+
+
+def test_starting_the_server_warms_the_probe_in_the_background(monkeypatch):
+    from audio_studio import server as server_module
+
+    monkeypatch.setattr(server_module, "_HEALTH", None)
+    thread = server_module.start_health_warmup()
+    thread.join(timeout=30)
+
+    assert not thread.is_alive()
+    assert server_module._HEALTH is not None
+
+
+def test_a_failed_warmup_leaves_the_server_working(monkeypatch):
+    """A probe that explodes must not take the process down, and must not cache a lie."""
+    from audio_studio import server as server_module
+
+    def explode():
+        raise RuntimeError("torch is having a bad day")
+
+    monkeypatch.setattr(server_module, "_HEALTH", None)
+    monkeypatch.setattr(server_module, "build_health_report", explode)
+
+    server_module.warm_health()  # must not raise
+    assert server_module._HEALTH is None
+
+
+# --------------------------------------------------------------------------- #
+# a caller that hangs up is not a fault
+# --------------------------------------------------------------------------- #
+
+
+class _DeadSocket:
+    """A socket whose peer has gone: every write fails the way Windows reports it."""
+
+    def write(self, body: bytes) -> None:
+        raise ConnectionAbortedError("[WinError 10053] An established connection was aborted")
+
+
+class _BrokenDisk:
+    """A *real* problem, which must still be loud."""
+
+    def write(self, body: bytes) -> None:
+        raise OSError(28, "No space left on device")
+
+
+def test_a_client_that_hangs_up_is_swallowed_and_anything_else_is_not():
+    """
+    A browser abandons a request when its deadline passes, so the socket can be gone
+    before the response is ready. Letting that reach ``socketserver``'s default
+    handler prints a 25-line traceback for it — which is what happened the one time
+    this server was slow enough to be abandoned, and it read as a crash.
+
+    Only a disconnect is tolerated. Anything else still propagates, so this cannot
+    become a place where real faults go to die.
+    """
+    from audio_studio.server import Jobs, make_handler
+
+    instance = object.__new__(make_handler(Jobs(outdir="unused")))  # no socket, no request
+
+    instance.wfile = _DeadSocket()
+    instance.close_connection = False
+    instance._write(b"a response nobody is waiting for")
+    assert instance.close_connection is True, "the handler should stop trying to reuse it"
+
+    instance.wfile = _BrokenDisk()
+    with pytest.raises(OSError):
+        instance._write(b"a response that genuinely could not be sent")
+
+
+def test_an_abandoned_request_leaves_the_server_serving(server):
+    """
+    Hold the probe lock so the answer is withheld, tear the connection down with an
+    RST, then let the handler try to write into the void. The next request must be
+    unaffected — and the one already made must not have crashed anything.
+    """
+    import socket as socketlib
+    import struct
+
+    from audio_studio import server as server_module
+
+    base, _ = server
+    request(f"{base}/health")  # warm, so the payload is cached
+    port = int(base.rsplit(":", 1)[1])
+
+    with server_module._HEALTH_LOCK:
+        sock = socketlib.create_connection(("127.0.0.1", port), timeout=5)
+        sock.sendall(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        sock.setsockopt(socketlib.SOL_SOCKET, socketlib.SO_LINGER, struct.pack("ii", 1, 0))
+        sock.close()  # abortive close: an RST, not a polite FIN
+
+    time.sleep(0.3)  # let the blocked handler reach its write and find out
+    assert request(f"{base}/health")[0] == 200
+
+
+# --------------------------------------------------------------------------- #
 # uploading the file itself
 # --------------------------------------------------------------------------- #
 

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import queue
+import sys
 import threading
 import time
 import uuid
@@ -77,6 +78,11 @@ MAX_BODY = 1 << 20  # a JSON job request is a few hundred bytes; refuse the rest
 MAX_UPLOAD = 512 << 20
 
 UPLOAD_CHUNK = 1 << 20
+
+
+#: The last built ``/health`` payload. See :func:`health_report`.
+_HEALTH: Optional[dict] = None
+_HEALTH_LOCK = threading.Lock()
 
 
 class JobError(RuntimeError):
@@ -381,6 +387,68 @@ class Jobs:
 # --------------------------------------------------------------------------- #
 
 
+def build_health_report() -> dict:
+    """
+    Probe every registry and describe what can actually run here.
+
+    Expensive on a cold process, and *only* on a cold process: asking each backend
+    whether it is available means importing its dependencies, and ``import torch``
+    plus ``import transformers`` measured **6.3 s** on this machine. That is why
+    this is computed once, off the request path, instead of per request.
+    """
+    return {
+        "ok": True,
+        "version": __version__,
+        "engines": available_engines(),
+        "aligners": available_aligners(),
+        "validators": available_validators(),
+        "presets": sorted(PRESETS),
+        "defaultPreset": DEFAULT_PRESET,
+        "emitKinds": kinds(),
+    }
+
+
+def health_report(*, refresh: bool = False) -> dict:
+    """
+    The cached health payload.
+
+    Nothing it reports can change while the process runs — a package cannot be
+    installed into a running interpreter — so computing it more than once buys
+    nothing and costs seconds. Memoised under a lock, so two simultaneous first
+    requests cannot both pay for it.
+    """
+    global _HEALTH
+    with _HEALTH_LOCK:
+        if _HEALTH is None or refresh:
+            _HEALTH = build_health_report()
+        return _HEALTH
+
+
+def warm_health() -> None:
+    """Pre-resolve the health report. Never raises: warming must not stop the server."""
+    try:
+        health_report()
+    except Exception as exc:  # noqa: BLE001 - a failed warm-up is not a failed server
+        print(f"[audio-studio] could not pre-load the backend probes: {exc}", file=sys.stderr)
+
+
+def start_health_warmup() -> threading.Thread:
+    """
+    Resolve the health report in the background while the server starts.
+
+    Without this the first ``GET /health`` costs ~6 s on a cold process, because
+    answering it means importing torch and transformers. A browser waits four
+    seconds and then hangs up — so the one request whose entire purpose is to say
+    "I am here" was the one that failed, and it failed in a way that looked
+    exactly like the server not running. Measured, not theorised: the client
+    aborted, and the discarded response then surfaced as a ConnectionAbortedError
+    traceback on the server's console.
+    """
+    thread = threading.Thread(target=warm_health, name="audio-studio-warmup", daemon=True)
+    thread.start()
+    return thread
+
+
 def make_handler(store: Jobs):
     """Build a ``BaseHTTPRequestHandler`` bound to one job store."""
 
@@ -392,8 +460,6 @@ def make_handler(store: Jobs):
 
         def log_message(self, fmt: str, *args: Any) -> None:  # pragma: no cover
             # Default logs go to stderr; keep them but make them greppable.
-            import sys
-
             print(f"[audio-studio] {self.address_string()} {fmt % args}", file=sys.stderr)
 
         def _cors(self) -> None:
@@ -403,6 +469,24 @@ def make_handler(store: Jobs):
             self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
+        def _write(self, body: bytes) -> None:
+            """
+            Write the body, tolerating a caller that hung up first.
+
+            A browser abandons a request when its own deadline passes or the page
+            navigates away, so the socket can be gone before the response is
+            ready. That is not a server fault, and letting it reach
+            ``socketserver``'s default handler prints a 25-line traceback for it —
+            which is what happened the one time this server was slow enough to be
+            abandoned, and it read as a crash.
+            """
+            try:
+                self.wfile.write(body)
+            except ConnectionError:
+                # BrokenPipeError, ConnectionResetError and ConnectionAbortedError
+                # (WinError 10053) all land here: the caller is gone, not broken.
+                self.close_connection = True
+
         def _send(self, status: int, body: bytes, content_type: str) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -410,7 +494,7 @@ def make_handler(store: Jobs):
             self._cors()
             self.end_headers()
             if self.command != "HEAD":
-                self.wfile.write(body)
+                self._write(body)
 
         def _json(self, status: int, payload: dict) -> None:
             self._send(status, json.dumps(payload, indent=2).encode("utf-8"), CONTENT_TYPES["json"])
@@ -443,19 +527,7 @@ def make_handler(store: Jobs):
             parts = [p for p in parsed.path.split("/") if p]
 
             if parsed.path == "/health" or parsed.path == "/":
-                return self._json(
-                    200,
-                    {
-                        "ok": True,
-                        "version": __version__,
-                        "engines": available_engines(),
-                        "aligners": available_aligners(),
-                        "validators": available_validators(),
-                        "presets": sorted(PRESETS),
-                        "defaultPreset": DEFAULT_PRESET,
-                        "emitKinds": kinds(),
-                    },
-                )
+                return self._json(200, health_report())
 
             if parsed.path == "/jobs":
                 return self._json(200, {"jobs": [job.to_dict() for job in store.list()]})
@@ -538,7 +610,8 @@ def make_handler(store: Jobs):
                 self.send_header("Content-Length", str(len(body)))
                 self._cors()
                 self.end_headers()
-                return self.wfile.write(body)
+                self._write(body)
+                return None
 
             return self._send(200, path.read_bytes(), CONTENT_TYPES.get(kind, "application/octet-stream"))
 
@@ -570,15 +643,19 @@ def serve(args) -> int:
     """Run until interrupted. ``args`` is the parsed ``serve`` subcommand."""
     store = Jobs(outdir=args.out, engine=args.engine, preset=args.preset)
     store.start()
+    # Before anything asks: resolving which backends are installed means importing
+    # their dependencies, which is seconds, so it must not happen on the first
+    # request's clock.
+    start_health_warmup()
 
     httpd = create_server(store, args.host, args.port)
     host, port = httpd.server_address[:2]
     shown = args.host if host in ("0.0.0.0", "127.0.0.1") else host
-    import sys
 
     print(f"audio-studio {__version__} serving on http://{shown}:{port}", file=sys.stderr)
     print(f"  engine {args.engine}, preset {args.preset}, jobs in {Path(args.out)}", file=sys.stderr)
     print("  POST /transcribe {path, ...}   GET /jobs/{id}   GET /health", file=sys.stderr)
+    print("  probing installed backends in the background (a few seconds)", file=sys.stderr)
     print("  Ctrl-C to stop", file=sys.stderr)
 
     try:
@@ -592,4 +669,17 @@ def serve(args) -> int:
     return 0
 
 
-__all__ = ["DEFAULT_HOST", "DEFAULT_PORT", "Job", "JobError", "Jobs", "create_server", "make_handler", "serve"]
+__all__ = [
+    "DEFAULT_HOST",
+    "DEFAULT_PORT",
+    "Job",
+    "JobError",
+    "Jobs",
+    "build_health_report",
+    "create_server",
+    "health_report",
+    "make_handler",
+    "serve",
+    "start_health_warmup",
+    "warm_health",
+]
