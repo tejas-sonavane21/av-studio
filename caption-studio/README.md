@@ -248,6 +248,7 @@ cd caption-studio
 npm test          # node --test "tests/unit/*.test.js" → 305 tests
 npm run ui        # headless-Chrome smoke test of the editor page (87 checks)
 npm run e2e       # the two studios on the real song — needs the Python venv (see below)
+npm run quality   # the whole pass through the real UI, scored against the reference lyrics
 ```
 
 All test suites are pure Node — no browser, no dependencies. The integration test runs against the
@@ -283,6 +284,27 @@ any change to the editor wiring — the two bugs it caught were both invisible i
   rather than the page has its own `assert()` — `check()` evaluates its expression **inside the
   page**, so passing it a value instead of an expression silently sends that value as JavaScript
   (it did: the string `recording.wav` reached the browser as an expression and threw).
+
+### The quality pass, scored
+
+`npm run quality` drives the editor in headless Chrome against the **real** Python studio: it
+uploads the real song through the transcribe panel with `align=wav2vec`, loads the reference lyrics
+as the TRUTH file, runs the correction, and then measures what the page is showing — the caption
+text against the reference lyrics, and each early caption's window against the cue that introduced
+it. Nothing is stubbed. Two numbers come out of it that are worth stating:
+
+- the corrected document is **8.2 % WER** against the reference lyrics, down from **11.8 %** for the
+  raw transcription, with the remaining difference dominated by a hallucinated `Music` before the
+  first line and one transposed couplet in the chorus;
+- the first lyric lands at **13.40 s** while its cue in the reference file opens at **12.00 s** — and
+  the second line's cue is also 12.00 s, because that file introduces two lines per 4 s cue. The
+  timings you would use for *spelling* are seconds away from the audio; the measured ones are not.
+
+This also surfaced a real limitation worth knowing before you look for it: **the editor does not
+display the raw transcription.** Transcribing — like importing an AI source from disk — only puts
+the document in the store, because the editor's model is "correct an AI transcript against a
+trusted subtitle file". The caption list and the preview fill in when the correction runs. With no
+TRUTH file there is nothing to correct, so there is nothing on screen.
 
 ### The real end-to-end (the two studios, on the real song)
 
