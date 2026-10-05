@@ -30,7 +30,12 @@ pytest.importorskip("google.genai", reason="needs the [llm] extra")
 from audio_studio.config import DEFAULT_LLM_MODELS, ValidateOptions  # noqa: E402
 from audio_studio.model import Segment, Transcript, Word  # noqa: E402
 from audio_studio.validate import validate_transcript  # noqa: E402
-from audio_studio.validate.llm import LLM_MODEL_FALLBACKS, resolve_provider  # noqa: E402
+from audio_studio.validate.llm import (  # noqa: E402
+    LLM_MODEL_FALLBACKS,
+    QuotaError,
+    quota_error,
+    resolve_provider,
+)
 
 
 def build(lines) -> Transcript:
@@ -71,7 +76,9 @@ class StandIn:
                 outer.requests.append({"path": self.path, "body": body})
 
                 reply = outer.replies.pop(0) if outer.replies else {"text": '{"corrections":[]}'}
-                if "status" in reply:
+                if reply.get("body"):
+                    payload = str(reply["body"]).encode("utf-8")
+                elif "status" in reply:
                     payload = json.dumps(
                         {"error": {"code": reply["status"], "message": reply.get("message", ""), "status": "X"}}
                     ).encode("utf-8")
@@ -230,6 +237,48 @@ def test_a_busy_model_moves_to_the_next_candidate(stand_in):
     # and the ledger names the model that actually answered, not the one asked for
     record = checked.validation["passes"][0]
     assert record["model"] == LLM_MODEL_FALLBACKS["google"][0] != DEFAULT_LLM_MODELS["google"]
+
+
+def test_an_exhausted_quota_is_explained_and_not_retried(stand_in):
+    """
+    A 429 is the failure the free tier actually produces, and it must not look
+    like a busy model: there is nothing wrong with the key, the request or the
+    model name, so the next candidate must not be tried behind the caller's back.
+    """
+    server = stand_in(
+        [
+            {
+                "status": 429,
+                "message": "Resource has been exhausted",
+                "body": '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":['
+                '{"@type":"type.googleapis.com/google.rpc.QuotaFailure",'
+                '"violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},'
+                '{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"27s"}]}}',
+            }
+        ]
+    )
+    transcript = build([["hello"]])
+    options = ValidateOptions(provider="google", api_key="k", extra={"base_url": server.base_url})
+
+    with pytest.raises(QuotaError) as caught:
+        validate_transcript(transcript, options, "llm")
+
+    text = str(caught.value)
+    assert "429" in text and "no audio" in text.lower()
+    assert caught.value.quota_id == "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+    assert caught.value.retry_after == 27.0
+    assert len(server.requests) == 1  # the fallback must not mask an exhausted quota
+
+
+def test_quota_error_only_fires_for_quota_shaped_failures():
+    provider = resolve_provider(ValidateOptions(provider="google", api_key="k"))
+    assert quota_error(Exception("boom: 500 server error"), provider) is None
+    assert quota_error(Exception("403 API key not valid"), provider) is None
+    exhausted = quota_error(
+        Exception('429 RESOURCE_EXHAUSTED: {"retryDelay":"9s","quotaId":"Q"}'), provider, "gemini-x"
+    )
+    assert isinstance(exhausted, QuotaError)
+    assert exhausted.retry_after == 9.0 and exhausted.model == "gemini-x"
 
 
 def test_the_provider_points_at_the_base_url_it_was_given():

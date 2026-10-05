@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -68,6 +69,111 @@ MODEL_UNUSABLE_HINTS = (
 #: HTTP statuses that mean "try another model": gone, and busy. 401/403/429 are
 #: absent on purpose.
 MODEL_UNUSABLE_CODES = (404, 503)
+
+#: HTTP statuses that mean "a quota is exhausted". 429 stays out of
+#: ``MODEL_UNUSABLE_CODES`` on purpose: trying the next model would paper over an
+#: exhausted allowance, so it is *classified and explained* here instead. The
+#: caller has to know their project is out of budget, not that a model was busy.
+QUOTA_CODES = (429,)
+
+#: Text that identifies a quota refusal when the status is not on the exception
+#: (the SDK sometimes wraps the body in a message and drops the code).
+QUOTA_HINTS = ("resource_exhausted", "resource exhausted", "quota", "rate limit", "too many requests")
+
+
+class QuotaError(RuntimeError):
+    """
+    A request was refused because a provider quota is exhausted.
+
+    Kept separate from every other failure because nothing is *wrong*: the
+    request, the key and the model name are all valid, and the account has simply
+    spent its allowance. The message is the whole reason the class exists — it has
+    to say which allowance ran out, how long to wait, and what this studio
+    actually sent, because "429" on its own tells the caller none of that.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        retry_after: Optional[float] = None,
+        quota_id: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.model = model
+        self.retry_after = retry_after
+        self.quota_id = quota_id
+
+
+def _retry_after(text: str) -> Optional[float]:
+    """Seconds to wait, from a ``retryDelay``/``Retry-After`` field if present."""
+    match = re.search(r"retry[_\s-]?after[\"'\s:=]+(\d+(?:\.\d+)?)\s*s?", text, re.IGNORECASE)
+    if not match:
+        match = re.search(r"retry[_\s-]?delay[\"'\s:=]+(\d+(?:\.\d+)?)\s*s?", text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _quota_id(text: str) -> Optional[str]:
+    """The provider's own name for the exhausted allowance, e.g. ``...PerDay...``."""
+    match = re.search(r"quota[_\s-]?id[\"'\s:=]+([A-Za-z0-9_.\-]+)", text, re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def quota_error(exc: Exception, provider: "Provider", model: Optional[str] = None) -> Optional[QuotaError]:
+    """
+    Turn a raw provider exception into a legible quota failure, or ``None``.
+
+    This is the whole of bug-3 handling: the free tier meters requests per
+    minute, tokens per minute and requests per day, any one of which produces the
+    same opaque ``RESOURCE_EXHAUSTED``, and a caller cannot act on an opaque
+    error. Detecting it here means the numbers the provider did send — the retry
+    delay and its own name for the limit — are not thrown away.
+    """
+    response = getattr(exc, "response", None)
+    codes = (
+        getattr(exc, "code", None),
+        getattr(exc, "status_code", None),
+        getattr(response, "status_code", None),
+    )
+    text = str(exc)
+    lowered = text.lower()
+    if not (any(code in QUOTA_CODES for code in codes) or any(hint in lowered for hint in QUOTA_HINTS)):
+        return None
+
+    named = model or getattr(provider, "model", None) or "the model"
+    retry = _retry_after(text)
+    quota_id = _quota_id(text)
+
+    lines = [
+        f"the quota for {provider.name}/{named} is exhausted: it answered 429 RESOURCE_EXHAUSTED.",
+        "That is a rate/quota limit, not a bad key, a retired model or a bad request — the request was valid.",
+        "",
+    ]
+    if quota_id:
+        lines.append(f"  limit   {quota_id}")
+    if retry is not None:
+        lines.append(f"  wait    about {retry:.0f}s before trying again")
+    lines += [
+        "Gemini meters the free tier per *project* (not per API key) on requests per minute, tokens",
+        "per minute and requests per day; the daily figure resets at midnight Pacific.",
+        "",
+        "What this pass sent: the word list as TEXT, one request per batch of words. No audio, video",
+        "or file is ever uploaded — a three-minute song is a couple of small requests. So a 429 here",
+        "usually means the daily allowance was already spent, or this model name is not on the free",
+        "tier at all.",
+        "",
+        "See the live numbers for this project in Google AI Studio -> Rate limits, or name a model you",
+        "know is free with --llm-model (the studio does not guess free eligibilities).",
+    ]
+    return QuotaError("\n".join(lines), provider=provider.name, model=named, retry_after=retry, quota_id=quota_id)
 
 
 SYSTEM_PROMPT = """You are a transcript proofreader for a caption editor.
@@ -354,6 +460,11 @@ def ask(provider: Provider, prompt: str) -> str:
         try:
             reply = send(attempt, prompt)
         except Exception as exc:  # noqa: BLE001 - re-raised unless the model is unusable
+            exhausted = quota_error(exc, provider, model)
+            if exhausted is not None:
+                # Surfaced, never papered over: swapping models here would hide an
+                # exhausted allowance behind a run that merely looked fine.
+                raise exhausted from exc
             if not model_is_unusable(exc):
                 raise
             failures.append(f"{model}: {exc}")
@@ -454,7 +565,19 @@ class LLMValidator(Validator):
             # transcript's global word numbering before anyone can act on them.
             batch_breaks = [position - offset for position in breaks if offset < position <= offset + len(batch)]
             prompt = build_prompt(batch, transcript.language, batch_breaks)
-            reply = ask(provider, prompt)
+            try:
+                reply = ask(provider, prompt)
+            except QuotaError as exc:
+                # Say how far the run got, because "how much of my allowance is
+                # gone" is the first thing anyone asks after a 429.
+                sent = f"{number} request(s) already answered" if number else "no request answered"
+                raise QuotaError(
+                    f"{exc}\n\nThis run stopped on batch {number + 1}/{total} ({len(batch)} words) with {sent}.",
+                    provider=exc.provider,
+                    model=exc.model,
+                    retry_after=exc.retry_after,
+                    quota_id=exc.quota_id,
+                ) from exc
             for proposal in parse_reply(reply, batch, source=f"llm:{provider.name}"):
                 proposal.index += offset
                 proposals.append(proposal)
@@ -479,6 +602,7 @@ __all__ = [
     "PROVIDERS",
     "SYSTEM_PROMPT",
     "Provider",
+    "QuotaError",
     "ask",
     "ask_google",
     "ask_openrouter",
@@ -486,5 +610,6 @@ __all__ = [
     "extract_json",
     "find_api_key",
     "parse_reply",
+    "quota_error",
     "resolve_provider",
 ]
