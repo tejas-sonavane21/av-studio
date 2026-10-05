@@ -72,7 +72,8 @@ copied from a benchmark table:
 | model | wall time | throughput | lyric accuracy |
 |---|---|---|---|
 | `base` | ~25 s | ~7.3× | garbled |
-| `small` | ~78 s | ~2.3× | correct |
+| `small` | ~78 s | ~2.3× | **16.7 % WER** against the reference lyrics |
+| `medium` (`accurate`) | ~291 s | ~0.6× | **11.6 % WER** — the best of the three that finishes |
 | `distil-large-v3` | >400 s / 30 s slice | <0.1× | never finishes |
 
 Three backend defaults fall out of that, and each protects *timing*:
@@ -195,6 +196,93 @@ inversion of what used to happen when caption-studio inherited its word timings
 from Veed — where every word span was 0.08 s long and started up to 2 s late, so
 the midpoint a split cuts on was never on the audio.
 
+## Choosing a flow: accuracy, latency, and the free tier
+
+Three measurements settle the defaults. All of them are reproducible against the
+real fixture with the scratch scripts in `out/` (gitignored), and none of them is
+a claim about a benchmark table.
+
+### 1. Text quality: score the transcripts against the lyrics
+
+Word-level edit distance between each transcript and the reference lyrics in
+`referece_material/spidy.srt` (case and punctuation folded away, so only real
+word errors count):
+
+| preset | model | wall time | **WER** | misses to fix by hand |
+|---|---|---|---|---|
+| `fast` | `base` | ~25 s | garbled | too many to be worth it |
+| `balanced` *(default)* | `small` | ~82 s | **16.7 %** | `woke`/`awoke`, `of`/`a`, and a hallucinated `Music` before the first line |
+| `accurate` | `medium` | ~291 s | **11.6 %** | `moral`/`mortal`, `steal`/`shield`, `sailing`/`swinging`, `cast`/`catch`, `lost`/`loss` |
+
+The bigger model is a real gain — a third of the errors gone — but look at *which*
+errors it removes, and at the price. `medium` costs **~291 s against `small`'s
+~82 s** (3.5× the wall clock, on four cores, for the whole track) and almost every
+error it leaves behind is a **homophone**: right sound, wrong word. That is a
+proofreading decision, not a listening one, and it is the hosted `validate`
+pass's entire job. So the flow the numbers support is:
+
+1. `--preset balanced --align wav2vec` — the fast model for the words, the audio
+   for the timing;
+2. `--validate rules` to clean up punctuation and casing offline, for free;
+3. `--validate llm` when the host is reachable, to settle the homophones.
+
+A three-minute song costs one or two text requests, and the alignment is the only
+slow, model-bearing step. That is the "fast yet accurate" path: **do not buy
+accuracy with the big ASR model, buy it with the cheap text pass.**
+
+### 2. Time mapping: which clock is actually early
+
+A global shift sweep against the waveform: for each clock, find the single offset
+that best lines its word onsets up with the audio's energy rises. A **positive**
+best shift means the clock is running **early** (it has to be pushed later).
+Scored against a vocal-band energy flux (250–3500 Hz), because on a sung track a
+drum or a guitar hit can lead the voice and make a clock look unbiased against
+the full mix while still sounding early to a listener:
+
+| clock | vs the full mix | vs the voice band |
+|---|---|---|
+| Whisper `small`, **no alignment** | **+0.58 s** | +0.12 s |
+| `--align wav2vec` | −0.02 s | +0.00 s |
+| after caption-studio's own aligner | −0.04 s | +0.00 s |
+
+The "words appear before they are heard" symptom lives on the **first** row. It
+has one cause and it is not the aligner: Whisper pins every segment's first word
+*exactly* to the segment's leading edge (all 41 segments, gap `+0.000`), and a
+segment's leading edge is wherever the silence before the singing stopped — so
+the caption is on screen for the length of that lead-in. `--align wav2vec` moves
+the first word off the boundary (mean gap `+0.249 s`) and the bias goes to zero.
+The scripts are `out/shift_sweep.py` (the sweep) and `out/vocal_onset.py` (the
+band split).
+
+### 3. The free tier: what is uploaded, and what actually runs out
+
+**The validation pass uploads text, never media.** The hosted call receives a
+numbered list of the words in batches (`batch_words`, default 220) plus a short
+system instruction, at `temperature = 0`. The audio, the video and the file are
+never sent — a three-minute song is one or two small requests. So a quota error
+is never about the size of the recording.
+
+Gemini's free tier, from the provider's own documentation:
+
+- Limits are metered **per project, not per API key** — issuing another key under
+  the same project changes nothing.
+- Three counters apply at once — **requests/minute, tokens/minute, requests/day**
+  — and exceeding *any* one returns the same opaque `429 RESOURCE_EXHAUSTED`.
+- The **requests/day** counter resets at **midnight Pacific**.
+- The Flash models are **free of charge** on the Standard free tier; the **Pro**
+  models are not on the free tier at all. Naming a Pro model is the quickest way
+  to a 429 that has nothing to do with a quota.
+- The numbers themselves change, so they are not copied here. Read the live values
+  for your own project at **Google AI Studio → Rate limits**.
+
+That is also why a 429 is **not** retried on the next model. `MODEL_UNUSABLE_CODES`
+is only `404` and `503` — retired, or busy — because silently swapping models on
+an exhausted quota would hide the one fact the caller needs: the project is out of
+budget. A 429 raises `QuotaError` instead, carrying the provider's own name for
+the limit, its `retryDelay`, and how many batches the run got through before it
+stopped. `--llm-model` will point the pass at a model you know is free, and the
+studio does not guess which ones those are.
+
 ## What works today
 
 | Area | Status |
@@ -286,7 +374,7 @@ many CPU cores; a 4-core machine will not finish it in a sitting. VAD is
 ```bash
 cd audio-studio
 source .venv/Scripts/activate
-python -m pytest          # 247 tests, no model, no network, no browser
+python -m pytest          # 255 tests, no model, no network, no browser
 ```
 
 The suite is deliberately dependency-free: it runs on `pip install -e ".[dev]"`
