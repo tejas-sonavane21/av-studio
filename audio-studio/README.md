@@ -208,23 +208,43 @@ Word-level edit distance between each transcript and the reference lyrics in
 `referece_material/spidy.srt` (case and punctuation folded away, so only real
 word errors count):
 
-| preset | model | wall time | **WER** | misses to fix by hand |
+| preset | model | wall time | **WER** | what is left to fix by hand |
 |---|---|---|---|---|
 | `fast` | `base` | ~25 s | garbled | too many to be worth it |
-| `balanced` *(default)* | `small` | ~82 s | **16.7 %** | `woke`/`awoke`, `of`/`a`, and a hallucinated `Music` before the first line |
-| `accurate` | `medium` | ~291 s | **11.6 %** | `moral`/`mortal`, `steal`/`shield`, `sailing`/`swinging`, `cast`/`catch`, `lost`/`loss` |
+| `balanced` *(default)* | `small` | ~82 s | **11.8 %** | `awoke` → `woke`, `of`/`a`, the `hero's burden` / `warrior's soul` pair, `memorial`/`mortal`, `cast`/`catch`, `tool`/`toll`, `i'm`/`road` — and a hallucinated `Music` before the first line |
+| `balanced` + `--validate llm` | `small` | ~82 s + seconds | **7.8 %** | `fly`/`try`/`fight`, `loss`/`lost`, `innocent`/`innocents` |
+| `accurate` | `medium` | ~291 s | **6.7 %** | `moral`/`mortal`, `steal`/`shield`, `sailing`/`swinging`, `cast`/`catch`, `lost`/`loss` |
 
-The bigger model is a real gain — a third of the errors gone — but look at *which*
-errors it removes, and at the price. `medium` costs **~291 s against `small`'s
-~82 s** (3.5× the wall clock, on four cores, for the whole track) and almost every
-error it leaves behind is a **homophone**: right sound, wrong word. That is a
-proofreading decision, not a listening one, and it is the hosted `validate`
-pass's entire job. So the flow the numbers support is:
+`medium` costs **~291 s against `small`'s ~82 s** — 3.5× the wall clock, on four
+cores, for the whole track — and almost every error it leaves behind is a
+**homophone**: right sound, wrong word. That is a proofreading decision, not a
+listening one, which is the hosted `validate` pass's entire job. So the flow the
+numbers support is:
 
 1. `--preset balanced --align wav2vec` — the fast model for the words, the audio
    for the timing;
-2. `--validate rules` to clean up punctuation and casing offline, for free;
-3. `--validate llm` when the host is reachable, to settle the homophones.
+2. **`--validate llm`**, which is what actually closes the gap: measured on the
+   real song it took `small` from **11.8 % to 7.8 %**, for a few seconds instead of
+   209 extra ones. Ten of its twelve corrections were right
+   (`memorial → mortal`, `cast → catch`, `tool → toll`, `road → rope`,
+   `taste → chains`, `heroes → hero's`, `burn → burden,`, `worry → warrior's`,
+   `Our → A`), and two were wrong: it turned `woke` into `spark` instead of
+   `awoke`, and `to` into `whole`. That is the ledger earning its keep — every
+   proposal, accepted or not, is in the artifact and auditable — but it is not a
+   reason to trust the pass unread.
+
+Note which way that cut: `medium` *still* gets `mortal`/`cast`/`shield` wrong, and
+the text pass fixes exactly those. The two are complementary, and the cheap one is
+the one worth running.
+
+`--validate rules` is an **alternative** to the hosted pass, not a warm-up for
+it. It is offline, free, and honest about what it is: a **reporter, not a
+correcter**. It never rewrites a word — on the real song it proposed 6 findings
+and applied **0**, so the WER did not move at all. What it finds is the
+transcriber's *mechanical* tells, which no model is needed for: an empty word, a
+punctuation-only token, a zero-length timing left behind by an overlap being
+resolved, and a word repeated within 0.3 s across a musical break. Run it to see
+those, and to exercise the correction ledger with no network and no key.
 
 A three-minute song costs one or two text requests, and the alignment is the only
 slow, model-bearing step. That is the "fast yet accurate" path: **do not buy
@@ -274,6 +294,15 @@ Gemini's free tier, from the provider's own documentation:
   to a 429 that has nothing to do with a quota.
 - The numbers themselves change, so they are not copied here. Read the live values
   for your own project at **Google AI Studio → Rate limits**.
+
+Measured against this project's own key: it can see 61 models, and a one-word real
+request succeeded on `gemini-flash-latest`, `gemini-3.5-flash` and
+`gemini-flash-lite-latest`. `gemini-3.8-flash` — the only name in
+`LLM_MODEL_FALLBACKS` — was returning `503 UNAVAILABLE` at the same moment, which is
+exactly why the pass failed on the first two attempts: the default was busy, and so
+was the model it fell back to. Availability on the free tier is intermittent rather
+than exhausted, so `--llm-model` is the escape hatch, and the error names every
+model that was tried.
 
 That is also why a 429 is **not** retried on the next model. `MODEL_UNUSABLE_CODES`
 is only `404` and `503` — retired, or busy — because silently swapping models on
