@@ -66,7 +66,7 @@ function flattenAiBlocks(aiBlocks) {
  * would drag the block backwards over the previous one. Bounds come from the surrounding
  * AI words, the block's own envelope, and `floor` (the end of the previously emitted block).
  */
-function placeInsertions(items, { envEnd = null, slotEnd = null, floor = -Infinity } = {}) {
+function placeInsertions(items, { envStart = null, envEnd = null, slotEnd = null, floor = -Infinity } = {}) {
   let i = 0;
   while (i < items.length) {
     if (items[i].kind !== 'ins') { i++; continue; }
@@ -76,7 +76,13 @@ function placeInsertions(items, { envEnd = null, slotEnd = null, floor = -Infini
     const prev = i > 0 ? items[i - 1] : null;
     const next = j < items.length ? items[j] : null;
 
-    let lo = prev ? prev.end : floor;
+    // A *leading* run (no `prev`) is bounded by the block's own first AI word, not by `floor`.
+    // `floor` is the end of the previous emitted block, which — across an instrumental break —
+    // can be many seconds earlier than this block's first word. Bounding the run by `floor`
+    // stretched a single inserted word over the whole break, which is exactly how a caption
+    // ended up on screen fifteen seconds before it was sung. The AI stream is the timing
+    // authority, so its envelope wins over the gap; `floor` still wins if it is later.
+    let lo = prev ? prev.end : Number.isFinite(envStart) ? Math.max(floor, envStart) : floor;
     if (!Number.isFinite(lo)) lo = run[0].start;
     if (lo < floor) lo = floor;
 
@@ -104,6 +110,20 @@ function placeInsertions(items, { envEnd = null, slotEnd = null, floor = -Infini
         r.start = t;
         r.end = t + d;
         t += d;
+      });
+    } else if (Number.isFinite(envStart)) {
+      // a leading run with no room before it: nominal durations *ending* at the block's own first
+      // AI word, so the words keep a real duration and never reach back across the gap
+      const durations = run.map((r) => {
+        const letters = r.text.replace(/[^\p{L}\p{N}]/gu, '').length;
+        return Math.max(0.12, 0.06 * letters);
+      });
+      const total = durations.reduce((a, b) => a + b, 0);
+      let t = Math.max(floor, envStart - total);
+      run.forEach((r, k) => {
+        r.start = t;
+        r.end = t + durations[k];
+        t += durations[k];
       });
     } else {
       // nothing to anchor to (empty block): pin the run at the floor
@@ -181,10 +201,36 @@ export function alignCaptions({ aiBlocks = [], truthCues = [], policy = {}, styl
   }
 
   // --- give insertions a home block (previous block, else next) ---
+  //
+  // The choice matters more than it looks. A block's envelope becomes its on-screen window, so an
+  // insertion adopted by the block *before* it forces that caption to stay up until the inserted
+  // word — and across the 22-second instrumental hole that meant a caption on screen seconds
+  // before it was sung. So a word only joins the previous block when it sits within
+  // `gapThreshold` of that block's last measured word; one that lies across a silence gap is left
+  // for the reverse pass to hand to the **next** block, where it is a leading word and the
+  // envelope already covers it. Times are the TRUTH stream's, and they are used as a tie-breaker
+  // only — never as a bound — exactly as in align/anchors.js.
+  const envelope = new Map();
+  for (const w of aiWords) {
+    const e = envelope.get(w.blockIndex);
+    if (e) {
+      e.start = Math.min(e.start, w.start);
+      e.end = Math.max(e.end, w.end);
+    } else {
+      envelope.set(w.blockIndex, { start: w.start, end: w.end });
+    }
+  }
+
   let lastBlock = null;
+  let lastEnd = -Infinity;
   for (const r of resolved) {
-    if (r.blockIndex != null) lastBlock = r.blockIndex;
-    else if (lastBlock != null) r.blockIndex = lastBlock;
+    if (r.blockIndex != null) {
+      lastBlock = r.blockIndex;
+      lastEnd = envelope.get(lastBlock)?.end ?? r.end;
+    } else if (lastBlock != null && r.start - lastEnd <= p.gapThreshold) {
+      r.blockIndex = lastBlock;
+      lastEnd = Math.max(lastEnd, r.end);
+    }
   }
   let nextBlock = null;
   for (let i = resolved.length - 1; i >= 0; i--) {
@@ -230,7 +276,7 @@ export function alignCaptions({ aiBlocks = [], truthCues = [], policy = {}, styl
   groupList.forEach((group, gi) => {
     const items = group.items;
     const slotEnd = groupList[gi + 1]?.envStart ?? null;
-    placeInsertions(items, { envEnd: group.envEnd, slotEnd, floor: cursor });
+    placeInsertions(items, { envStart: group.envStart, envEnd: group.envEnd, slotEnd, floor: cursor });
 
     let prevEnd = -Infinity;
     for (const it of items) {

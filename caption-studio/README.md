@@ -182,6 +182,15 @@ keyword emphasis preserved, TRUTH spelling wins (`crush → catch`, `king → ki
 `soul → toll`), plus 30 punctuation and 21 case corrections, every one of them listed and auditable.
 The 22-second instrumental hole is reported as a timing gap and **not** stretched across.
 
+One timing bug was found and fixed here rather than in `audio-studio`, because it was introduced
+here. An inserted TRUTH word with no AI word in front of it — a *leading* insertion — used to be
+bounded by the **previous block's end**. Across the 22-second instrumental hole that stretched one
+inserted word over the entire break and switched its caption on screen roughly 15 s before it was
+sung. A leading insertion is now bounded by its own block's first measured word instead
+(`src/align/aligner.js`, `placeInsertions`): the AI stream is the timing authority, so its envelope
+wins over the gap, and `floor` still wins when it is later. On the reference pair the caption that
+began at 140.12 s now begins at 154.52 s, beside the word it belongs to.
+
 ## The audio-studio bridge
 
 This studio corrects an AI transcript against a trusted subtitle file, and it is good at it — but it
@@ -203,6 +212,12 @@ at the top of the page is where the two meet:
 3. **The provenance is shown, not swallowed** — which model transcribed, which aligner re-timed it,
    its confidence, how far the words moved, the validation ledger, and every warning the other studio
    attached. None of that is needed to *render* a caption; it is needed to *trust* one.
+
+That last panel is where the timing question is answered, so it is worth stating the answer. With
+`align = wav2vec` selected, the clock that arrives here is **unbiased against the voice band
+(+0.00 s)**. With alignment off it is not: the transcriber pins each segment's first word to the
+segment's leading edge, which is where the silence before the singing ended, and the transcript runs
+about **0.58 s early** against the full mix. The panel reports which of the two you are looking at.
 
 The transport lives in `src/io/audio-studio-client.js`, which holds no document, no state and no DOM:
 it is a function from (base URL, file, options) to (job, Veed JSON), with `fetch` injectable so the
@@ -230,7 +245,7 @@ with the server staying up (`/%zz` gives `400`).
 
 ```bash
 cd caption-studio
-npm test          # node --test "tests/unit/*.test.js" → 302 tests
+npm test          # node --test "tests/unit/*.test.js" → 305 tests
 npm run ui        # headless-Chrome smoke test of the editor page (87 checks)
 npm run e2e       # the two studios on the real song — needs the Python venv (see below)
 ```

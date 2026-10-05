@@ -65,6 +65,39 @@ test('preserves a timing gap instead of stretching across it', () => {
   assert.ok(report.gaps[0].duration >= 19);
 });
 
+test('a leading insertion stays beside its own AI word and does not reach back across a gap', () => {
+  const aiBlocks = [
+    { start: 0, end: 1, words: [{ text: 'hello', start: 0, end: 1, emphasis: false }] },
+    { start: 20, end: 21, words: [{ text: 'world', start: 20, end: 21, emphasis: false }] },
+  ];
+  // TRUTH drifts earlier by design: this cue's window opens at 10, so the inserted "oh" would
+  // sort a full ten seconds before the AI word it precedes. Bounding the insertion by `floor`
+  // (the previous block's end, 1) stretched it over the whole break and dragged the caption on
+  // screen seconds before it was sung. It must instead sit beside the block's own first AI word.
+  const truthCues = [
+    { start: 0, end: 1, lines: ['hello'] },
+    { start: 10, end: 21, lines: ['oh world'] },
+  ];
+  const { blocks } = alignCaptions({ aiBlocks, truthCues });
+
+  const inserted = blocks.flatMap((b) => b.words).find((w) => w.text === 'oh');
+  assert.ok(inserted, 'the insertion is still placed');
+  // It must lead the line it belongs to, not trail the one before it.
+  assert.ok(
+    inserted.start >= 19,
+    `a gap-spanning insertion must not be stretched back over the break, got ${inserted.start}`,
+  );
+  assert.ok(inserted.end <= 20.001);
+  // And the earlier caption must not be held on screen until then.
+  assert.ok(
+    blocks[0].end <= 1.5,
+    `a block must not adopt a word across a silence gap, got block end ${blocks[0].end}`,
+  );
+  assert.ok(blocks[1].start >= 19);
+  assert.ok(blocks[1].end <= 21.001);
+  assert.deepEqual(validateDocument({ schemaVersion: 1, canvas: CANVAS, blocks }).errors, []);
+});
+
 test('empty TRUTH acts as a pass-through (AI text preserved)', () => {
   const aiBlocks = [{ start: 0, end: 1, words: [{ text: 'hello', start: 0, end: 1, emphasis: false }] }];
   const { blocks, corrections } = alignCaptions({ aiBlocks, truthCues: [] });
