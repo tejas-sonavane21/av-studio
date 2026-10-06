@@ -295,14 +295,13 @@ Gemini's free tier, from the provider's own documentation:
 - The numbers themselves change, so they are not copied here. Read the live values
   for your own project at **Google AI Studio → Rate limits**.
 
-Measured against this project's own key: it can see 61 models, and a one-word real
-request succeeded on `gemini-flash-latest`, `gemini-3.5-flash` and
-`gemini-flash-lite-latest`. `gemini-3.8-flash` — the only name in
-`LLM_MODEL_FALLBACKS` — was returning `503 UNAVAILABLE` at the same moment, which is
-exactly why the pass failed on the first two attempts: the default was busy, and so
-was the model it fell back to. Availability on the free tier is intermittent rather
-than exhausted, so `--llm-model` is the escape hatch, and the error names every
-model that was tried.
+Measured against this project's own key: it can see 61 models, and one-word real
+requests succeed on the configured pair — `gemini-3.5-flash-lite` and its fallback
+`gemini-3.1-flash-lite`. `gemini-3.8-flash` was returning `503 UNAVAILABLE` in the
+same minute, which is the part that matters here: availability on the free tier is
+**intermittent** rather than exhausted, and the same model answers a minute later.
+So `--llm-model` is the escape hatch, and the error names every model that was
+tried.
 
 That is also why a 429 is **not** retried on the next model. `MODEL_UNUSABLE_CODES`
 is only `404` and `503` — retired, or busy — because silently swapping models on
@@ -311,6 +310,45 @@ budget. A 429 raises `QuotaError` instead, carrying the provider's own name for
 the limit, its `retryDelay`, and how many batches the run got through before it
 stopped. `--llm-model` will point the pass at a model you know is free, and the
 studio does not guess which ones those are.
+
+### Waiting out a spike: the cool-down
+
+Because a spike is normal weather on the free tier, a refusal is not the end of the
+pass — it is a wait. Which wait depends on what was refused and on which model
+refused it, and the numbers are pinned by a test rather than left to taste:
+
+| Situation | What the pass does |
+|---|---|
+| The **named** model answers `503` | waits **10 s**, then spends the fallback |
+| A **fallback** model answers `503` | waits **15 s**, and retries it **once** |
+| ...once that model has answered `RESOURCE_EXHAUSTED` **twice** | the full **15 → 30 → 60 → 120 s** ladder opens for it |
+| A model answers `404` — retired | swapped **immediately**: a retired name does not come back |
+| A rejected key, or the first `RESOURCE_EXHAUSTED` | raised untouched and explained |
+| Every request after the first | spaced **6 s** apart (≈10/min), so a long transcript cannot walk into the per-minute limit |
+
+Two asymmetries in that table are deliberate. The exponential ladder has to be
+**earned**: a transient spike costs fifteen seconds, not four minutes, because
+waiting minutes for something that clears in seconds is the failure mode a busy free
+tier invites. And the accounting is **per model**, so a saturated fallback cannot
+slow down a model that is answering fine.
+
+A `RESOURCE_EXHAUSTED` still stops the run — it is the caller's allowance, and
+swapping models would hide it — but it is now *counted*, and two of them are what
+earn the ladder. The counts live for the life of the process, which is what this
+studio's server is: two exhausted quotas noticed by one job are remembered by the
+next. The failure that arms a model says so in its own text, so a run that waits
+four minutes explains where the minutes went.
+
+Measured end to end against the real API: asking for the busy `gemini-3.8-flash`
+waited, moved to `gemini-3.1-flash-lite`, and came back with an answer in **20 s**. A
+raw single SDK call to that busy model raises in **2.7 s**, so almost all of that
+time is the studio's own policy — the SDK is not stacking invisible retries
+underneath it, and the number in the table is the number you actually wait.
+
+The waits are not slept through in the test suite: `tests/conftest.py` replaces the
+module's clock with one that records each wait instead of taking it, so the whole
+policy is asserted in milliseconds, on the order and the number of waits rather than
+on a stopwatch.
 
 ## What works today
 
@@ -437,6 +475,13 @@ What the newer tests are built around:
   stands up a **local provider** and points the *real* `google-genai` SDK at it.
   The SDK's own request/response path is therefore covered without a network, a
   key, or a good day at the provider.
+- **The cool-down schedule.** The same file scripts a busy model, an exhausted
+  quota and a retired name onto that local provider, and asserts the *waits the
+  pass asks for*: one 10 s hop to the fallback, one 15 s retry before the ladder is
+  earned, then 15 → 30 → 60 → 120 once it is, and nothing at all for a retired
+  name. The clock is faked for the whole directory (`tests/conftest.py`), so this
+  is free in time, and one test pins the five numbers themselves — they are a
+  product decision, not a detail of the code.
 
 Two tests exist specifically to lock the *interfaces* rather than the details:
 

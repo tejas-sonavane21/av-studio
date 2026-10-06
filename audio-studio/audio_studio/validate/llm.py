@@ -26,6 +26,30 @@ The key is looked for in ``--api-key``, then the provider's environment
 variables, then ``gemini_api_key.txt`` in the working directory or an ancestor —
 that last one because the repository root is the natural place to keep it, and the
 file is gitignored so it can never be published by accident.
+
+The free tier is a second, harder constraint on top of all that, and it does not
+fail the way a quota normally does: Gemini answers ``503 UNAVAILABLE`` in spikes
+with no pattern to them, and the very same model answers fine a minute later. A
+refusal is therefore not the end of the pass — it is a wait, and the wait is
+shaped by *what* was refused and by *which* model refused it:
+
+* a ``503`` on the model you named waits **10 s** and then moves to the fallback,
+  because a different model has its own capacity and trying it beats waiting
+  longer for the busy one;
+* a ``503`` on a fallback model waits **15 s** and retries it once;
+* the full **15 → 30 → 60 → 120 s** cool-down is held back until a model has
+  answered ``RESOURCE_EXHAUSTED`` twice. That is the one signal that separates
+  saturation from a spike, and the one case where waiting minutes is actually
+  right, so it is also the one case worth minutes;
+* a retired model (``404``) is swapped immediately — it is not coming back, so
+  there is nothing to wait for;
+* and consecutive requests to a provider are spaced apart, because a long
+  transcript is several batches and walking into the per-minute limit is the one
+  failure this pass causes itself.
+
+The state that decides all of this is **per model** and lives for the life of the
+process — which is exactly what this studio's server is: two exhausted quotas
+noticed by one job are remembered by the next.
 """
 
 from __future__ import annotations
@@ -33,6 +57,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -49,11 +75,11 @@ ENV_KEYS = {
     "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER_KEY"),
 }
 
-#: Phrases that mean "that model is not usable right now". Deliberately narrow:
-#: a quota error, a rejected key or a malformed request must not be mistaken for
-#: a model that has been retired or is merely busy, because then the next
-#: candidate would silently paper over a problem the caller needs to see.
-MODEL_UNUSABLE_HINTS = (
+#: Statuses that mean "that name is gone", as opposed to "that model is busy".
+#: Kept apart because they deserve opposite treatment: a retired name never comes
+#: back, so waiting for it is waiting for nothing.
+RETIRED_CODES = (404,)
+RETIRED_HINTS = (
     "not_found",
     "not found",
     "no longer available",
@@ -61,10 +87,17 @@ MODEL_UNUSABLE_HINTS = (
     "not a valid model",
     "unknown model",
     "unavailable model",
-    "high demand",
-    "overloaded",
-    "temporarily unavailable",
 )
+
+#: ...and these mean "that model is busy". A busy model does come back, so it is
+#: the one case where the only useful thing left to do is wait.
+BUSY_HINTS = ("high demand", "overloaded", "temporarily unavailable")
+
+#: Phrases that mean "that model is not usable right now". Deliberately narrow:
+#: a quota error, a rejected key or a malformed request must not be mistaken for
+#: a model that has been retired or is merely busy, because then the next
+#: candidate would silently paper over a problem the caller needs to see.
+MODEL_UNUSABLE_HINTS = RETIRED_HINTS + BUSY_HINTS
 
 #: HTTP statuses that mean "try another model": gone, and busy. 401/403/429 are
 #: absent on purpose.
@@ -79,6 +112,32 @@ QUOTA_CODES = (429,)
 #: Text that identifies a quota refusal when the status is not on the exception
 #: (the SDK sometimes wraps the body in a message and drops the code).
 QUOTA_HINTS = ("resource_exhausted", "resource exhausted", "quota", "rate limit", "too many requests")
+
+#: How long to wait when the *named* model is busy before trying the fallback.
+#: Short on purpose: the fallback is a different model with its own capacity, so
+#: switching is a better bet than waiting, and this wait only exists to let a
+#: momentary spike pass before spending the switch.
+BUSY_HOP_DELAY = 10.0
+
+#: The exponential cool-down, in seconds, applied to a *fallback* model that keeps
+#: answering busy. Only the first rung is available until the model has been
+#: exhausted twice — see ``QUOTA_STRIKES_TO_ARM``.
+BUSY_LADDER = (15.0, 30.0, 60.0, 120.0)
+
+#: How many rungs of ``BUSY_LADDER`` are available *before* it is armed. One: a
+#: single short retry, so a transient spike costs fifteen seconds and not four
+#: minutes.
+LADDER_DEPTH_UNARMED = 1
+
+#: ``RESOURCE_EXHAUSTED`` failures on one model that arm its full cool-down. Two,
+#: because one can be a per-minute limit that clears itself, while two says the
+#: allowance really is gone and backing off hard is the only honest answer left.
+QUOTA_STRIKES_TO_ARM = 2
+
+#: Minimum seconds between two requests to the same provider. The free tier meters
+#: requests per minute, and a long transcript is several batches, so the pass has
+#: to pace itself rather than discover the limit by hitting it.
+MIN_REQUEST_SPACING = 6.0
 
 
 class QuotaError(RuntimeError):
@@ -448,38 +507,183 @@ def ask_openrouter(provider: Provider, prompt: str, timeout: float = 120.0) -> s
     return payload["choices"][0]["message"]["content"]
 
 
+# --------------------------------------------------------------------------- #
+# the cool-down, and the memory behind it
+# --------------------------------------------------------------------------- #
+
+#: Indirection for the two clock calls, so a test can drive the cool-down through
+#: its state machine and assert the waits it asks for without anybody sleeping.
+_sleep = time.sleep
+_monotonic = time.monotonic
+
+#: Guards the two dicts below. The studio's server answers jobs on more than one
+#: thread, and "how many times has this model been exhausted" is shared state.
+_lock = threading.Lock()
+
+#: Provider name -> monotonic time of its last request *start*, for the pacing in
+#: ``_pace``. Per provider rather than per model because the provider meters the
+#: project, which is the stricter of the two.
+_last_request: dict[str, float] = {}
+
+#: ``(provider, model)`` -> ``RESOURCE_EXHAUSTED`` failures seen. Per model, which
+#: is what makes the cool-down per model: one busy fallback must not slow down the
+#: model that is answering fine.
+_quota_strikes: dict[tuple[str, str], int] = {}
+
+
+def quota_strikes(provider: str, model: str) -> int:
+    """How many quota failures this process has seen for one model."""
+    with _lock:
+        return _quota_strikes.get((provider, model), 0)
+
+
+def reset_retry_state() -> None:
+    """Forget the pacing clock and every strike count. For tests, and for anyone
+    who wants a long-lived process to start its accounting over."""
+    with _lock:
+        _last_request.clear()
+        _quota_strikes.clear()
+
+
+def _record_quota(provider: str, model: str) -> int:
+    """Count one ``RESOURCE_EXHAUSTED`` for a model, and return the new total."""
+    with _lock:
+        key = (provider, model)
+        _quota_strikes[key] = _quota_strikes.get(key, 0) + 1
+        return _quota_strikes[key]
+
+
+def _pace(provider: str) -> None:
+    """Block until this provider is due for another request.
+
+    The stamp is written while the lock is held and *before* the sleep, so two
+    threads cannot both decide they are due and then both wait the same interval.
+    """
+    with _lock:
+        now = _monotonic()
+        last = _last_request.get(provider)
+        wait = MIN_REQUEST_SPACING - (now - last) if last is not None else 0.0
+        _last_request[provider] = now + max(wait, 0.0)
+    if wait > 0:
+        _sleep(wait)
+
+
+def _busy_ladder(provider: str, model: str, fallback: bool) -> tuple[float, ...]:
+    """The waits available to one model before it is given up on.
+
+    The named model gets none: it hops to the fallback instead. A fallback gets
+    one rung, and all four once it has been exhausted enough times for the wait to
+    be worth the caller's patience.
+    """
+    if not fallback:
+        return ()
+    if quota_strikes(provider, model) >= QUOTA_STRIKES_TO_ARM:
+        return BUSY_LADDER
+    return BUSY_LADDER[:LADDER_DEPTH_UNARMED]
+
+
+def _with_arming_note(exhausted: QuotaError, strikes: int) -> QuotaError:
+    """Say so when a quota failure has just widened a model's cool-down.
+
+    Otherwise the next busy answer would wait four minutes with nothing in the
+    output to explain where the time went.
+    """
+    if strikes < QUOTA_STRIKES_TO_ARM:
+        return exhausted
+    ladder = " -> ".join(f"{delay:.0f}s" for delay in BUSY_LADDER)
+    return QuotaError(
+        f"{exhausted}\n\n{strikes} RESOURCE_EXHAUSTED failure(s) on {exhausted.model} have opened its full "
+        f"cool-down: while it stays busy the next attempt waits {ladder} instead of one "
+        f"{BUSY_LADDER[0]:.0f}s retry.",
+        provider=exhausted.provider,
+        model=exhausted.model,
+        retry_after=exhausted.retry_after,
+        quota_id=exhausted.quota_id,
+    )
+
+
 def ask(provider: Provider, prompt: str) -> str:
-    """Send one prompt to the provider's current model, with a name-rot fallback."""
+    """
+    Send one prompt to the provider's current model, with a name-rot fallback and
+    a free-tier cool-down between the attempts.
+
+    The three failures are kept apart because they want three different answers:
+    an exhausted quota and a rejected key are the caller's to fix and are raised
+    untouched, a retired model is swapped immediately, and only a *busy* model is
+    waited for. See the module docstring for the shape of the wait.
+    """
     if provider.name not in PROVIDERS:
         raise ValueError(f"unknown provider {provider.name!r}")
 
     send = ask_google if provider.name == "google" else ask_openrouter
     failures: list[str] = []
-    for model in provider.candidates():
-        attempt = replace(provider, model=model)
-        try:
-            reply = send(attempt, prompt)
-        except Exception as exc:  # noqa: BLE001 - re-raised unless the model is unusable
-            exhausted = quota_error(exc, provider, model)
-            if exhausted is not None:
-                # Surfaced, never papered over: swapping models here would hide an
-                # exhausted allowance behind a run that merely looked fine.
-                raise exhausted from exc
-            if not model_is_unusable(exc):
-                raise
-            failures.append(f"{model}: {exc}")
-            continue
-        # Note the model that answered, on the provider the caller already holds.
-        # A fallback run has to record the model that really replied, not the one
-        # that was asked for.
-        provider.model = model
-        return reply
+    candidates = provider.candidates()
+    for position, model in enumerate(candidates):
+        # A fallback is anything after the model the caller actually named.
+        fallback = position > 0
+        ladder = _busy_ladder(provider.name, model, fallback)
+        rung = 0
+        while True:
+            _pace(provider.name)
+            attempt = replace(provider, model=model)
+            try:
+                reply = send(attempt, prompt)
+            except Exception as exc:  # noqa: BLE001 - re-raised unless the model is unusable
+                exhausted = quota_error(exc, provider, model)
+                if exhausted is not None:
+                    # Surfaced, never papered over: swapping models here would hide
+                    # an exhausted allowance behind a run that merely looked fine.
+                    # It is still counted, because two of these are what widen the
+                    # cool-down for the model that kept saying it.
+                    raise _with_arming_note(exhausted, _record_quota(provider.name, model)) from exc
+                if not model_is_unusable(exc):
+                    raise
+                if model_is_retired(exc):
+                    # It is not coming back. Wait for the next candidate instead.
+                    failures.append(f"{model}: {exc}")
+                    break
+                if rung < len(ladder):
+                    _sleep(ladder[rung])
+                    rung += 1
+                    continue
+                if not fallback and position + 1 < len(candidates):
+                    # Busy, but there is another model to try. Let the spike pass,
+                    # then spend the switch rather than waiting for this one again.
+                    _sleep(BUSY_HOP_DELAY)
+                failures.append(f"{model}: {exc}")
+                break
+            # Note the model that answered, on the provider the caller already
+            # holds. A fallback run has to record the model that really replied,
+            # not the one that was asked for.
+            provider.model = model
+            return reply
     raise RuntimeError(
         "no configured model for "
         + provider.name
         + " is usable right now: "
         + "; ".join(failures)
     )
+
+
+def model_is_retired(exc: Exception) -> bool:
+    """
+    Whether an error means "that model name no longer exists".
+
+    Separate from :func:`model_is_unusable` because a retired model and a busy one
+    look alike from the outside and are opposites in practice: the first is worth
+    exactly zero seconds of waiting, and the second is worth more than the pass
+    currently gives it.
+    """
+    response = getattr(exc, "response", None)
+    codes = (
+        getattr(exc, "code", None),
+        getattr(exc, "status_code", None),
+        getattr(response, "status_code", None),
+    )
+    if any(code in RETIRED_CODES for code in codes):
+        return True
+    text = str(exc).lower()
+    return any(hint in text for hint in RETIRED_HINTS)
 
 
 def model_is_unusable(exc: Exception) -> bool:
@@ -609,7 +813,11 @@ __all__ = [
     "build_prompt",
     "extract_json",
     "find_api_key",
+    "model_is_retired",
+    "model_is_unusable",
     "parse_reply",
     "quota_error",
+    "quota_strikes",
+    "reset_retry_state",
     "resolve_provider",
 ]

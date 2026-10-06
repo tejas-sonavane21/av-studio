@@ -34,3 +34,44 @@ def write_silent_wav(path: Path, seconds: float = 2.0, rate: int = 8000, channel
 @pytest.fixture()
 def wav_file(tmp_path: Path) -> Path:
     return write_silent_wav(tmp_path / "clip.wav", seconds=2.0)
+
+
+class FakeClock:
+    """A monotonic clock that only moves when something sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def llm_clock(monkeypatch):
+    """Drive every free-tier cool-down through a fake clock.
+
+    The retry policy is written in seconds, so a test that verified it by really
+    waiting would add minutes to the suite to learn nothing: what matters is
+    *which* waits the pass asks for, in which order, and how many requests come out
+    of one refusal. So ``validate.llm``'s ``_sleep`` and ``_monotonic`` are
+    replaced for every test in this directory, and a test that wants to inspect the
+    waits just takes ``llm_clock`` as an argument.
+
+    Autouse rather than opt-in because the failure mode of forgetting it is a slow
+    suite, which is easy to not notice. It also resets the module's per-model
+    strike counts before and after each test, so no test can arm another one's
+    cool-down.
+    """
+    from audio_studio.validate import llm
+
+    clock = FakeClock()
+    monkeypatch.setattr(llm, "_sleep", clock.sleep)
+    monkeypatch.setattr(llm, "_monotonic", clock.monotonic)
+    llm.reset_retry_state()
+    yield clock
+    llm.reset_retry_state()

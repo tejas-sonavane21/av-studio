@@ -170,7 +170,7 @@ DEFAULT_VALIDATOR = "rules"
 #: broken run for anyone who installed the studio a few months after it was
 #: written, with nothing in the code to blame.
 DEFAULT_LLM_MODELS = {
-    "google": "gemini-flash-latest",
+    "google": "gemini-3.5-flash-lite",
     "openrouter": "google/gemini-flash-latest",
 }
 
@@ -178,7 +178,7 @@ DEFAULT_LLM_MODELS = {
 #: Not a retry (a retired model will not come back) but a hedge against exactly the
 #: rot above, so an installed studio keeps working without an upgrade.
 LLM_MODEL_FALLBACKS = {
-    "google": ("gemini-3.8-flash",),
+    "google": ("gemini-3.1-flash-lite",),
     "openrouter": ("google/gemini-3.8-flash",),
 }
 
