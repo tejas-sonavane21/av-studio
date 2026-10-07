@@ -299,6 +299,9 @@ async function onTranscribe() {
     language: $('#transcribe-language').value.trim(),
     align: $('#transcribe-align').value,
     validate: $('#transcribe-validate').value,
+    // 'auto' asks the studio to write the words the LLM validator picked to emphasise into the
+    // Veed ranges — the AI auto-highlight. Empty means off, and is sent as absent.
+    emphasis: $('#transcribe-emphasis').value || undefined,
     emit: 'json,veed,srt,vtt',
     referenceText: lyrics,
     referenceName: lyricsFile?.name,
@@ -314,6 +317,7 @@ async function onTranscribe() {
   log(
     `transcribe: "${file.name}" (${(file.size / 1e6).toFixed(1)} MB)` +
       `${options.align ? ` · align ${options.align}` : ''}${options.validate ? ` · validate ${options.validate}` : ''}` +
+      `${options.emphasis ? ` · emphasis ${options.emphasis}` : ''}` +
       `${lyricsFile ? ` · lyrics "${lyricsFile.name}"` : ''}`,
   );
 

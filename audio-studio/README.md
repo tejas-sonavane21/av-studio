@@ -115,11 +115,18 @@ requires zero changes to `caption-studio`.** Our timings become the timing
 authority, and loading an SRT alongside still corrects the spelling exactly as
 before.
 
-On emphasis we deliberately invent nothing. Veed's "auto-highlight" picks
-*keywords* — a model decision we cannot reproduce, and fabricating ranges would
-be the silent guessing this suite forbids. The default emits none; if you want
-karaoke highlighting, `caption-studio`'s `emphasis.source = 'active'` needs no
-ranges at all.
+On emphasis the default invents nothing: Veed's "auto-highlight" picks *keywords*,
+and fabricating ranges from a rule would be the silent guessing this suite forbids.
+`--emphasis none` (the default) emits none, and if you want karaoke highlighting,
+`caption-studio`'s `emphasis.source = 'active'` needs no ranges at all.
+
+`--emphasis auto` is the other honest answer: it writes one range per word the
+**LLM validator chose** to emphasise. That choice is part of the same proofreading
+request (`validate/llm.py` asks for corrections *and* highlights in one reply),
+it is recorded in the ledger as a proposal that changes no text, and the emitter
+then turns the recorded word numbers into Veed ranges. So emphasis is a model
+decision, made and audited — never a guess. With no highlights recorded, `auto`
+emits nothing.
 
 ## The server (how `caption-studio` actually calls this)
 

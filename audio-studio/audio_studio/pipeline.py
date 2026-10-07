@@ -201,6 +201,7 @@ def summarise_passes(transcript: Transcript) -> list[str]:
 
     passes = (transcript.validation or {}).get("passes") or []
     for record in passes:
+        highlights = len(record.get("highlights") or [])
         lines.append(
             "  validation     {validator}{provider}: {corrections} proposed, {applied} applied".format(
                 validator=record.get("validator", "?"),
@@ -208,6 +209,7 @@ def summarise_passes(transcript: Transcript) -> list[str]:
                 corrections=record.get("corrections", 0),
                 applied=record.get("applied", 0),
             )
+            + (f", {highlights} word(s) picked to emphasise" if highlights else "")
         )
 
     if transcript.corrections:

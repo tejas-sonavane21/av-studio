@@ -234,7 +234,11 @@ function startStubStudio() {
         meanShift: 0.21,
         wordsClamped: 0,
       },
-      validation: { passes: [{ validator: 'rules', corrections: 0, applied: 0, outcomes: {} }] },
+      validation: {
+        passes: [
+          { validator: 'llm', corrections: 0, applied: 0, outcomes: {}, highlights: [2, 5], highlightedWords: ['night', 'light'] },
+        ],
+      },
       corrections: [],
       warnings: ['2 of 2 segments were aligned with a synthetic stand-in'],
       language: 'en',
@@ -1001,6 +1005,10 @@ async function main() {
     (v) => String(v).includes('spidy.srt'),
   );
 
+  await evaluate(
+    cdp,
+    '(()=>{const s=document.querySelector("#transcribe-emphasis");s.value="auto";s.dispatchEvent(new Event("change"));})()',
+  );
   await evaluate(cdp, 'document.querySelector("#transcribe-btn").click()');
   await check(
     cdp,
@@ -1028,6 +1036,11 @@ async function main() {
   assert(
     'and the options the user chose rode along',
     String(stubState.uploads[0]?.query ?? '').includes('align=wav2vec'),
+    `query was ${JSON.stringify(stubState.uploads[0]?.query)}`,
+  );
+  assert(
+    'including the AI auto-highlight request',
+    String(stubState.uploads[0]?.query ?? '').includes('emphasis=auto'),
     `query was ${JSON.stringify(stubState.uploads[0]?.query)}`,
   );
   const uploadQuery = new URLSearchParams(stubState.uploads[0]?.query ?? '');
@@ -1076,6 +1089,12 @@ async function main() {
     'the warnings the other studio attached are carried through',
     'document.querySelector("#log").textContent',
     (v) => String(v).includes('a synthetic stand-in'),
+  );
+  await check(
+    cdp,
+    'the AI auto-highlight picks are shown in the audit',
+    'document.querySelector("#transcribe-note").textContent',
+    (v) => String(v).includes('2 word(s) picked to emphasise'),
   );
   await check(
     cdp,

@@ -300,13 +300,25 @@ def _summarise(
     for entry in ledger:
         outcomes[entry.outcome] = outcomes.get(entry.outcome, 0) + 1
 
+    # Highlights are proposals that change no text, so they are recorded like any other entry and
+    # then *collected* here: the emitter reads this list to decide which words to emphasise in the
+    # Veed output, and it does so by word number, so the record has to name both.
+    picked = sorted(
+        (entry for entry in ledger if entry.report_only and entry.type == "highlight"),
+        key=lambda entry: entry.index,
+    )
+
+    # A highlight is not a correction. It is recorded in the ledger and counted under ``outcomes``
+    # like everything else, but "3 corrections proposed" must not mean "the model picked three words
+    # to emphasise" — so the count and the mean are over the entries that propose a *change*.
+    counted = [entry for entry in ledger if entry.type != "highlight"]
     record = {
         "validator": backend,
-        "corrections": len(ledger),
+        "corrections": len(counted),
         "applied": len(applied),
         "outcomes": outcomes,
         "minConfidence": options.min_confidence,
-        "meanConfidence": round(sum(e.confidence for e in ledger) / len(ledger), 4) if ledger else 0.0,
+        "meanConfidence": round(sum(e.confidence for e in counted) / len(counted), 4) if counted else 0.0,
     }
     if provider:
         record["provider"] = provider
@@ -316,6 +328,9 @@ def _summarise(
         record["appliedWords"] = [
             {"from": entry.from_text, "to": entry.to_text, "index": entry.index} for entry in applied
         ]
+    if picked:
+        record["highlights"] = [entry.index for entry in picked]
+        record["highlightedWords"] = [entry.from_text for entry in picked]
 
     previous = dict(transcript.validation or {})
     return {**previous, "passes": list(previous.get("passes") or []) + [record]}

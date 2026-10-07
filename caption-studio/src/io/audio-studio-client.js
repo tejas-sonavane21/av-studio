@@ -49,7 +49,7 @@ export const TRANSCRIBE_OPTIONS = {
   llmProvider: 'auto | google | openrouter',
   llmModel: 'model name for the validation pass',
   emit: 'comma list of artifacts to produce: json,veed,srt,vtt',
-  emphasis: 'none | all',
+  emphasis: 'none | all | auto (auto writes the words the llm validator picked)',
   referenceText: "the original lyrics themselves (or `reference`, a path the server can read)",
   referenceName: 'what to call that file in the artifact; the browser cannot send a path',
   referenceMinMatch: 'share of words that must agree before the lyrics are trusted (default 0.5)',
@@ -329,7 +329,11 @@ export function describeStudioAudit(veed) {
   }
 
   for (const pass of audit.validation?.passes ?? []) {
-    lines.push(`validation ${pass.validator}: ${pass.corrections} proposed, ${pass.applied} applied`);
+    const picked = pass.highlights?.length ?? 0;
+    lines.push(
+      `validation ${pass.validator}: ${pass.corrections} proposed, ${pass.applied} applied` +
+        (picked ? `, ${picked} word(s) picked to emphasise` : ''),
+    );
   }
   if (audit.corrections?.length) lines.push(`corrections ${audit.corrections.length} ledger entries`);
   for (const warning of audit.warnings ?? []) lines.push(`warning: ${warning}`);
