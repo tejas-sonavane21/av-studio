@@ -133,6 +133,8 @@ def to_veed_master(
     # came from, which pass moved them, and what the validation ledger did. A
     # timing artifact with no provenance is a number nobody can argue with.
     audit: dict = {}
+    if transcript.reference:
+        audit["reference"] = dict(transcript.reference)
     if transcript.alignment:
         audit["alignment"] = dict(transcript.alignment)
     if transcript.validation:

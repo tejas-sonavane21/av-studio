@@ -368,6 +368,69 @@ def test_a_job_can_ask_for_the_optional_passes(server, wav_file):
     assert done["summary"]["validation"]["passes"][0]["validator"] == "rules"
 
 
+def test_the_lyrics_can_be_posted_with_the_job(server, wav_file):
+    """
+    The browser route: caption-studio reads the user's lyric file and posts its text,
+    because a page cannot read a path off the user's disk. The job must record which
+    file it was and what the pass did with it.
+    """
+    base, _ = server
+    lyrics = "We rise before the morning light,\nAnd carry every promise that we made along the long way home,\nThe road taught us how to wait\nforever\n"
+    status, job = request(
+        f"{base}/transcribe",
+        "POST",
+        {
+            "path": str(wav_file),
+            "engine": "fake",
+            "referenceText": lyrics,
+            "referenceName": "spidy.srt",
+        },
+    )
+    assert status == 202
+    assert job["reference"] == {"name": "spidy.srt", "minMatch": 0.5}
+
+    done = wait_for(base, job["jobId"])
+    assert done["status"] == "done", done.get("error")
+    reference = done["summary"]["reference"]
+    assert reference["outcome"] == "applied"
+    assert reference["counts"]["inserted"] == 1
+    assert done["summary"]["words"] == 6 + 13 + 6 + 1
+
+
+def test_the_match_floor_is_the_client_s_decision(server, wav_file):
+    """
+    The same unrelated lyric file, twice: refused at the default floor and applied
+    when the client lowers it to zero. The floor is the one thing standing between a
+    wrong file and a rewritten transcript, so both sides of it are worth pinning.
+    """
+    base, _ = server
+    for floor, outcome, words in ((None, "refused", 25), (0.0, "applied", 3)):
+        payload = {
+            "path": str(wav_file),
+            "engine": "fake",
+            "referenceText": "kangaroo wallaby wombat",
+        }
+        if floor is not None:
+            payload["referenceMinMatch"] = floor
+        status, job = request(f"{base}/transcribe", "POST", payload)
+        assert status == 202
+        if floor is not None:
+            assert job["reference"]["minMatch"] == floor
+
+        done = wait_for(base, job["jobId"])
+        assert done["status"] == "done", done.get("error")
+        assert done["summary"]["reference"]["outcome"] == outcome
+        assert done["summary"]["words"] == words
+
+
+def test_a_job_without_lyrics_carries_no_reference_block(server, wav_file):
+    base, _ = server
+    _, job = request(f"{base}/transcribe", "POST", {"path": str(wav_file), "engine": "fake"})
+    assert job.get("reference") is None
+    done = wait_for(base, job["jobId"])
+    assert done["summary"]["reference"] is None
+
+
 def test_an_unknown_aligner_or_validator_is_refused_by_name(server, wav_file):
     base, _ = server
     status, body = request(
@@ -429,6 +492,14 @@ def test_a_missing_file_is_rejected_before_a_job_exists(server, tmp_path):
         ({}, "required"),
         ({"path": "x.mp3", "engine": "nope"}, "unknown engine"),
         ({"path": "x.mp3", "preset": "nope"}, "unknown preset"),
+        # A lyric file that cannot be read is rejected at submit time, not minutes
+        # later by a job that has already transcribed the audio.
+        ({"path": "x.mp3", "reference": "no/such/lyrics.srt"}, "could not read"),
+        ({"path": "x.mp3", "referenceText": "   \n \n"}, "contains no words"),
+        ({"path": "x.mp3", "reference": "a.srt", "referenceText": "hi"}, "not both"),
+        ({"path": "x.mp3", "referenceText": "hi", "referenceMinMatch": "nope"}, "between 0 and 1"),
+        ({"path": "x.mp3", "referenceText": "hi", "referenceMinMatch": 2}, "between 0 and 1"),
+        ({"path": "x.mp3", "reference": [1, 2]}, "must be a path"),
     ],
 )
 def test_bad_requests_are_400(server, tmp_path, payload, fragment):

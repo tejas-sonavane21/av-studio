@@ -277,3 +277,103 @@ def test_serve_is_wired_to_a_handler():
 
 def test_native_module_is_importable_for_tests():
     assert native.KIND == "json"
+
+
+# --------------------------------------------------------------------------- #
+# --reference: the original lyrics
+# --------------------------------------------------------------------------- #
+
+#: The fake engine says exactly this (``engines/fake.py``, ``DEFAULT_LINES``), so a
+#: reference built from it with different punctuation and one extra word is a
+#: transcript that reconciles: everything matches on spelling, and one word is new.
+LYRICS = """We rise before the morning light,
+And carry every promise that we made along the long way home,
+The road taught us how to wait
+forever
+"""
+
+FAKE_LINE_WORDS = 6 + 13 + 6
+
+
+def test_transcribe_with_the_original_lyrics_takes_the_words_from_the_file(wav_file, tmp_path, capsys):
+    """
+    End to end through the CLI: the words come from the file, the count is the file's,
+    and the artifact says which file and how well it matched.
+    """
+    lyrics = tmp_path / "lyrics.txt"
+    lyrics.write_text(LYRICS, encoding="utf-8")
+    out = tmp_path / "out"
+
+    code = main(
+        [
+            "transcribe", str(wav_file), "--engine", "fake", "--no-decode",
+            "--out", str(out), "--reference", str(lyrics), "-q",
+        ]
+    )
+    assert code == 0
+    speech = read(out / "clip.speech.json")
+
+    reference = speech["reference"]
+    assert reference["outcome"] == "applied"
+    assert reference["name"] == "lyrics.txt"
+    assert reference["words"] == FAKE_LINE_WORDS + 1
+    assert reference["counts"]["inserted"] == 1
+    assert speech["stats"]["words"] == FAKE_LINE_WORDS + 1
+
+    first_block = speech["segments"][0]
+    assert first_block["text"].startswith("We rise before the morning light,"), "the file's punctuation wins"
+
+
+def test_the_cli_reports_what_the_reference_pass_did(wav_file, tmp_path, capsys):
+    lyrics = tmp_path / "lyrics.txt"
+    lyrics.write_text(LYRICS, encoding="utf-8")
+    main(
+        [
+            "transcribe", str(wav_file), "--engine", "fake", "--no-decode",
+            "--out", str(tmp_path / "out"), "--reference", str(lyrics), "-q",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "reference" in out and "applied" in out and "1 inserted" in out
+
+
+def test_an_unreadable_reference_fails_before_anything_is_written(wav_file, tmp_path, capsys):
+    """
+    A lyric file that cannot be read is a typo on the command line. It must fail the
+    run — not quietly pass as "no reference" — and it must fail *before* the
+    transcription, which is the slow part.
+    """
+    out = tmp_path / "out"
+    code = main(
+        [
+            "transcribe", str(wav_file), "--engine", "fake", "--no-decode",
+            "--out", str(out), "--reference", str(tmp_path / "nope.srt"), "-q",
+        ]
+    )
+    assert code == 1
+    assert "nope.srt" in capsys.readouterr().err
+    assert not out.exists() or not list(out.glob("*"))
+
+
+def test_a_reference_for_another_song_is_refused_and_says_so(wav_file, tmp_path, capsys):
+    lyrics = tmp_path / "other.txt"
+    lyrics.write_text("kangaroo wallaby wombat\n", encoding="utf-8")
+    out = tmp_path / "out"
+    assert main(
+        [
+            "transcribe", str(wav_file), "--engine", "fake", "--no-decode",
+            "--out", str(out), "--reference", str(lyrics), "-q",
+        ]
+    ) == 0
+
+    speech = read(out / "clip.speech.json")
+    assert speech["reference"]["outcome"] == "refused"
+    assert speech["stats"]["words"] == FAKE_LINE_WORDS, "a refusal changes nothing"
+    assert any("refused" in warning for warning in speech["warnings"])
+
+
+def test_the_reference_flag_is_on_transcribe_align_and_validate():
+    for argv in (["transcribe", "x.wav"], ["align", "x.json", "--audio", "x.wav"], ["validate", "x.json"]):
+        args = build_parser().parse_args([*argv, "--reference", "lyrics.srt"])
+        assert args.reference == "lyrics.srt"
+        assert args.reference_min_match == 0.5

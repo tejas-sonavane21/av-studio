@@ -202,3 +202,27 @@ class ValidateOptions:
     #: makes the model's answer cheap to check against the input.
     batch_words: int = 220
     extra: dict = field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------- #
+# Phase E — reference reconciliation
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class ReconcileOptions:
+    """
+    Knobs for the reference pass.
+
+    ``min_match`` is the only one that really matters, and it is the difference
+    between *use these words* and *these words are for another song*. Everything
+    else about the pass is deterministic.
+    """
+
+    #: The share of words on which the audio and the lyric sheet must agree before
+    #: the sheet is trusted to rewrite the transcript. Measured on this project's own
+    #: fixture, ``small``'s transcript agrees with the real lyric sheet on ~88% of
+    #: words, so a half is a floor with a lot of room under it: what it catches is a
+    #: wrong file, not a hard recording.
+    min_match: float = 0.5
+    extra: dict = field(default_factory=dict)

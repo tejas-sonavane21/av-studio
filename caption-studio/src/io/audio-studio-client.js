@@ -50,7 +50,20 @@ export const TRANSCRIBE_OPTIONS = {
   llmModel: 'model name for the validation pass',
   emit: 'comma list of artifacts to produce: json,veed,srt,vtt',
   emphasis: 'none | all',
+  referenceText: "the original lyrics themselves (or `reference`, a path the server can read)",
+  referenceName: 'what to call that file in the artifact; the browser cannot send a path',
+  referenceMinMatch: 'share of words that must agree before the lyrics are trusted (default 0.5)',
 };
+
+/**
+ * The most a query string may carry before the server refuses the request line.
+ *
+ * Not a guess: Python's `http.server` reads the request line with a 64 KB ceiling and
+ * answers 414 past it, and this client sends the lyric file as an option (see
+ * `startUpload`). A lyric sheet is a few kilobytes, so a 48 KB budget has room to
+ * spare — and passing it means a message that says what to do, rather than a bare 414.
+ */
+export const MAX_QUERY_CHARS = 48000;
 
 export class AudioStudioError extends Error {
   constructor(message, { status = 0, detail = null, hint = '' } = {}) {
@@ -169,6 +182,13 @@ export async function health(baseUrl = DEFAULT_BASE_URL, { fetchImpl = fetch, ti
 export async function startUpload(baseUrl, file, options = {}, { fetchImpl = fetch } = {}) {
   const base = normalizeBaseUrl(baseUrl);
   const query = buildQuery({ name: file?.name, ...options });
+  if (query.length > MAX_QUERY_CHARS) {
+    throw new AudioStudioError(`the job request is ${query.length} characters long`, {
+      hint:
+        `the lyrics ride in the query string, which the server caps at 64 KB — trim the file to the ` +
+        `sung lines (the limit is ${MAX_QUERY_CHARS} characters) and try again`,
+    });
+  }
   let response;
   try {
     response = await fetchImpl(`${base}/transcribe/upload?${query}`, {
@@ -278,6 +298,23 @@ export function describeStudioAudit(veed) {
   const engineName = [engine.name, engine.model].filter(Boolean).join('/') || 'unknown';
   lines.push(`engine ${engineName}${engine.preset ? ` (preset ${engine.preset})` : ''}`);
 
+  // The reference pass is reported before the alignment, because that is the order they
+  // ran in and because it explains the text the alignment numbers below refer to.
+  const reference = audit.reference;
+  if (reference) {
+    const name = reference.name || 'lyrics';
+    const rolling = reference.rolling ? ' (rolling)' : '';
+    if (reference.outcome === 'applied') {
+      const counts = reference.counts ?? {};
+      lines.push(
+        `reference ${name}${rolling}: ${Math.round((reference.matchRate ?? 0) * 100)}% of the audio matched the file — ` +
+          `${counts.rewritten ?? 0} rewritten, ${counts.inserted ?? 0} inserted, ${counts.deleted ?? 0} deleted`,
+      );
+    } else {
+      lines.push(`reference ${name}${rolling}: REFUSED — ${reference.reason ?? 'the file does not match this audio'}`);
+    }
+  }
+
   const alignment = audit.alignment;
   if (alignment) {
     const aligner = [alignment.aligner, alignment.model].filter(Boolean).join('/');
@@ -305,7 +342,20 @@ export function describeStudioAudit(veed) {
  * `align` and `validate` are sent as `undefined` rather than `'off'` when disabled: the server's
  * own default is "do not run it", and sending a value it does not know would be a 400.
  */
-export function optionsFor({ preset, language, align, validate, engine, model, llmModel, emit, emphasis } = {}) {
+export function optionsFor({
+  preset,
+  language,
+  align,
+  validate,
+  engine,
+  model,
+  llmModel,
+  emit,
+  emphasis,
+  referenceText,
+  referenceName,
+  referenceMinMatch,
+} = {}) {
   return {
     engine,
     preset,
@@ -316,5 +366,11 @@ export function optionsFor({ preset, language, align, validate, engine, model, l
     llmModel,
     emit,
     emphasis,
+    // The original lyrics. Sent as the text rather than a path because a page cannot
+    // read a path off the user's disk; the name rides along so the artifact can say
+    // which file it was. Absent means the pass does not run at all.
+    referenceText: referenceText || undefined,
+    referenceName: referenceText ? referenceName || 'lyrics' : undefined,
+    referenceMinMatch,
   };
 }

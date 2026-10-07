@@ -148,6 +148,18 @@
         <input type="file" id="transcribe-in" accept="audio/*,video/*" />
       </div>
 
+      <div class="field">
+        <label for="lyrics-in">Original lyrics — optional, SRT / VTT / TXT</label>
+        <input type="file" id="lyrics-in" accept=".srt,.vtt,.txt,text/plain" />
+        <div class="hint" id="lyrics-note">
+          The words the song actually has. Give them to the studio and the text comes from this file
+          while the timing still comes from the audio, so nothing is guessed — added lines are timed
+          by interpolation and then re-timed by the aligner. A file that is not this recording is
+          refused rather than applied. (The TRUTH source further down is a different pass: it fixes
+          spelling locally. The same file can be used in both.)
+        </div>
+      </div>
+
       <div class="style-bar">
         <label class="field-inline">
           <span>Preset</span>

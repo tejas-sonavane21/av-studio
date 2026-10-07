@@ -268,6 +268,11 @@ def apply_corrections(
         engine=dict(transcript.engine),
         alignment=dict(transcript.alignment) if transcript.alignment else None,
         validation=_summarise(transcript, ledger, applied, options, backend, provider, model),
+        # The reference pass ran before this one and its record describes the word list
+        # that this pass just re-spelled. It is carried through rather than rebuilt,
+        # because dropping it would erase the one entry that says where the words came
+        # from — and the artifact would then describe a transcript with no origin.
+        reference=dict(transcript.reference) if transcript.reference else None,
         corrections=list(transcript.corrections),
         meta=dict(transcript.meta),
     )

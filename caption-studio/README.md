@@ -213,6 +213,15 @@ at the top of the page is where the two meet:
    its confidence, how far the words moved, the validation ledger, and every warning the other studio
    attached. None of that is needed to *render* a caption; it is needed to *trust* one.
 
+4. **The original lyrics, if you have them** — the optional file under *Recording to transcribe*.
+   The words then come from that file and only the timing comes from the audio, so the transcript
+   stops being a guess about *what* was sung: on the real song it takes the word error rate from
+   **11.8 % to 0.0 %**. The page reads the file and posts its text (a browser cannot read a path off
+   the user's disk, and a lyric sheet is small), the studio refuses a sheet that is not this
+   recording rather than applying it, and the result is reported in the panel exactly like the other
+   passes. Note that the **TRUTH source** further down is a different pass — that one fixes spelling
+   locally, this one reconciles against the words — and the same file can be given to both.
+
 That last panel is where the timing question is answered, so it is worth stating the answer. With
 `align = wav2vec` selected, the clock that arrives here is **unbiased against the voice band
 (+0.00 s)**. With alignment off it is not: the transcriber pins each segment's first word to the

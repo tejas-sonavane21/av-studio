@@ -53,11 +53,20 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .align import aligner_names, available_aligners
-from .config import DEFAULT_ALIGN_MODEL, DEFAULT_PRESET, PRESETS, AlignOptions, ValidateOptions, options_from_preset
+from .config import (
+    DEFAULT_ALIGN_MODEL,
+    DEFAULT_PRESET,
+    PRESETS,
+    AlignOptions,
+    ReconcileOptions,
+    ValidateOptions,
+    options_from_preset,
+)
 from .emit import DEFAULT_KINDS, filename, kinds, write_bundle
 from .engines import available_engines, engine_names, get_engine
 from .media import AUDIO_EXTENSIONS, MediaError, load_audio
 from .pipeline import PipelineOptions, post_process
+from .reference import Reference, ReferenceParseError
 from .validate import available_validators, validator_names
 
 DEFAULT_HOST = "127.0.0.1"
@@ -89,6 +98,63 @@ class JobError(RuntimeError):
     """A request that cannot be turned into a job."""
 
 
+def _read_reference(payload: dict) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Pull the reference lyrics out of a job request, and prove they can be read.
+
+    Two spellings are accepted on purpose. ``reference`` is a path and is what a
+    script or a command-line user sends; ``referenceText`` is the file's own
+    contents, which is the only option a browser has — a page cannot read a path off
+    the user's disk, and a lyric sheet is small enough to post. Parsing *here*, at
+    submit time, makes a bad file a rejected request rather than a job that fails
+    minutes later with everything else about the run already wasted.
+    """
+    path = payload.get("reference") or None
+    text = payload.get("referenceText") or payload.get("reference_text") or None
+    name = payload.get("referenceName") or payload.get("reference_name") or None
+
+    if path is not None and not isinstance(path, str):
+        raise JobError("'reference' must be a path to a lyric file")
+    if text is not None and not isinstance(text, str):
+        raise JobError("'referenceText' must be the lyrics themselves")
+    if path and text:
+        raise JobError("pass either 'reference' (a path) or 'referenceText' (the lyrics), not both")
+    if name is not None and not isinstance(name, str):
+        raise JobError("'referenceName' must be a filename")
+
+    try:
+        if text:
+            Reference.from_text(text, name=name or "pasted lyrics")
+        elif path:
+            Reference.from_file(path)
+    except ReferenceParseError as exc:
+        raise JobError(str(exc)) from exc
+
+    return path, text, name
+
+
+def _read_min_match(payload: dict) -> float:
+    raw = payload.get("referenceMinMatch", payload.get("reference_min_match"))
+    if raw is None:
+        return ReconcileOptions().min_match
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise JobError("'referenceMinMatch' must be a number between 0 and 1") from None
+    if not 0.0 <= value <= 1.0:
+        raise JobError("'referenceMinMatch' must be between 0 and 1")
+    return value
+
+
+def _build_reference(job: "Job") -> Optional[Reference]:
+    """The parsed lyrics for this job, or ``None`` when none were supplied."""
+    if job.reference_text:
+        return Reference.from_text(job.reference_text, name=job.reference_name or "pasted lyrics")
+    if job.reference:
+        return Reference.from_file(job.reference)
+    return None
+
+
 @dataclass
 class Job:
     """One transcription request and everything known about it."""
@@ -107,6 +173,13 @@ class Job:
     align_model: Optional[str] = None
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
+    #: The original lyrics. Either a path the server can read (``reference``) or the
+    #: file's text sent by the browser (``reference_text``) — a browser cannot read a
+    #: path off the user's disk, and a lyric sheet is small enough to post.
+    reference: Optional[str] = None
+    reference_text: Optional[str] = None
+    reference_name: Optional[str] = None
+    reference_min_match: float = 0.5
     status: str = "queued"  # queued | running | done | error
     progress: float = 0.0
     message: str = ""
@@ -139,6 +212,11 @@ class Job:
             "files": {kind: path for kind, path in self.files.items()},
             "urls": {kind: f"/jobs/{self.id}/{kind}" for kind in self.files},
         }
+        if self.reference or self.reference_text:
+            data["reference"] = {
+                "name": self.reference_name or (Path(self.reference).name if self.reference else "pasted lyrics"),
+                "minMatch": self.reference_min_match,
+            }
         if self.finished and self.started:
             data["seconds"] = round(self.finished - self.started, 3)
         if self.error:
@@ -208,6 +286,9 @@ class Jobs:
         if validate is not None and validate not in validator_names():
             raise JobError(f"unknown validator {validate!r}; expected one of {validator_names()}")
 
+        reference, reference_text, reference_name = _read_reference(payload)
+        reference_min_match = _read_min_match(payload)
+
         selected = payload.get("emit") or list(DEFAULT_KINDS)
         if isinstance(selected, str):
             selected = [part.strip() for part in selected.split(",") if part.strip()]
@@ -230,6 +311,10 @@ class Jobs:
             align_model=payload.get("alignModel"),
             llm_provider=payload.get("llmProvider"),
             llm_model=payload.get("llmModel"),
+            reference=reference,
+            reference_text=reference_text,
+            reference_name=reference_name,
+            reference_min_match=reference_min_match,
             stem=Path(source).stem,
         )
         job.outdir = self.root / job.id
@@ -340,6 +425,8 @@ class Jobs:
             # never aligned. `PassUnavailable` is already a RuntimeError, so the
             # handler below catches it like any other failure.
             passes = PipelineOptions(
+                reference=_build_reference(job),
+                reference_options=ReconcileOptions(min_match=job.reference_min_match),
                 align=job.align,
                 align_options=AlignOptions(model=job.align_model or DEFAULT_ALIGN_MODEL),
                 validate=job.validate,
@@ -373,6 +460,7 @@ class Jobs:
                 "engine": transcript.engine,
                 "alignment": transcript.alignment,
                 "validation": transcript.validation,
+                "reference": transcript.reference,
                 "corrections": len(transcript.corrections),
             }
             job.progress, job.message, job.status = 1.0, "done", "done"

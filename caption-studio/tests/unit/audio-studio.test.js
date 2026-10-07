@@ -21,6 +21,7 @@ import {
   AudioStudioError,
   DEFAULT_BASE_URL,
   HEALTH_TIMEOUT_MS,
+  MAX_QUERY_CHARS,
   buildQuery,
   describeStudioAudit,
   fetchArtifact,
@@ -403,6 +404,81 @@ test('the artifact the real Python emitter wrote imports cleanly', (t) => {
   const lines = describeStudioAudit(JSON.parse(raw)).join('\n');
   assert.match(lines, /alignment wav2vec/);
   assert.match(lines, /mean confidence/);
+});
+
+// --------------------------------------------------------------------------- #
+// the original lyrics
+// --------------------------------------------------------------------------- #
+
+test('the lyrics ride with the job as text, named, and only when there are any', () => {
+  const none = optionsFor({ preset: 'fast' });
+  assert.equal(none.referenceText, undefined);
+  assert.equal(none.referenceName, undefined);
+
+  const some = optionsFor({ preset: 'fast', referenceText: 'the words\n', referenceName: 'spidy.srt' });
+  assert.equal(some.referenceText, 'the words\n');
+  assert.equal(some.referenceName, 'spidy.srt');
+
+  // A name with no text would be a lie about what was sent, so it is dropped.
+  assert.equal(optionsFor({ referenceName: 'spidy.srt' }).referenceName, undefined);
+  assert.equal(optionsFor({ referenceText: 'x' }).referenceName, 'lyrics');
+});
+
+test('the lyrics reach the query string, and an absent one does not', () => {
+  const query = buildQuery(optionsFor({ preset: 'fast', referenceText: 'hold on', referenceName: 'x.srt' }));
+  assert.match(query, /referenceText=hold\+on/);
+  assert.match(query, /referenceName=x\.srt/);
+  assert.doesNotMatch(buildQuery(optionsFor({ preset: 'fast' })), /reference/);
+});
+
+test('a lyric file too large for the request line is refused before anything is sent', async () => {
+  const fetchImpl = fakeFetch([]);
+  const file = new Blob(['audio'], { type: 'audio/mpeg' });
+  file.name = 'song.mp3';
+
+  await assert.rejects(
+    () =>
+      startUpload(DEFAULT_BASE_URL, file, optionsFor({ referenceText: 'x'.repeat(MAX_QUERY_CHARS) }), { fetchImpl }),
+    (error) => {
+      assert.ok(error instanceof AudioStudioError);
+      assert.match(error.message, /request is \d+ characters long/);
+      assert.match(error.hint, /64 KB/, 'the hint has to say what to do about it');
+      return true;
+    },
+  );
+  assert.equal(fetchImpl.calls.length, 0, 'the request must not be attempted');
+});
+
+test('the audit reports what the reference pass did', () => {
+  const applied = describeStudioAudit({
+    engine: { name: 'faster-whisper', model: 'small' },
+    audioStudio: {
+      reference: {
+        name: 'spidy.srt',
+        rolling: true,
+        outcome: 'applied',
+        matchRate: 0.898,
+        counts: { kept: 185, rewritten: 61, inserted: 9, deleted: 4 },
+      },
+    },
+  }).join('\n');
+  assert.match(applied, /reference spidy\.srt \(rolling\): 90% of the audio matched the file/);
+  assert.match(applied, /61 rewritten, 9 inserted, 4 deleted/);
+});
+
+test('a refused reference is reported as refused, with the reason', () => {
+  const lines = describeStudioAudit({
+    audioStudio: {
+      reference: { name: 'other.srt', outcome: 'refused', reason: 'the lyrics and the audio agree on only 4.0% of words' },
+    },
+  }).join('\n');
+  assert.match(lines, /reference other\.srt: REFUSED/);
+  assert.match(lines, /agree on only 4\.0%/);
+});
+
+test('a run with no lyrics says nothing about lyrics', () => {
+  const lines = describeStudioAudit({ engine: { name: 'faster-whisper' }, audioStudio: { alignment: { aligner: 'fake' } } }).join('\n');
+  assert.doesNotMatch(lines, /reference/);
 });
 
 test('the words the Python studio measured survive the import untouched', (t) => {
