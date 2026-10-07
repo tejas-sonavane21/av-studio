@@ -394,6 +394,12 @@ async function main() {
   );
   await check(
     cdp,
+    'the lyrics input takes subtitles and plain text',
+    'document.querySelector("#lyrics-in").getAttribute("accept")',
+    (v) => v === '.srt,.vtt,.txt,text/plain',
+  );
+  await check(
+    cdp,
     'and nothing pretends to be loaded before it is',
     'document.querySelector("#audio-tag").textContent',
     (v) => v === 'no audio',
@@ -912,6 +918,26 @@ async function main() {
     (v) => v === false,
   );
 
+  // The original lyrics are read *in the page* and posted with the job, because a browser cannot
+  // read a path off the user's disk. This is the only place that whole path is real: a File, a
+  // `.text()` call, and a query string.
+  const lyrics = 'And they say that a hero can save us\n';
+  const pickLyrics = `(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([${JSON.stringify(lyrics)}], 'spidy.srt', { type: 'text/plain' }));
+    const input = document.querySelector('#lyrics-in');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change'));
+    return input.files.length;
+  })()`;
+  await check(cdp, 'the original lyrics can be chosen', pickLyrics, (v) => v === 1);
+  await check(
+    cdp,
+    'and the panel says the text will come from that file',
+    'document.querySelector("#transcribe-note").textContent',
+    (v) => String(v).includes('spidy.srt'),
+  );
+
   await evaluate(cdp, 'document.querySelector("#transcribe-btn").click()');
   await check(
     cdp,
@@ -940,6 +966,17 @@ async function main() {
     'and the options the user chose rode along',
     String(stubState.uploads[0]?.query ?? '').includes('align=wav2vec'),
     `query was ${JSON.stringify(stubState.uploads[0]?.query)}`,
+  );
+  const uploadQuery = new URLSearchParams(stubState.uploads[0]?.query ?? '');
+  assert(
+    'the original lyrics rode along as text',
+    (uploadQuery.get('referenceText') ?? '').includes('hero can save us'),
+    `referenceText was ${JSON.stringify(uploadQuery.get('referenceText'))}`,
+  );
+  assert(
+    'and the file they came from was named',
+    uploadQuery.get('referenceName') === 'spidy.srt',
+    `referenceName was ${JSON.stringify(uploadQuery.get('referenceName'))}`,
   );
   assert('the job was polled to completion', stubState.polls >= 2, `polled ${stubState.polls} time(s)`);
   assert('the file crossed the wire exactly once', stubState.uploads.length === 1, `${stubState.uploads.length} uploads`);

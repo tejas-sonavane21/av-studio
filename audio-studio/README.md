@@ -214,6 +214,7 @@ word errors count):
 | `balanced` *(default)* | `small` | ~82 s | **11.8 %** | `awoke` → `woke`, `of`/`a`, the `hero's burden` / `warrior's soul` pair, `memorial`/`mortal`, `cast`/`catch`, `tool`/`toll`, `i'm`/`road` — and a hallucinated `Music` before the first line |
 | `balanced` + `--validate llm` | `small` | ~82 s + seconds | **7.8 %** | `fly`/`try`/`fight`, `loss`/`lost`, `innocent`/`innocents` |
 | `accurate` | `medium` | ~291 s | **6.7 %** | `moral`/`mortal`, `steal`/`shield`, `sailing`/`swinging`, `cast`/`catch`, `lost`/`loss` |
+| `balanced` + `--reference spidy.srt` | `small` | ~82 s | **0.0 %** | nothing — these are the lyric sheet's own words, placed on the audio |
 
 `medium` costs **~291 s against `small`'s ~82 s** — 3.5× the wall clock, on four
 cores, for the whole track — and almost every error it leaves behind is a
@@ -249,6 +250,72 @@ those, and to exercise the correction ledger with no network and no key.
 A three-minute song costs one or two text requests, and the alignment is the only
 slow, model-bearing step. That is the "fast yet accurate" path: **do not buy
 accuracy with the big ASR model, buy it with the cheap text pass.**
+
+#### When the words already exist, use them
+
+Everything above is a *proofreading* strategy: it makes a guess better. If the user
+has the words themselves — a `.srt`, a `.vtt`, or a plain lyric sheet — there is no
+guess left to improve, and `--reference FILE` takes them instead:
+
+```bash
+python -m audio_studio transcribe song.mp3 --reference spidy.srt --align wav2vec
+```
+
+Measured on the same fixture, both transcripts above score **0.0 %**:
+
+| transcript | WER | with `--reference spidy.srt` |
+|---|---|---|
+| `balanced` (`small`) | 11.8 % | **0.0 %** — 255 words, S 0 D 0 I 0 |
+| caption-studio's corrected document | 8.2 % | **0.0 %** |
+
+What it does in one line: **the words come from the file, the timing still comes
+from the audio.** The two word streams are aligned, and then
+
+* a word the file spells differently is **rewritten in place**, keeping the
+transcriber's measured window — `whould` becomes `would` without moving;
+* a word the audio missed is **inserted**, timed by interpolation between its
+neighbours and marked `interpolated: true` in the artifact;
+* a word the audio invented is **deleted**.
+
+Two things in that list are load-bearing, and both are deliberate.
+
+**It runs before alignment, not after.** An inserted word arrives with a made-up
+window, and the next rung's whole job is to replace made-up windows with measured
+ones. Run the reference pass afterwards and the words it adds keep a time nobody
+measured; run it first and `--align wav2vec` re-times every one of them. That is
+why `pipeline.py` fixes the order as
+`transcribe → reconcile → align → validate`.
+
+**A sheet that is not this song is refused, not applied.** A wrong lyric file is the
+worst failure available here, because rewriting a transcript with confident nonsense
+*looks* like success. So the pass measures how much of the audio and the file agree
+and, below `--reference-min-match` (default `0.5`), changes nothing, records why, and
+warns. On this project's own material the two agree on **88 %** and **94 %** of words,
+so the floor has a great deal of room under it: what it catches is a wrong file, not a
+hard recording.
+
+Reading the file is a pass of its own rather than a validation backend, and
+`validate/ledger.py` is the reason. That ledger refuses *by construction* any proposal
+that changes the word count, because inserting or deleting a word moves the timing of
+everything after it. Reconciling with the real lyrics **is** changing the word count.
+So it keeps its own ledger, its own record in the artifact, and its own rules — and
+every rewrite, insertion and deletion is in that record, indexed against the
+transcript as it was before the pass.
+
+One reading detail is worth knowing because it is invisible when it goes wrong. The
+reference file for this project is a **rolling** subtitle file: every cue repeats the
+lines above it and adds one. Read naively, that multiplies the whole lyric sheet
+several times over — the first version of this parser turned 255 words into 753 — and
+read as "the last line of each cue" it loses the first cue's *first* line instead. So
+the parser **measures** the file: it computes the overlap between each cue and the one
+above, reads the file as rolling only when that overlap is the rule rather than the
+exception, and says which reading it used. Read this way the file is **255 words**,
+exactly what `out/wer.py` parses by hand to score the table above — and that agreement
+is what makes the score trustworthy.
+
+Because the text is now the file's, `--validate llm` has nothing left to guess.
+Running both is allowed and recorded as a warning, but it is not worth doing: the only
+correction that pass can still propose is one that disagrees with the lyrics.
 
 ### 2. Time mapping: which clock is actually early
 

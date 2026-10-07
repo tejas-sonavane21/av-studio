@@ -278,6 +278,10 @@ class Transcript:
     engine: dict = field(default_factory=dict)
     alignment: Optional[dict] = None
     validation: Optional[dict] = None
+    #: What the reference pass did, when the user supplied the original lyrics.
+    #: Same shape of record as ``alignment`` and ``validation``: a stage of the
+    #: pipeline describing itself, absent when the stage did not run.
+    reference: Optional[dict] = None
     gaps: list[Gap] = field(default_factory=list)
     corrections: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -321,6 +325,7 @@ class Transcript:
             "engine": dict(self.engine),
             "alignment": dict(self.alignment) if self.alignment else None,
             "validation": dict(self.validation) if self.validation else None,
+            "reference": dict(self.reference) if self.reference else None,
             "stats": {
                 "segments": len(self.segments),
                 "words": self.word_count,
@@ -346,6 +351,7 @@ class Transcript:
             engine=dict(data.get("engine") or {}),
             alignment=dict(data["alignment"]) if data.get("alignment") else None,
             validation=dict(data["validation"]) if data.get("validation") else None,
+            reference=dict(data["reference"]) if data.get("reference") else None,
             gaps=[Gap.from_dict(g) for g in (data.get("gaps") or [])],
             corrections=list(data.get("corrections") or []),
             warnings=list(data.get("warnings") or []),

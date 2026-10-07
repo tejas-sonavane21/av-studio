@@ -271,12 +271,29 @@ async function onTranscribe() {
   const file = $('#transcribe-in').files?.[0];
   if (!file || transcribing) return;
 
+  // The lyrics are read here, in the page, because the server never sees the user's disk.
+  // A file that cannot be read stops the run before anything is uploaded: sending the
+  // recording anyway would transcribe it and then quietly ignore the lyrics.
+  const lyricsFile = $('#lyrics-in').files?.[0];
+  let lyrics = '';
+  if (lyricsFile) {
+    try {
+      lyrics = await lyricsFile.text();
+    } catch (err) {
+      log(`ERROR lyrics: could not read "${lyricsFile.name}" — ${err}`);
+      setTranscribeNote(`could not read ${lyricsFile.name}`);
+      return;
+    }
+  }
+
   const options = optionsFor({
     preset: $('#transcribe-preset').value,
     language: $('#transcribe-language').value.trim(),
     align: $('#transcribe-align').value,
     validate: $('#transcribe-validate').value,
     emit: 'json,veed,srt,vtt',
+    referenceText: lyrics,
+    referenceName: lyricsFile?.name,
   });
 
   transcribing = true;
@@ -288,7 +305,8 @@ async function onTranscribe() {
   setStatus('transcribing…');
   log(
     `transcribe: "${file.name}" (${(file.size / 1e6).toFixed(1)} MB)` +
-      `${options.align ? ` · align ${options.align}` : ''}${options.validate ? ` · validate ${options.validate}` : ''}`,
+      `${options.align ? ` · align ${options.align}` : ''}${options.validate ? ` · validate ${options.validate}` : ''}` +
+      `${lyricsFile ? ` · lyrics "${lyricsFile.name}"` : ''}`,
   );
 
   let lastLogged = -1;
@@ -1299,6 +1317,15 @@ $('#truth-in').addEventListener('change', (e) => onTruth(e.target.files?.[0]));
 $('#align-btn').addEventListener('click', runAlignment);
 
 $('#transcribe-in').addEventListener('change', refreshTranscribeButton);
+$('#lyrics-in').addEventListener('change', () => {
+  const file = $('#lyrics-in').files?.[0];
+  log(file ? `lyrics: "${file.name}" will be sent with the next transcription` : 'lyrics: cleared');
+  setTranscribeNote(
+    file
+      ? `the original lyrics come from "${file.name}" — the text is the file's, the timing is the audio's`
+      : "no lyrics file: the transcript's own text is used as-is",
+  );
+});
 $('#transcribe-btn').addEventListener('click', onTranscribe);
 $('#transcribe-probe').addEventListener('click', onTranscribeProbe);
 refreshTranscribeButton();

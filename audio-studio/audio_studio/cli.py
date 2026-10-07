@@ -22,6 +22,7 @@ import platform
 import shutil
 import sys
 from pathlib import Path
+from typing import Optional
 
 from . import __version__
 from .align import DEFAULT_ALIGNER, aligner_names, available_aligners
@@ -31,6 +32,7 @@ from .config import (
     DEFAULT_PRESET,
     PRESETS,
     AlignOptions,
+    ReconcileOptions,
     ValidateOptions,
     options_from_preset,
 )
@@ -39,6 +41,7 @@ from .engines import available_engines, engine_names, get_engine
 from .media import MediaError, describe, load_audio
 from .model import validate
 from .pipeline import PassUnavailable, PipelineOptions, post_process, summarise_passes
+from .reference import Reference, ReferenceParseError
 from .validate import DEFAULT_VALIDATOR, available_validators, validator_names
 
 
@@ -101,6 +104,15 @@ def _summarise(transcript) -> str:
 
 
 def cmd_transcribe(args: argparse.Namespace) -> int:
+    # The passes are read before anything is decoded or transcribed. A lyric file that
+    # cannot be read is a typo in the command line, and finding that out after a
+    # five-minute transcription has already run is a waste of the five minutes.
+    try:
+        passes = _pipeline_options(args)
+    except (ReferenceParseError, OSError) as exc:
+        _err(str(exc))
+        return 1
+
     try:
         audio = load_audio(args.audio, decode=not args.no_decode)
     except (MediaError, OSError) as exc:
@@ -131,7 +143,6 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         _err(f"transcription failed ({args.engine}): {exc}")
         return 1
 
-    passes = _pipeline_options(args)
     if passes.enabled():
         try:
             transcript = post_process(transcript, audio, passes, _progress_factory(args.quiet))
@@ -285,8 +296,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _pipeline_options(args: argparse.Namespace) -> PipelineOptions:
-    """Read the pass flags off a parsed namespace, so all three commands agree."""
+    """
+    Read the pass flags off a parsed namespace, so all three commands agree.
+
+    Raises :class:`ReferenceParseError` for a lyric file that cannot be read, rather
+    than treating an unreadable file as "no reference": the two look identical in
+    the output and only one of them is what the user asked for.
+    """
     return PipelineOptions(
+        reference=_reference_from_args(args),
+        reference_options=ReconcileOptions(min_match=getattr(args, "reference_min_match", 0.5)),
         align=getattr(args, "align", None),
         align_options=AlignOptions(
             model=getattr(args, "align_model", None) or DEFAULT_ALIGN_MODEL,
@@ -301,6 +320,29 @@ def _pipeline_options(args: argparse.Namespace) -> PipelineOptions:
             api_key=getattr(args, "api_key", None),
             min_confidence=getattr(args, "llm_min_confidence", 0.6),
         ),
+    )
+
+
+def _reference_from_args(args: argparse.Namespace) -> Optional[Reference]:
+    """Load ``--reference`` when it was given. The only file the CLI reads itself."""
+    path = getattr(args, "reference", None)
+    if not path:
+        return None
+    return Reference.from_file(path)
+
+
+def _add_reference_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--reference",
+        default=None,
+        metavar="FILE",
+        help="the original lyrics (.srt/.vtt/.txt): the text comes from the file, the timing from the audio",
+    )
+    parser.add_argument(
+        "--reference-min-match",
+        type=float,
+        default=0.5,
+        help="share of words that must agree before the file is trusted (default: 0.5)",
     )
 
 
@@ -386,6 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--no-decode", action="store_true", help="do not decode the audio before transcribing")
     t.add_argument("--quiet", "-q", action="store_true", help="no progress output")
     t.add_argument("--json", action="store_true", help="machine-readable summary on stdout")
+    _add_reference_arguments(t)
     _add_align_arguments(t)
     _add_validate_arguments(t)
     t.set_defaults(func=cmd_transcribe)
@@ -408,6 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("artifact", help="path to a *.speech.json")
     a.add_argument("--audio", required=True, help="the audio (or video) it was transcribed from")
     _add_emit_arguments(a, audio=True)
+    _add_reference_arguments(a)
     _add_align_arguments(a, default=DEFAULT_ALIGNER)
     _add_validate_arguments(a)
     a.set_defaults(func=cmd_align)
@@ -415,6 +459,7 @@ def build_parser() -> argparse.ArgumentParser:
     va = sub.add_parser("validate", help="review a saved transcript and record the ledger")
     va.add_argument("artifact", help="path to a *.speech.json")
     _add_emit_arguments(va)
+    _add_reference_arguments(va)
     _add_align_arguments(va)
     _add_validate_arguments(va, default=DEFAULT_VALIDATOR)
     va.set_defaults(func=cmd_validate)
@@ -451,9 +496,13 @@ def _reprocess(args: argparse.Namespace, needs_audio: bool) -> int:
         _err(str(exc))
         return 1
 
-    options = _pipeline_options(args)
+    try:
+        options = _pipeline_options(args)
+    except (ReferenceParseError, OSError) as exc:
+        _err(str(exc))
+        return 1
     if not options.enabled():
-        _err("nothing to do: pass --align <name> or --validate <name>")
+        _err("nothing to do: pass --reference <file>, --align <name> or --validate <name>")
         return 1
 
     audio = None
