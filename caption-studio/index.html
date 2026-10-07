@@ -202,6 +202,30 @@
       </div>
     </section>
 
+    <!-- ============ EXPORT ============ -->
+    <section class="panel export-panel">
+      <h2>
+        Export
+        <span class="tag" id="export-status">—</span>
+      </h2>
+
+      <div class="actions">
+        <button class="primary" id="download-video" disabled>Download video (.webm)</button>
+        <button class="ghost" id="download-project" disabled>Project (.caproj)</button>
+        <button class="ghost" id="download-veed" disabled>Veed JSON</button>
+        <button class="ghost" id="download-srt" disabled>SubRip (.srt)</button>
+        <button class="ghost" id="download-vtt" disabled>WebVTT (.vtt)</button>
+      </div>
+
+      <div class="progress"><div class="progress-bar" id="export-bar"></div></div>
+      <div class="hint" id="export-note">
+        <b>Download video</b> composites the caption layer over the picture and records it to .webm in
+        real time — there is no ffmpeg here, so a three-minute video takes about three minutes. The
+        other buttons write the caption data itself: the project, the Veed master JSON, and plain
+        SRT / VTT that any other editor can read.
+      </div>
+    </section>
+
     <!-- ============ SOURCES ============ -->
     <section class="panel">
       <h2>Sources</h2>

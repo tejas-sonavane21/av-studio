@@ -27,6 +27,7 @@ import { parseSRT } from './io/srt.js';
 import { parseVTT } from './io/vtt.js';
 import { importJSON } from './io/project-file.js';
 import { describeStudioAudit, health, optionsFor, transcribeFile } from './io/audio-studio-client.js';
+import { captionFiles, downloadBlob, downloadText, exportStem, recordDocumentToWebm } from './io/download.js';
 import { alignCaptions } from './align/aligner.js';
 import { validateDocument } from './model/document.js';
 import { createDefaultStyle } from './model/schema.js';
@@ -125,6 +126,9 @@ async function onVideo(file) {
   $('#play-btn').disabled = false;
   $('#video-toggle').checked = true;
   preview?.setVideoVisible(true);
+  // A picture is exactly what the burn-in export needs, so the export buttons have to be re-read the
+  // moment one arrives — the document may already be loaded and waiting for it.
+  refreshExportButtons();
 
   // adopt the video's native size for the document, unless a document already set one
   video.addEventListener(
@@ -357,6 +361,114 @@ async function onTranscribe() {
 }
 
 // ---------------------------------------------------------------------------
+// export — writing the finished thing out
+// ---------------------------------------------------------------------------
+
+let exporting = false;
+
+function setExportNote(text) {
+  $('#export-note').textContent = text;
+}
+
+function setExportProgress(fraction) {
+  const bar = $('#export-bar');
+  bar.style.width = `${Math.max(0, Math.min(1, fraction)) * 100}%`;
+}
+
+/**
+ * Which export buttons make sense right now.
+ *
+ * A caption file needs only a document; the video needs a *picture* to burn the captions into, so it
+ * stays disabled until one is loaded rather than failing when clicked. Every button is off while a
+ * recording is in flight, because a second export would fight the first for the transport.
+ */
+function refreshExportButtons() {
+  const doc = preview?.document;
+  const ready = Boolean(doc) && !exporting;
+  $('#download-video').disabled = !(ready && Boolean(store.getState().video));
+  for (const id of ['#download-project', '#download-veed', '#download-srt', '#download-vtt']) {
+    $(id).disabled = !ready;
+  }
+}
+
+/** Save one of the caption files (`.caproj`, `.veed.json`, `.srt`, `.vtt`). */
+function onDownloadFile(ext) {
+  const doc = preview?.document;
+  if (!doc) {
+    log('download: there are no captions yet — run the correction or open the demo first');
+    return;
+  }
+  const file = captionFiles(doc).find((candidate) => candidate.name.endsWith(ext));
+  if (!file) return;
+  downloadText(file.name, file.text, file.mime);
+  log(`export: saved ${file.name} (${(file.text.length / 1024).toFixed(1)} KB)`);
+  setExportNote(`saved ${file.name}`);
+}
+
+/**
+ * Burn the captions into the video and download the result.
+ *
+ * The recording is real time — the frames are captured as the video plays — so this is the one
+ * action in the studio that takes as long as the video does. The transport is stopped first so the
+ * preview's own play loop cannot compete with the exporter for the clock.
+ */
+async function onDownloadVideo() {
+  const doc = preview?.document;
+  const video = $('#preview-video');
+  if (exporting) return;
+  if (!doc) {
+    log('download: there are no captions yet — run the correction or open the demo first');
+    return;
+  }
+  if (!store.getState().video) {
+    log('download video: load a video under Sources first — the caption files can be saved without one');
+    return;
+  }
+
+  exporting = true;
+  refreshExportButtons();
+  $('#export-bar').classList.remove('failed');
+  $('#export-bar').classList.add('busy');
+  $('#export-status').textContent = 'recording\u2026';
+  setExportProgress(0);
+  setStatus('recording\u2026');
+  log('export: burning the captions into the video — this runs in real time, so it takes as long as the video');
+  preview.pause();
+
+  try {
+    const result = await recordDocumentToWebm({
+      doc,
+      video,
+      audio: preview.audio,
+      onProgress: (fraction, message) => {
+        setExportProgress(fraction);
+        setExportNote(message);
+      },
+    });
+    const name = `${exportStem(doc)}.webm`;
+    downloadBlob(name, result.blob);
+    setExportProgress(1);
+    $('#export-status').textContent = 'done';
+    const size = (result.blob.size / 1e6).toFixed(1);
+    log(
+      `export: ${name} — ${size} MB, ${result.seconds.toFixed(1)}s, ${result.width}x${result.height}` +
+        `${result.audio ? ' with audio' : ' (no audio track)'}`,
+    );
+    setExportNote(`saved ${name} — ${size} MB${result.audio ? '' : ' (no audio track)'}`);
+  } catch (err) {
+    $('#export-bar').classList.add('failed');
+    $('#export-status').textContent = 'failed';
+    log(`ERROR export: ${err.message}`);
+    setExportNote(err.message);
+  } finally {
+    exporting = false;
+    $('#export-bar').classList.remove('busy');
+    refreshExportButtons();
+    setStatus('idle');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // alignment → caption document
 // ---------------------------------------------------------------------------
 
@@ -413,6 +525,7 @@ async function showDocument(doc, label = 'document') {
   renderBlocks();
   renderTemplates();
   selectBlock(selectedBlockId);
+  refreshExportButtons();
   log(`preview: ${label}`);
   return doc;
 }
@@ -1397,6 +1510,13 @@ $('#lyrics-in').addEventListener('change', () => {
 $('#transcribe-btn').addEventListener('click', onTranscribe);
 $('#transcribe-probe').addEventListener('click', onTranscribeProbe);
 refreshTranscribeButton();
+
+$('#download-video').addEventListener('click', onDownloadVideo);
+$('#download-project').addEventListener('click', () => onDownloadFile('.caproj'));
+$('#download-veed').addEventListener('click', () => onDownloadFile('.veed.json'));
+$('#download-srt').addEventListener('click', () => onDownloadFile('.srt'));
+$('#download-vtt').addEventListener('click', () => onDownloadFile('.vtt'));
+refreshExportButtons();
 
 wirePreview();
 syncStyleControls(createDefaultStyle());
