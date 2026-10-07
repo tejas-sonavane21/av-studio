@@ -12,15 +12,18 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_BOX,
   REFERENCE_WIDTH,
+  SWEEP,
   UNDERLINE,
   blockBoxRect,
   drawEmphasisHighlights,
+  drawEmphasisSweep,
   drawEmphasisUnderlines,
   fillDecoration,
   highlightRect,
   lineBoxRect,
   pxScaleFor,
   roundRectPath,
+  sweepGeometry,
   underlineRect,
 } from '../../src/render/decorations.js';
 import { FakeContext } from '../helpers/fake-canvas.js';
@@ -129,6 +132,64 @@ test('the default underline colour is the verified lime', () => {
   const ctx = new FakeContext({});
   drawEmphasisUnderlines(ctx, fakeLayout(), states([true]), {});
   assert.equal(ctx.ops('fillRect')[0].fillStyle, '#22c55e');
+});
+
+// ---------------------------------------------------------------------------
+// the curved "sweep" underline
+// ---------------------------------------------------------------------------
+
+test('sweepGeometry builds a closed ribbon around a tilted S centreline', () => {
+  const frag = { x: 100, y: 200, width: 50 };
+  const g = sweepGeometry(frag, EFF, 1);
+  close(g.thickness, EFF * SWEEP.thicknessEm, 1e-9); // 5.9904 > 3
+  close(g.baselineY, 200 + EFF * SWEEP.offsetEm, 1e-9);
+  close(g.x0, 100 - EFF * SWEEP.overhangEm, 1e-9);
+  close(g.x1, 150 + EFF * SWEEP.overhangEm, 1e-9);
+  assert.equal(g.points.length, 2 * (SWEEP.segments + 1), 'a top run and a bottom run');
+  // both ends thin to the centreline, so the path is closed
+  close(g.points[0].x, g.points[g.points.length - 1].x, 1e-9);
+  close(g.points[0].y, g.points[g.points.length - 1].y, 1e-9);
+  // and the centreline is tilted: the top run's left end sits above its right end
+  assert.ok(g.points[0].y < g.points[SWEEP.segments].y);
+});
+
+test('sweep thickness has the same 3 px floor and px scaling as the underline', () => {
+  const frag = { x: 0, y: 0, width: 10 };
+  close(sweepGeometry(frag, 10, 1).thickness, 3, 1e-9);
+  close(sweepGeometry(frag, 10, 2).thickness, 6, 1e-9);
+  close(sweepGeometry(frag, 100, 1).thickness, 13, 1e-9);
+});
+
+test('a sweep is fat in the middle and never wider than its own thickness', () => {
+  const frag = { x: 0, y: 0, width: 100 };
+  const g = sweepGeometry(frag, 100, 1);
+  const ys = g.points.map((p) => p.y);
+  const spread = Math.max(...ys) - Math.min(...ys);
+  // the tilt (0.08 em) plus the wave (0.05 em) plus the half-thickness (0.065 em) on each side
+  assert.ok(spread > 100 * SWEEP.thicknessEm, 'the stroke has visible thickness');
+  assert.ok(spread < 100 * 0.6, 'and stays a caption decoration, not a landscape');
+});
+
+test('drawEmphasisSweep fills only emphasised words, above the text, without shadow', () => {
+  const ctx = new FakeContext({});
+  const layout = fakeLayout();
+  drawEmphasisSweep(ctx, layout, states([false, true, false]), {
+    emphasis: { decoration: 'sweep', decorationColor: '#e2e8f0' },
+  });
+  assert.equal(ctx.ops('fill').length, 1, 'exactly one stroke for one emphasised word');
+  const [fill] = ctx.ops('fill');
+  assert.equal(fill.fillStyle, '#e2e8f0');
+  assert.equal(fill.shadowColor, 'transparent', 'the v10 rule: no shadow on a decoration');
+  assert.equal(ctx.depth, 0, 'save/restore must balance');
+  // the path is a polygon of lineTo points, so no fillRect leaks in
+  assert.equal(ctx.ops('fillRect').length, 0);
+  assert.ok(ctx.ops('lineTo').length >= SWEEP.segments, 'the ribbon is sampled, not a single line');
+});
+
+test('the default sweep colour is white — a pen stroke, unlike the lime underline', () => {
+  const ctx = new FakeContext({});
+  drawEmphasisSweep(ctx, fakeLayout(), states([true]), {});
+  assert.equal(ctx.ops('fill')[0].fillStyle, '#ffffff');
 });
 
 // ---------------------------------------------------------------------------

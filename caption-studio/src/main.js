@@ -713,8 +713,11 @@ function swatchMarkup(swatch) {
   if (swatch.stroke) span.style.webkitTextStroke = `${Math.max(1, swatch.strokeWidth)}px ${swatch.stroke}`;
   const mark = el('b');
   mark.textContent = 'style';
-  if (swatch.emphasis === 'underline') {
+  if (swatch.emphasis === 'underline' || swatch.emphasis === 'sweep') {
+    // The sweep is a curved stroke, which a CSS swatch cannot honestly draw; a rounded border in the
+    // decoration colour is the nearest thing that still reads as "this template has an emphasis".
     mark.style.borderBottom = `3px solid ${swatch.emphasisColor ?? swatch.fill}`;
+    if (swatch.emphasis === 'sweep') mark.style.borderBottomLeftRadius = '8px 3px';
     mark.style.fontStyle = 'italic';
   } else if (swatch.emphasis === 'highlight') {
     mark.style.background = swatch.emphasisColor ?? swatch.background ?? 'rgba(124,58,237,0.95)';
@@ -1066,7 +1069,7 @@ function renderBlockInspector() {
     fieldInline('Reveal', buildSelect(REVEAL_MODES, style.reveal, (v) => applyBlockPatch({ reveal: v }))),
     fieldInline(
       'Emphasis',
-      buildSelect(['underline', 'highlight', 'none'], style.emphasis?.decoration ?? 'none', (v) =>
+      buildSelect(['underline', 'sweep', 'highlight', 'none'], style.emphasis?.decoration ?? 'none', (v) =>
         applyBlockPatch({ emphasis: { decoration: v } }),
       ),
     ),
