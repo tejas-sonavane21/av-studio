@@ -685,6 +685,36 @@ async function main() {
     (v) => v === true,
   );
 
+  console.log('\n■ auto-wrap');
+  await check(
+    cdp,
+    'the auto-wrap guard is present and on by default',
+    '(()=>{const c=document.querySelector("#autowrap-toggle");return c?c.checked:null})()',
+    (v) => v === true,
+  );
+  await evaluate(
+    cdp,
+    '(()=>{const c=document.querySelector("#autowrap-toggle");c.checked=false;c.dispatchEvent(new Event("change"));})()',
+  );
+  await delay(250);
+  await check(
+    cdp,
+    'turning it off is a real style edit',
+    'document.querySelector("#template-status").textContent',
+    (v) => String(v).includes('edited'),
+  );
+  await evaluate(
+    cdp,
+    '(()=>{const c=document.querySelector("#autowrap-toggle");c.checked=true;c.dispatchEvent(new Event("change"));})()',
+  );
+  await delay(250);
+  await check(
+    cdp,
+    'and turning it back restores the unmodified parity style',
+    'document.querySelector("#template-status").textContent',
+    (v) => !String(v).includes('edited'),
+  );
+
   console.log('\n■ caption text editing');
   await evaluate(cdp, 'document.querySelector("#blocks .row").click()');
   await delay(250);

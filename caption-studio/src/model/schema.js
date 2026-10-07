@@ -82,6 +82,12 @@ export function createDefaultStyle() {
     // overflow cap, which means every line v10 kept on one line still renders on one line
     // (parity) while genuinely longer text now wraps instead of being shrunk to fit.
     wrapWidth: 0.9,
+    // The master switch for wrapping. On (the default) a caption is wrapped at `wrapWidth` — or at
+    // the canvas edge when `wrapWidth` is 0 — so a line can never leave the frame. Off reproduces
+    // the v10 replica: one line, however wide, overflow and all. It exists as its own flag rather
+    // than as "wrapWidth 0" because 'no wrapping' and 'wrap at 90%' are two different intentions,
+    // and a single slider cannot express both.
+    autoWrap: true,
     maxLines: 3,
     // Background boxes for the BOX display modes and the `highlight` emphasis decoration.
     // Paddings and radius are em fractions of the font size (see render/decorations.js).

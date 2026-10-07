@@ -626,6 +626,7 @@ async function syncStyleControls(defaults) {
   $('#size-unit').value = style.font.sizeUnit === 'h' ? 'h' : 'w';
   $('#wrap-width').value = String(style.wrapWidth);
   $('#wrap-out').textContent = style.wrapWidth.toFixed(2);
+  $('#autowrap-toggle').checked = style.autoWrap !== false;
   $('#reveal-mode').value = style.reveal ?? 'progressive';
   $('#emphasis-decoration').value = style.emphasis?.decoration ?? 'none';
   $('#emphasis-source').value = style.emphasis?.source ?? 'keyword';
@@ -659,6 +660,14 @@ function wirePreview() {
   $('#mute-toggle').addEventListener('change', (e) => {
     preview.setMuted(e.target.checked);
     log(e.target.checked ? 'sound muted' : 'sound on');
+  });
+  $('#autowrap-toggle').addEventListener('change', async (e) => {
+    await editDefaults({ autoWrap: e.target.checked });
+    log(
+      e.target.checked
+        ? 'auto-wrap on — captions wrap at the frame edge and cannot overflow'
+        : 'auto-wrap off — a long line stays on one line and can leave the frame',
+    );
   });
   $('#volume').addEventListener('input', (e) => preview.setVolume(Number(e.target.value)));
   $('#guides-toggle').addEventListener('change', (e) => preview.setOptions({ guides: e.target.checked }));

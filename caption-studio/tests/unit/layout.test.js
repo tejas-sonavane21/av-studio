@@ -188,20 +188,53 @@ test('wraps greedily to the wrap width and centres each line', () => {
   close(layout.lines[0].x, layout.lines[1].x, 1e-9);
 });
 
-test('wrapWidth 0 disables wrapping entirely', () => {
+test('autoWrap off lays the block on one line, however wide', () => {
   const block = makeBlock([
     ['aaaaaaaaaaaaaaaaaaaa', 0, 1],
     ['bbbbbbbbbbbbbbbbbbbb', 1, 2],
+    ['cccccccccccccccccccc', 2, 3],
   ]);
   const layout = layoutBlock({
     block,
-    style: style({ wrapWidth: 0 }),
+    style: style({ autoWrap: false }),
     canvasWidth: 1280,
     canvasHeight: 720,
     measureText: fakeMeasure,
   });
   assert.equal(layout.lines.length, 1);
   assert.equal(layout.wrapLimit, Infinity);
+  // and the single line is genuinely wider than the frame — the v10 overflow the switch exists for
+  assert.ok(layout.width > 1280);
+});
+
+test('autoWrap on with wrapWidth 0 keeps the line inside the frame', () => {
+  // wrapWidth 0 would mean "no wrap"; autoWrap turns that into "wrap at the canvas edge" so the
+  // text can never leave the picture. This is the overflow guard the checkbox is for.
+  const block = makeBlock([
+    ['aaaaaaaaaaaaaaaaaaaa', 0, 1],
+    ['bbbbbbbbbbbbbbbbbbbb', 1, 2],
+    ['cccccccccccccccccccc', 2, 3],
+  ]);
+  const layout = layoutBlock({
+    block,
+    style: style({ wrapWidth: 0, autoWrap: true }),
+    canvasWidth: 1280,
+    canvasHeight: 720,
+    measureText: fakeMeasure,
+  });
+  close(layout.wrapLimit, 1280, 1e-9);
+  assert.ok(layout.lines.length > 1, 'the line wrapped instead of overflowing');
+  assert.ok(layout.width <= 1280 + 1e-9, 'and no line is wider than the frame');
+});
+
+test('autoWrap defaults on, so the parity wrap width is unchanged', () => {
+  const block = makeBlock([
+    ['aaaaaaaaaa', 0, 1],
+    ['bbbbbbbbbb', 1, 2],
+  ]);
+  const build = (patch) =>
+    layoutBlock({ block, style: style(patch), canvasWidth: 1280, canvasHeight: 720, measureText: fakeMeasure });
+  close(build({}).wrapLimit, build({ wrapWidth: 0.9, autoWrap: true }).wrapLimit, 1e-9);
 });
 
 test('a word wider than the wrap width is hard-broken, keeping one wordIndex', () => {
@@ -386,6 +419,10 @@ test('the layout engine caches by signature and invalidates', () => {
   block.words[1].emphasis = true;
   engine.layout(block, s, CANVAS);
   assert.equal(engine.cacheSize, 3, 'emphasis flags must invalidate the layout cache');
+
+  // ...and so does the wrap switch
+  engine.layout(block, style({ autoWrap: false }), CANVAS);
+  assert.equal(engine.cacheSize, 4, 'autoWrap must be part of the layout signature');
 
   engine.invalidate();
   assert.equal(engine.cacheSize, 0);

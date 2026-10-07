@@ -139,7 +139,7 @@ export function layoutSignature(block, style, canvas) {
     block.text,
     flags,
     f.family, f.weight, f.size, f.sizeUnit, f.italic, f.letterSpacing, f.lineHeight, f.case,
-    style.wrapWidth, style.maxLines, style.align,
+    style.wrapWidth, style.autoWrap, style.maxLines, style.align,
     a.posX, a.posY, a.gravity,
     e.italic,
     canvas.width, canvas.height,
@@ -177,8 +177,13 @@ export function layoutBlock({
   const align = style.align ?? 'center';
   const lineHeight = font.lineHeight > 0 ? font.lineHeight : 1.15;
   const baseFontSize = fontSizePx(font, canvas);
-  const wrapLimit =
-    style.wrapWidth > 0 ? clamp(style.wrapWidth, 0.02, 1) * canvasWidth : Infinity;
+  // Wrapping is switchable (`autoWrap`). On, a line is wrapped at `wrapWidth` — or at the canvas
+  // edge when `wrapWidth` is 0 — so the text cannot leave the frame. Off, the whole block lays out
+  // on one line, exactly as the v10 replica drew it.
+  const autoWrap = style.autoWrap !== false;
+  const wrapLimit = !autoWrap
+    ? Infinity
+    : clamp(style.wrapWidth > 0 ? style.wrapWidth : 1, 0.02, 1) * canvasWidth;
   const maxLines = style.maxLines > 0 ? style.maxLines : Infinity;
   const italicOnEmphasis = !!style.emphasis?.italic;
 
