@@ -28,6 +28,7 @@ import {
   setBlockOverrides,
   setBlockPlacement,
   setDefaults,
+  shiftDocumentPlacements,
   styleForTemplate,
 } from '../../src/templates/merge.js';
 import { createBlock, createDefaultStyle, createDocument, createWord, resolveStyle } from '../../src/model/schema.js';
@@ -265,6 +266,42 @@ test('the style resolver memoises on content, not identity', () => {
   assert.equal(changed.font.size, 0.07);
   assert.equal(r.stats.misses, 2);
   assert.deepEqual(changed, resolveStyle(doc, block), 'a hit and a miss are indistinguishable');
+});
+
+test('shiftDocumentPlacements moves the default anchor and every placed caption by one delta', () => {
+  const doc = makeDoc();
+  const [a, b] = doc.blocks.map((block) => block.id);
+  setBlockPlacement(doc, a, { posX: 0.2, posY: 0.3, gravity: 'center' }, { preset: 'middle-left' });
+  setBlockOverrides(doc, b, { anchor: { posX: 0.6, posY: 0.7, gravity: 'bottom' } });
+  const baseX = doc.defaults.anchor.posX;
+  const baseY = doc.defaults.anchor.posY;
+
+  shiftDocumentPlacements(doc, { dx: 0.05, dy: -0.1 });
+
+  const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} ≈ ${expected}`);
+  near(doc.defaults.anchor.posX, baseX + 0.05);
+  near(doc.defaults.anchor.posY, baseY - 0.1);
+  near(findBlock(doc, a).placement.posX, 0.25);
+  near(findBlock(doc, a).placement.posY, 0.2);
+  near(findBlock(doc, b).overrides.anchor.posX, 0.65);
+  near(findBlock(doc, b).overrides.anchor.posY, 0.6);
+  // a moved anchor no longer names the preset it used to
+  assert.equal(findBlock(doc, a).placement.preset, undefined);
+});
+
+test('shiftDocumentPlacements clamps to the canvas and is a no-op at zero', () => {
+  const doc = makeDoc();
+  const blockId = doc.blocks[0].id;
+  setBlockPlacement(doc, blockId, { posX: 0.98, posY: 0.02 });
+  const before = JSON.stringify(doc.defaults.anchor);
+
+  shiftDocumentPlacements(doc, {});
+  assert.equal(JSON.stringify(doc.defaults.anchor), before, 'a zero delta changes nothing');
+
+  shiftDocumentPlacements(doc, { dx: 0.5, dy: -0.5 });
+  assert.equal(findBlock(doc, blockId).placement.posX, 1);
+  assert.equal(findBlock(doc, blockId).placement.posY, 0);
+  assert.ok(doc.defaults.anchor.posX <= 1 && doc.defaults.anchor.posY >= 0);
 });
 
 test('the style resolver evicts and can be invalidated', () => {
