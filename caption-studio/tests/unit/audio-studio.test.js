@@ -105,6 +105,15 @@ test('optionsFor turns "off" into an absent option, not an unknown one', () => {
   assert.equal(on.language, 'en');
 });
 
+test('optionsFor carries the emphasis mode, and "off" is sent as absent', () => {
+  // 'auto' is the AI auto-highlight: the studio writes the words the llm pass picked.
+  assert.equal(optionsFor({ emphasis: 'auto' }).emphasis, 'auto');
+  assert.equal(optionsFor({ emphasis: 'all' }).emphasis, 'all');
+  assert.equal(optionsFor({ emphasis: undefined }).emphasis, undefined);
+  assert.doesNotMatch(buildQuery(optionsFor({ preset: 'fast', emphasis: undefined })), /emphasis/);
+  assert.match(buildQuery(optionsFor({ preset: 'fast', emphasis: 'auto' })), /emphasis=auto/);
+});
+
 // --------------------------------------------------------------------------- #
 // talking to the server
 // --------------------------------------------------------------------------- #
@@ -289,6 +298,13 @@ test('the audit names the engine, the aligner and what it changed', () => {
   assert.match(lines, /timing gap/);
 });
 
+test('the audit says when the model picked words to emphasise', () => {
+  const lines = describeStudioAudit({
+    audioStudio: { validation: { passes: [{ validator: 'llm', corrections: 0, applied: 0, highlights: [3, 9] }] } },
+  }).join('\n');
+  assert.match(lines, /validation llm: 0 proposed, 0 applied, 2 word\(s\) picked to emphasise/);
+});
+
 test('an unaligned run says so, and a synthetic one says so loudly', () => {
   assert.match(describeStudioAudit({ audioStudio: {} }).join('\n'), /alignment off/);
   assert.match(
@@ -346,6 +362,17 @@ const EMITTED = {
     duration: 182.544,
   },
 };
+
+test('the AI auto-highlight ranges arrive as emphasis flags on exactly those words', () => {
+  // With emphasis='auto' the studio writes one range per word the llm picked. This is the importer
+  // end of that contract: the ranges become `word.emphasis`, which is what the renderer underlines.
+  const doc = JSON.parse(JSON.stringify(EMITTED));
+  doc.subtitles[0].styles = [{ from: 8, to: 16, id: 'auto-highlight', style: { underline: true, italic: true } }];
+  doc.subtitles[1].styles = [{ from: 12, to: 17, id: 'auto-highlight', style: { underline: true, italic: true } }];
+  const { document: parsed } = importJSON(JSON.stringify(doc));
+  assert.deepEqual(parsed.blocks[0].words.map((w) => !!w.emphasis), [false, false, true, false], '“ordinary”');
+  assert.deepEqual(parsed.blocks[1].words.map((w) => !!w.emphasis), [false, false, false, true], '“crowd”');
+});
 
 test('an artifact from the Python studio imports as a caption document', () => {
   const { document: doc, kind } = importJSON(JSON.stringify(EMITTED));

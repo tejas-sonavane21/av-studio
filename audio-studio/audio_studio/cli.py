@@ -392,7 +392,7 @@ def _add_emit_arguments(parser: argparse.ArgumentParser, *, audio: bool = False)
     parser.add_argument("--stem", default=None, help="output file stem (default: the input's)")
     parser.add_argument("--emit", type=_parse_kinds, default=list(DEFAULT_KINDS), help="comma list: json,veed,srt,vtt")
     parser.add_argument("--word-level", action="store_true", help="one subtitle cue per word")
-    parser.add_argument("--emphasis", default="none", choices=("none", "all"), help="keyword highlighting in the Veed output")
+    parser.add_argument("--emphasis", default="none", choices=("none", "all", "auto"), help="keyword highlighting in the Veed output (auto = the words the llm validator picked)")
     parser.add_argument("--json", action="store_true", help="machine-readable output on stdout")
     parser.add_argument("--quiet", "-q", action="store_true", help="no progress output")
     if audio:
@@ -418,7 +418,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--beam", type=int, default=None, help="beam size (default: the preset's)")
     t.add_argument("--emit", type=_parse_kinds, default=list(DEFAULT_KINDS), help="comma list: json,veed,srt,vtt")
     t.add_argument("--word-level", action="store_true", help="one subtitle cue per word")
-    t.add_argument("--emphasis", default="none", choices=("none", "all"), help="keyword highlighting in the Veed output")
+    t.add_argument("--emphasis", default="none", choices=("none", "all", "auto"), help="keyword highlighting in the Veed output (auto = the words the llm validator picked)")
     t.add_argument(
         "--vad",
         action="store_true",
@@ -439,7 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--stem", default=None, help="output file stem")
     e.add_argument("--emit", type=_parse_kinds, default=list(DEFAULT_KINDS), help="comma list: json,veed,srt,vtt")
     e.add_argument("--word-level", action="store_true", help="one subtitle cue per word")
-    e.add_argument("--emphasis", default="none", choices=("none", "all"), help="keyword highlighting in the Veed output")
+    e.add_argument("--emphasis", default="none", choices=("none", "all", "auto"), help="keyword highlighting in the Veed output (auto = the words the llm validator picked)")
     e.add_argument("--json", action="store_true", help="machine-readable output on stdout")
     e.set_defaults(func=cmd_emit)
 

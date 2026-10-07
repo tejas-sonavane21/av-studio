@@ -27,10 +27,13 @@ Two deliberate details, both about not lying to the importer:
 
 ``emphasis``
     Veed's "auto-highlight" picks *keywords* — a model decision we cannot
-    reproduce, so inventing ranges would be exactly the "silent guessing" the
-    suite forbids. Default is ``'none'``: plain text, and the caption editor's
-    ``emphasis.source = 'active'`` gives karaoke highlighting with no ranges at
-    all. ``'all'`` covers the whole line for a solid highlight.
+    reproduce by rule, so the default is ``'none'``: plain text, and the caption
+    editor's ``emphasis.source = 'active'`` then gives karaoke highlighting with no
+    ranges at all. ``'all'`` covers the whole line for a solid highlight. ``'auto'``
+    writes one range per word the model *chose* — the highlights the ``llm``
+    validator recorded (see ``validate/llm.py``) — so "which words to emphasise"
+    stays an editorial decision, made and audited, rather than a guess smeared over
+    every line. With no highlights recorded, ``'auto'`` is ``'none'``.
 """
 
 from __future__ import annotations
@@ -73,13 +76,56 @@ EMPHASIS_STYLE = {
 
 EMPHASIS_STYLE_ID = "auto-highlight"
 
-EMPHASIS_MODES = ("none", "all")
+EMPHASIS_MODES = ("none", "all", "auto")
 
 
 def _range_for(text: str) -> list[dict]:
     if not text:
         return []
     return [{"from": 0, "to": len(text), "id": EMPHASIS_STYLE_ID, "style": dict(EMPHASIS_STYLE)}]
+
+
+def highlight_indices(transcript: Transcript) -> set[int]:
+    """
+    The word numbers the validation ledger marked for emphasis.
+
+    Read from every pass that ran, because the passes are meant to be run more than
+    once and a later pass not mentioning a word is not a reason to drop an earlier
+    pass's pick. Word numbers are global and in reading order — the same numbering
+    ``validate/llm.py`` quotes and ``ledger.apply_corrections`` resolves — so they
+    map onto the emitted word stream without any re-derivation.
+    """
+    out: set[int] = set()
+    for record in (transcript.validation or {}).get("passes") or []:
+        for index in record.get("highlights") or []:
+            try:
+                out.add(int(index))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _word_ranges(segment, highlighted: set[int], first: int) -> list[dict]:
+    """One emphasis range per chosen word, over that word's character span.
+
+    The ranges are in the segment's own ``text`` coordinates, which is what the
+    importer's ``normalizeVeedStyles(styles, text)`` expects. ``first`` is the
+    segment's first word's global number, so a highlight picked in another segment
+    cannot land on a word here.
+    """
+    if not highlighted:
+        return []
+    ranges: list[dict] = []
+    cursor = 0
+    for offset, word in enumerate(segment.words):
+        start = cursor
+        end = cursor + len(word.text)
+        cursor = end + 1  # the joining space the importer puts back
+        if first + offset in highlighted:
+            ranges.append(
+                {"from": start, "to": end, "id": EMPHASIS_STYLE_ID, "style": dict(EMPHASIS_STYLE)}
+            )
+    return ranges
 
 
 def to_veed_master(
@@ -107,8 +153,13 @@ def to_veed_master(
     if include_style:
         out["style"] = dict(PARITY_STYLE)
 
+    highlighted = highlight_indices(transcript) if emphasis == "auto" else set()
+
     subtitles = []
+    word_number = 0
     for seg in transcript.segments:
+        first = word_number
+        word_number += len(seg.words)
         if not seg.words and not seg.text:
             continue
         words = []
@@ -117,12 +168,18 @@ def to_veed_master(
             if include_probability and word.probability is not None:
                 entry["p"] = round(word.probability, 3)
             words.append(entry)
+        if emphasis == "all":
+            styles = _range_for(seg.text)
+        elif emphasis == "auto":
+            styles = _word_ranges(seg, highlighted, first)
+        else:
+            styles = []
         subtitles.append(
             {
                 "start": seg.start,
                 "end": seg.end,
                 "words": words,
-                "styles": _range_for(seg.text) if emphasis == "all" else [],
+                "styles": styles,
             }
         )
     out["subtitles"] = subtitles

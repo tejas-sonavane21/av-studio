@@ -147,6 +147,42 @@ def test_veed_emphasis_rejects_an_unknown_mode():
         emit.veed.to_veed_master(sample(), emphasis="keywords")
 
 
+def test_veed_emphasis_auto_writes_one_range_per_chosen_word():
+    """
+    ``auto`` turns the LLM validator's picks into the Veed char-ranges the caption
+    editor reads as emphasis — always as a *selection*, never the whole line.
+    """
+    transcript = sample()
+    transcript.validation = {"passes": [{"validator": "llm", "highlights": [1]}]}
+    first = emit.veed.to_veed_master(transcript, emphasis="auto")["subtitles"][0]
+    assert len(first["styles"]) == 1
+    # "world" is the second word of "hello world": characters 6..11
+    assert (first["styles"][0]["from"], first["styles"][0]["to"]) == (6, 11)
+    assert first["styles"][0]["id"] == "auto-highlight"
+    assert first["styles"][0]["style"] == emit.veed.EMPHASIS_STYLE
+
+
+def test_veed_emphasis_auto_keeps_a_pick_in_its_own_segment():
+    transcript = sample()
+    transcript.validation = {"passes": [{"validator": "llm", "highlights": [2]}]}  # 'again'
+    subtitles = emit.veed.to_veed_master(transcript, emphasis="auto")["subtitles"]
+    assert subtitles[0]["styles"] == []
+    assert len(subtitles[1]["styles"]) == 1
+    assert (subtitles[1]["styles"][0]["from"], subtitles[1]["styles"][0]["to"]) == (0, 5)
+
+
+def test_veed_emphasis_auto_without_picks_invents_nothing():
+    subtitles = emit.veed.to_veed_master(sample(), emphasis="auto")["subtitles"]
+    assert all(subtitle["styles"] == [] for subtitle in subtitles)
+
+
+def test_highlight_indices_union_every_pass_and_ignore_junk():
+    transcript = sample()
+    transcript.validation = {"passes": [{"highlights": [0]}, {"highlights": [1, "x", None]}, {}]}
+    assert emit.veed.highlight_indices(transcript) == {0, 1}
+    assert emit.veed.highlight_indices(sample()) == set()
+
+
 def test_veed_probability_is_optional():
     with_probability = emit.veed.to_veed_master(sample())["subtitles"][0]["words"][0]
     without = emit.veed.to_veed_master(sample(), include_probability=False)["subtitles"][0]["words"][0]
