@@ -371,6 +371,19 @@ with `document.fonts.check()` — because `document.fonts.load()` resolves succe
 matching face exists, measuring against a silent fallback is how the old project produced text that
 "doesn't match".
 
+Two display faces ship the same way, and appear in the Font dropdown once their file is present:
+
+```
+src/fonts/packaged/ZyenaHibernal.ttf     → "Zyena Hibernal"   — the face CapCut calls **Hibernal**
+src/fonts/packaged/HibernalSentry.ttf    → "Hibernal Sentry"  — Iconian Fonts, shared the word only
+```
+
+They are unrelated fonts, and worth being clear about because the name invites the mistake: CapCut's
+"Hibernal" is **Zyena Hibernal** (© Tianjin ZHUOMAN Technology Co., Ltd, CapCut `fontId`
+7044916245971341825), a marker script; Iconian's "Hibernal Sentry" is an angular sci-fi display face.
+Neither binary is in version control — `src/fonts/packaged/README.md` says why, and gives the `find`
+command that pulls CapCut's copy out of its own local cache instead.
+
 > Node 24 note: passing a bare directory (`node --test tests/unit`) is treated as a module and fails;
 > pass a glob (as the `npm test` script does).
 

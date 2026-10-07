@@ -29,7 +29,7 @@ export const FALLBACK_METRICS = Object.freeze({
  * - `stack`  — the CSS `font-family` fallback list. Bundled/packaged faces are named exactly the
  *              same as `family`, so listing `family` first is also what makes a locally installed
  *              copy work with no network at all.
- * - `sources`— in preference order: `packaged` (a woff2 dropped into `fonts/packaged/`),
+ * - `sources`— in preference order: `packaged` (a `.woff2`/`.ttf` dropped into `fonts/packaged/`),
  *              `google` (opt-in network), `system` (whatever the OS has).
  * - `googleQuery` — the `family=` fragment for the Google Fonts CSS2 API, when one exists.
  */
@@ -162,6 +162,36 @@ export const FONT_REGISTRY = [
     googleQuery: 'Bangers',
     stack: '"Bangers", Impact, "Comic Sans MS", cursive',
     metrics: { capHeight: 0.72, xHeight: 0.5, ascent: 1.0, descent: 0.28, measured: false },
+  },
+  // -------------------------------------------------------------------------
+  // packaged-only faces: no Google source, so `fonts/packaged/` is the only way
+  // they can appear. Neither file is in version control (see the README in that
+  // directory); the entries are here so the family, its metrics and its fallbacks
+  // are declared in one place regardless of whether the binary happens to be on
+  // this machine.
+  // -------------------------------------------------------------------------
+  {
+    // CapCut ships this face as **Hibernal** (its fontId 7044916245971341825). The file names
+    // itself ``ZyenaHibernal`` and is (c) Tianjin ZHUOMAN Technology Co., Ltd — a licensed
+    // CapCut resource, which is why the binary stays out of the repository.
+    family: 'Zyena Hibernal',
+    category: 'handwriting',
+    weights: [400],
+    italics: false,
+    packaged: { 400: 'ZyenaHibernal.ttf' },
+    stack: '"Zyena Hibernal", "Hibernal", "Segoe Print", "Comic Sans MS", cursive',
+    metrics: { capHeight: 0.71, xHeight: 0.46, ascent: 0.98, descent: 0.31, measured: false },
+  },
+  {
+    // Iconian Fonts' techno face. Shares the word "Hibernal" with the face above and nothing
+    // else: this one is angular caps, that one is a marker script. Both are selectable.
+    family: 'Hibernal Sentry',
+    category: 'display',
+    weights: [400],
+    italics: false,
+    packaged: { 400: 'HibernalSentry.ttf' },
+    stack: '"Hibernal Sentry", "Hibernalsentry", Impact, "Arial Narrow", cursive',
+    metrics: { capHeight: 0.7, xHeight: 0.5, ascent: 0.92, descent: 0.22, measured: false },
   },
 ];
 

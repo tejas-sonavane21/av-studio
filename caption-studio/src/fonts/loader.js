@@ -3,8 +3,9 @@
  *
  * Three sources, tried in order:
  *
- *   1. **packaged** — a woff2 in `fonts/packaged/` (see `registry.js` for the exact filenames).
- *      Fully offline; this is the parity path. We ship no binaries yet, so this usually misses.
+ *   1. **packaged** — a `.woff2` (or `.ttf`/`.otf`) in `fonts/packaged/` (see `registry.js` for the
+ *      exact filenames). Fully offline; this is the parity path. Nothing under that directory is
+ *      version controlled, so on a fresh checkout this misses and the next source is tried.
  *   2. **Google Fonts** (opt-in, `allowNetwork`) — exactly what the v10 replica did
  *      (`Inter:ital,wght@0,900;1,900`), so enabling it reproduces v10's rendering and is on by
  *      default in the preview.
