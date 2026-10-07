@@ -1,0 +1,6 @@
+# Font binaries are not version controlled. See README.md in this directory:
+# they are either licensed to someone else (CapCut's Hibernal / Zyena Hibernal) or
+# a download the user already has on disk.
+*
+!README.md
+!.gitignore

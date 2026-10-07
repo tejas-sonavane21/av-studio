@@ -64,6 +64,37 @@ test('every entry is internally consistent', () => {
   }
 });
 
+test('every packaged filename is declared for a weight the family lists', () => {
+  // A mismatch here is invisible in the catalog and only shows up as a silent fallback face in the
+  // browser, which is exactly the bug the loader's "never lie" rule exists to catch.
+  for (const f of FONT_REGISTRY) {
+    for (const [weight, file] of Object.entries(f.packaged ?? {})) {
+      assert.ok(f.weights.includes(Number(weight)), `${f.family} lists weight ${weight}`);
+      assert.match(file, /\.(woff2|ttf|otf)$/i, `${f.family} packaged file is a font binary`);
+    }
+  }
+});
+
+test('the packaged-only faces are selectable and never reach for the network', () => {
+  const families = fontFamilies();
+  assert.ok(families.includes('Zyena Hibernal'), 'CapCut\'s Hibernal is offered');
+  assert.ok(families.includes('Hibernal Sentry'), 'Iconian\'s Hibernal Sentry is offered too');
+
+  // They share a word and nothing else: one is a marker script, the other an angular display face.
+  assert.equal(getFont('Zyena Hibernal').category, 'handwriting');
+  assert.equal(getFont('Hibernal Sentry').category, 'display');
+
+  assert.ok(packagedUrl('zyena hibernal', 400).endsWith('/src/fonts/packaged/ZyenaHibernal.ttf'));
+  assert.ok(packagedUrl('Hibernal Sentry', 400).endsWith('/src/fonts/packaged/HibernalSentry.ttf'));
+  assert.equal(googleCssUrl('Zyena Hibernal'), null, 'no Google source for a packaged face');
+  assert.equal(googleCssUrl('Hibernal Sentry'), null);
+  assert.equal(nearestWeight('Zyena Hibernal', 900), 400, 'single-weight faces clamp');
+
+  // The stack must start with the family so a locally installed copy wins with no network.
+  assert.ok(familyStack('Zyena Hibernal').startsWith('"Zyena Hibernal"'));
+  assert.match(familyStack('Hibernal Sentry'), /cursive$/);
+});
+
 test('Inter carries the real, measured metrics from the plan', () => {
   const inter = getFont('Inter');
   assert.equal(inter.metrics.measured, true);
