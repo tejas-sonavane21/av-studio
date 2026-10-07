@@ -569,6 +569,39 @@ async function main() {
   );
   await check(cdp, 'and the block now carries a position override', 'document.querySelector("#blocks .row.active .tag:last-child").textContent', (v) => Boolean(v));
 
+  console.log('\n■ apply-to-all drag');
+  // Put the caption the drag above moved back on the default, so it sits where the pointer lands.
+  await evaluate(cdp, 'document.querySelector("#reset-block").click()');
+  await delay(300);
+  // Record where a caption that will NOT be dragged sits, then drag a different one with the
+  // option on and see whether it moved too.
+  await evaluate(cdp, 'document.querySelectorAll("#blocks .row")[1].click()');
+  await delay(300);
+  const neighbourBefore = await evaluate(cdp, 'document.querySelector("#block-status").textContent');
+  await evaluate(
+    cdp,
+    '(()=>{const c=document.querySelector("#drag-all-toggle");c.checked=true;c.dispatchEvent(new Event("change"));})()',
+  );
+  await evaluate(cdp, 'document.querySelectorAll("#blocks .row")[0].click()');
+  await delay(300);
+  await mouse('mousePressed', anchorX, anchorY);
+  await mouse('mouseMoved', anchorX - 60, anchorY - 40);
+  await mouse('mouseReleased', anchorX - 60, anchorY - 40);
+  await delay(600);
+  await evaluate(cdp, 'document.querySelectorAll("#blocks .row")[1].click()');
+  await delay(300);
+  await check(
+    cdp,
+    '"drag all captions" moves a caption that was never grabbed',
+    'document.querySelector("#block-status").textContent',
+    (v) => v !== neighbourBefore,
+    `something other than "${neighbourBefore}"`,
+  );
+  await evaluate(
+    cdp,
+    '(()=>{const c=document.querySelector("#drag-all-toggle");c.checked=false;c.dispatchEvent(new Event("change"));})()',
+  );
+
   console.log('\n■ reset paths');
   await check(
     cdp,

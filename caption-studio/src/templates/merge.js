@@ -34,7 +34,7 @@
  */
 
 import { createDefaultStyle, resolveStyle as mergeResolveStyle } from '../model/schema.js';
-import { mergeDeep, stableStringify, isPlainObject } from '../util/math.js';
+import { mergeDeep, stableStringify, isPlainObject, clamp } from '../util/math.js';
 import { getTemplate, templateDefaults, hasTemplate } from './index.js';
 
 /** A complete style for a template id: parity base ⊕ the template's defaults. */
@@ -179,6 +179,40 @@ export function clearBlockPlacement(doc, blockId) {
   if (!block) return null;
   block.placement = null;
   return block;
+}
+
+/**
+ * Shift the whole caption layout by one normalized delta — the "move every caption at once" drag.
+ *
+ * The delta is applied to the document's default anchor *and* to every explicit per-block position
+ * (a `placement`, or an `overrides.anchor`), so captions that inherit and captions that were placed
+ * by hand all travel by the same amount and keep their relative spacing. Moving the default anchor
+ * rather than pinning every block with its own placement is what keeps the document small and keeps
+ * a caption created later (a split, say) starting from the moved layout rather than the old one.
+ *
+ * A moved anchor is no longer the preset it used to name, so the `preset` id is dropped — the same
+ * rule `placement.js#pxToAnchor` applies to a manual move. Positions are clamped to 0..1.
+ *
+ * @returns {object} the document, mutated in place
+ */
+export function shiftDocumentPlacements(doc, { dx = 0, dy = 0 } = {}) {
+  if (!doc) return null;
+  if (!dx && !dy) return doc;
+  const shift = (anchor) => {
+    if (!anchor) return anchor;
+    const { preset, ...rest } = anchor;
+    return {
+      ...rest,
+      posX: clamp((anchor.posX ?? 0.5) + dx, 0, 1),
+      posY: clamp((anchor.posY ?? 0.5) + dy, 0, 1),
+    };
+  };
+  if (doc.defaults?.anchor) doc.defaults.anchor = shift(doc.defaults.anchor);
+  for (const block of doc.blocks ?? []) {
+    if (block.placement) block.placement = shift(block.placement);
+    if (block.overrides?.anchor) block.overrides.anchor = shift(block.overrides.anchor);
+  }
+  return doc;
 }
 
 export function findBlock(doc, blockId) {

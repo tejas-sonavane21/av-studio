@@ -36,7 +36,7 @@ import { joinBlockWithPrevious, setBlockText, setWordText, splitBlock, splitBloc
 import { createPreview } from './editor/preview.js';
 import { createCanvasOverlay } from './editor/canvas-overlay.js';
 import { fontFamilies, getFont } from './fonts/registry.js';
-import { DISPLAY_MODES, resolveStyle } from './model/schema.js';
+import { DISPLAY_MODES, resolveAnchor, resolveStyle } from './model/schema.js';
 import { REVEAL_MODES, EMPHASIS_SOURCES } from './render/time.js';
 import { animationNames } from './render/animation.js';
 import { PRESET_IDS, anchorFromPreset, clampAnchorToCanvas, describeAnchor, presetFor } from './render/placement.js';
@@ -52,6 +52,7 @@ import {
   promoteBlockToDocument,
   setBlockOverrides,
   setBlockPlacement,
+  shiftDocumentPlacements,
 } from './templates/merge.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -72,6 +73,9 @@ let overlay = null;
 // an edit lives in the document (overrides / placement) or in a registry.
 let selectedBlockId = null;
 let uiBusy = false;
+// The "apply to all" drag's running anchor, keyed by which block is being dragged. Present only
+// while a drag with the option on is in flight, so a committed drag cannot leak into the next one.
+let dragAllState = null;
 // Bumped by every template application, so an overlapping application cannot repaint last.
 let templateRequest = 0;
 
@@ -672,6 +676,10 @@ function wirePreview() {
   $('#volume').addEventListener('input', (e) => preview.setVolume(Number(e.target.value)));
   $('#guides-toggle').addEventListener('change', (e) => preview.setOptions({ guides: e.target.checked }));
   $('#overlay-toggle').addEventListener('change', (e) => overlay?.setEnabled(e.target.checked));
+  $('#drag-all-toggle').addEventListener('change', (e) => {
+    dragAllState = null;
+    log(e.target.checked ? 'drag: every caption moves together' : 'drag: only the caption you grab moves');
+  });
 
   $('#font-size').addEventListener('input', async (e) => {
     const size = Number(e.target.value);
@@ -889,13 +897,25 @@ function applyBlockPatch(patch) {
   return block.overrides;
 }
 
-/** Commit a position for the selected block (used by the overlay's drag/nudge callbacks). */
+/** Is "apply to all" on? Read at the moment of the move, like every other control. */
+function dragAllEnabled() {
+  return Boolean($('#drag-all-toggle')?.checked);
+}
+
+/**
+ * Commit a position for the selected block (used by the overlay's drag/nudge callbacks).
+ *
+ * With "drag all captions" on, the move is applied to the *whole layout* instead: see
+ * `shiftAllCaptions`. Either way the drag's own value is the only thing that decides where the
+ * text goes, so the overlay never has to know which mode is on.
+ */
 function placeSelected(blockId, anchor, info = {}) {
   const doc = preview?.document;
   if (!doc || !blockId) return null;
   selectedBlockId = blockId;
   const block = findBlock(doc, blockId);
   if (!block) return null;
+  if (dragAllEnabled()) return shiftAllCaptions(doc, blockId, block, anchor, info);
   setBlockPlacement(
     doc,
     blockId,
@@ -904,6 +924,42 @@ function placeSelected(blockId, anchor, info = {}) {
   );
   if (info.live) redraw();
   else afterBlockEdit();
+  return block.placement;
+}
+
+/**
+ * The "apply to all" variant of a drag: move every caption by the same delta.
+ *
+ * The delta is measured against the anchor the *dragged* block had at the start of the gesture, and
+ * the dragged block's own target is clamped to the frame first — then that same, already-clamped
+ * delta is handed to the whole layout. Clamping per block instead would let a caption near one edge
+ * lag behind while the rest kept moving, which is exactly the relative drift a group move must not
+ * introduce.
+ *
+ * The live preview on every pointer move is the same edit applied repeatedly; nothing is written
+ * until the pointer releases, at which point the running anchor is forgotten so the next drag starts
+ * from where this one left off.
+ */
+function shiftAllCaptions(doc, blockId, block, anchor, info) {
+  const layout = (preview.layouts ?? []).find((l) => l.blockId === blockId);
+  const box = layout ? { width: layout.width, height: layout.height } : null;
+  const target = box ? clampAnchorToCanvas(anchor, { canvas: preview.renderer.size, box }).anchor : anchor;
+
+  if (!dragAllState || dragAllState.blockId !== blockId) {
+    const start = resolveAnchor(doc, block);
+    dragAllState = { blockId, lastX: start.posX, lastY: start.posY };
+  }
+  const dx = target.posX - dragAllState.lastX;
+  const dy = target.posY - dragAllState.lastY;
+  if (dx || dy) shiftDocumentPlacements(doc, { dx, dy });
+  dragAllState.lastX = target.posX;
+  dragAllState.lastY = target.posY;
+
+  if (info.live) redraw();
+  else {
+    dragAllState = null;
+    afterBlockEdit();
+  }
   return block.placement;
 }
 
