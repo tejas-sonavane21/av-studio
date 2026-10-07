@@ -1155,6 +1155,123 @@ async function main() {
   );
   stub.close();
 
+  console.log('\n■ export');
+  // Watch the two calls every download goes through, so the buttons are checked by what they
+  // actually save rather than by a log line.
+  await evaluate(
+    cdp,
+    `(()=>{
+      window.__downloads=[];
+      window.__blobSizes=[];
+      const realCreate=URL.createObjectURL.bind(URL);
+      URL.createObjectURL=(blob)=>{window.__downloads.push(blob&&blob.type?blob.type:'');window.__blobSizes.push(blob&&blob.size?blob.size:0);return realCreate(blob);};
+      const realClick=HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click=function(){if(this.download){window.__downloads.push(this.download);}return realClick.call(this);};
+    })()`,
+  );
+  await check(
+    cdp,
+    'the caption files can be saved once a document exists',
+    'document.querySelector("#download-project").disabled',
+    (v) => v === false,
+  );
+  await check(
+    cdp,
+    'the video export stays off until a video is loaded',
+    'document.querySelector("#download-video").disabled',
+    (v) => v === true,
+  );
+  for (const [id, ext] of [
+    ['#download-project', '.caproj'],
+    ['#download-veed', '.veed.json'],
+    ['#download-srt', '.srt'],
+    ['#download-vtt', '.vtt'],
+  ]) {
+    await evaluate(cdp, `document.querySelector("${id}").click()`);
+    await delay(150);
+    await check(
+      cdp,
+      `the ${ext} button saves a ${ext} file`,
+      `window.__downloads.filter((x)=>String(x).endsWith(${JSON.stringify(ext)})).length`,
+      (v) => v >= 1,
+    );
+  }
+
+  console.log('\n■ video burn-in');
+  // Record a one-second video in the page and hand it to #video-in, so the smoke test needs no
+  // (gitignored) fixture. This leans on the same MediaRecorder the burn-in does, so a browser that
+  // cannot record skips the check rather than failing it.
+  const madeVideo = await evaluate(
+    cdp,
+    `(async () => {
+      if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) return 0;
+      const c = document.createElement('canvas'); c.width = 320; c.height = 240;
+      const g = c.getContext('2d');
+      let mime = '';
+      for (const t of ['video/webm;codecs=vp8', 'video/webm']) { if (MediaRecorder.isTypeSupported(t)) { mime = t; break; } }
+      const rec = new MediaRecorder(c.captureStream(15), mime ? { mimeType: mime } : {});
+      const chunks = []; rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      const done = new Promise((r) => { rec.onstop = r; });
+      rec.start(100);
+      const started = performance.now();
+      await new Promise((resolve) => {
+        const draw = () => {
+          const t = (performance.now() - started) / 1000;
+          g.fillStyle = '#0f2a4a'; g.fillRect(0, 0, 320, 240);
+          g.fillStyle = '#e2e8f0'; g.fillRect(20 + t * 120, 90, 60, 60);
+          if (t < 1.2) requestAnimationFrame(draw); else resolve();
+        };
+        draw();
+      });
+      rec.stop(); await done;
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const dt = new DataTransfer();
+      dt.items.add(new File([blob], 'smoke.webm', { type: 'video/webm' }));
+      const input = document.querySelector('#video-in');
+      input.files = dt.files; input.dispatchEvent(new Event('change'));
+      return blob.size;
+    })()`,
+  );
+  if (!madeVideo) {
+    console.log('  \u2022 skipped \u2014 this browser cannot record video, so the burn-in cannot be checked here');
+  } else {
+    await waitFor(
+      cdp,
+      '(()=>{const v=document.querySelector("#preview-video");return v.readyState>=1&&v.videoWidth>0})()',
+      (v) => v === true,
+      { describe: 'the synthetic video to decode' },
+    );
+    await check(
+      cdp,
+      'a loaded video unlocks the burn-in',
+      'document.querySelector("#download-video").disabled',
+      (v) => v === false,
+    );
+    await evaluate(cdp, 'document.querySelector("#download-video").click()');
+    await waitFor(cdp, 'document.querySelector("#export-status").textContent', (v) => v === 'done' || v === 'failed', {
+      describe: 'the burn-in export to finish',
+    });
+    await check(
+      cdp,
+      'the burn-in saved a .webm',
+      'window.__downloads.filter((x)=>String(x).endsWith(".webm")).length',
+      (v) => v >= 1,
+    );
+    await check(
+      cdp,
+      'and it reported success rather than failure',
+      'document.querySelector("#export-status").textContent',
+      (v) => v === 'done',
+    );
+    await check(
+      cdp,
+      'and the recording is a real file, not an empty blob',
+      'Math.max(0, ...window.__blobSizes)',
+      (v) => Number(v) > 2000,
+      'a multi-kilobyte webm',
+    );
+  }
+
   console.log('\n■ console health');
   await check(cdp, 'the font-size readout resolved to pixels', '/\\d+px/.test(document.querySelector("#size-out").textContent)');
   const clean = cdp.problems.length === 0;

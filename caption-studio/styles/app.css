@@ -265,3 +265,18 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 .transcribe-panel input[type='text'] { width: 100%; }
 .transcribe-panel .style-bar .field-inline input[type='text'] { width: auto; }
 
+/* Export: the same progress affordance as the transcribe panel, because a real-time capture is the
+   other long job this app runs, and "working" has to look like something. */
+.export-panel .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.export-panel .progress {
+  margin-top: 12px; height: 6px; border-radius: 999px;
+  background: var(--bg-2); border: 1px solid var(--border); overflow: hidden;
+}
+.export-panel .progress-bar {
+  height: 100%; width: 0%; background: var(--accent);
+  transition: width 0.25s ease-out;
+}
+.export-panel .progress-bar.busy { background: var(--accent-dim); }
+.export-panel .progress-bar.failed { background: #b91c1c; }
+.export-panel #export-note { margin-top: 10px; white-space: pre-wrap; }
+
