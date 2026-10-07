@@ -95,7 +95,7 @@ export function createDefaultStyle() {
     animation: { in: 'reveal', inDur: 0.12, out: null, outDur: 0.1, loop: null },
     emphasis: {
       styleId: 'auto-highlight',
-      decoration: 'underline', // 'underline' | 'highlight' | 'none'
+      decoration: 'underline', // 'underline' | 'sweep' | 'highlight' | 'none'
       decorationColor: '#22c55e',
       highlightColor: null, // falls back to the box colour when null
       italic: true,

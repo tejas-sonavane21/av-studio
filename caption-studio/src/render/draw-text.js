@@ -7,7 +7,7 @@
  * 1. block/line background boxes        BLOCK, LINE_BLOCK_ROUND, LINE_BLOCK_HARD
  * 2. emphasis highlight backdrops       decoration === 'highlight'
  * 3. text                               shadow → stroke → fill   (per display mode)
- * 4. emphasis underlines                decoration === 'underline'  ← above the text
+ * 4. emphasis underlines                decoration === 'underline' | 'sweep'  ← above the text
  * 5. emoji stickers                     render/emoji.js
  * ```
  *
@@ -28,6 +28,7 @@ import {
   DEFAULT_BOX,
   blockBoxRect,
   drawEmphasisHighlights,
+  drawEmphasisSweep,
   drawEmphasisUnderlines,
   fillDecoration,
   lineBoxRect,
@@ -170,10 +171,12 @@ export function drawBlock(ctx, layout, states, style, opts = {}) {
 
   drawBlockText(ctx, layout, states, style, opts);
 
-  if (style.emphasis?.decoration === 'underline') {
+  const decoration = style.emphasis?.decoration;
+  if (decoration === 'underline' || decoration === 'sweep') {
     ctx.save();
     if (style.shadow?.onDecoration === false) ctx.shadowColor = 'transparent';
-    drawEmphasisUnderlines(ctx, layout, states, style, opts.pxScale ?? 1);
+    if (decoration === 'sweep') drawEmphasisSweep(ctx, layout, states, style, opts.pxScale ?? 1);
+    else drawEmphasisUnderlines(ctx, layout, states, style, opts.pxScale ?? 1);
     ctx.restore();
   }
 }
