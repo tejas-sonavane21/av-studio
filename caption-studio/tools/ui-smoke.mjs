@@ -621,6 +621,102 @@ async function main() {
   });
   await check(cdp, 'the parity reset button restores the verified look', 'document.querySelector("#template-status").textContent', (v) => String(v).includes('Veed'));
 
+  console.log('\n■ control scope (apply a setting to every caption)');
+  // `#block-inspector` used to be left unclosed in the markup, silently nesting the transcribe, export
+  // and sources panels inside it. Nothing asserted the layout, so nothing caught it. This does.
+  await check(
+    cdp,
+    'every panel is a direct child of main, none nested',
+    'document.querySelectorAll("main > section.panel").length + "/" + document.querySelectorAll("section.panel section.panel").length',
+    (v) => v === '8/0',
+    '8 panels, 0 nested',
+  );
+  await check(
+    cdp,
+    'the preview style bar is grouped into labelled sections',
+    '[...document.querySelectorAll(".style-sections .style-section-head")].map(h=>h.textContent).join("|")',
+    (v) => v === 'Frame|Type|Emphasis|Animation',
+  );
+  await check(
+    cdp,
+    'the look settings that had no global home now have one',
+    '["#font-case","#fill-color","#display-mode","#anim-in","#anim-out"].every(s=>document.querySelector(s))',
+    (v) => v === true,
+  );
+  await check(
+    cdp,
+    'and the animation pickers carry the real preset vocabulary',
+    'document.querySelector("#anim-in").options.length',
+    (v) => v >= 2,
+  );
+  await check(
+    cdp,
+    'the inspector reads as labelled sections',
+    '[...document.querySelectorAll("#block-inspector .inspector-section")].map(e=>e.textContent).join("|")',
+    (v) => v === 'Content|Placement|Look|Animation',
+  );
+  await check(cdp, 'the scope toggle starts off — edits are per-block by default', 'document.querySelector("#style-all-toggle").checked', (v) => v === false);
+
+  // The heart of it: with the scope ON, one setting reaches every caption — and *only* that setting.
+  // Two overrides are placed on one block first, so the apply has something to leave alone.
+  const setCase = (value) =>
+    `(()=>{const f=[...document.querySelectorAll("#block-inspector .field-inline")].find(f=>f.textContent.trim().startsWith("Case"));const s=f.querySelector("select");s.value="${value}";s.dispatchEvent(new Event("change"));})()`;
+  await evaluate(cdp, 'document.querySelectorAll("#blocks .row")[0].click()');
+  await delay(200);
+  await evaluate(cdp, 'document.querySelector("#reset-block").click()');
+  await delay(200);
+  await evaluate(cdp, setCase('lower'));
+  await evaluate(
+    cdp,
+    '(()=>{const f=[...document.querySelectorAll("#block-inspector .field-inline")].find(f=>f.textContent.trim().startsWith("Fill"));const i=f.querySelector("input");i.value="#ff00aa";i.dispatchEvent(new Event("change"));})()',
+  );
+  await delay(200);
+  await check(
+    cdp,
+    'two per-block edits leave two overrides on that caption alone',
+    '[...document.querySelectorAll("#blocks .row.active .tag")].map(t=>t.textContent).find(t=>/override/.test(t))',
+    (v) => String(v).startsWith('2 '),
+    '2 override(s)',
+  );
+  await evaluate(
+    cdp,
+    '(()=>{const c=document.querySelector("#style-all-toggle");c.checked=true;c.dispatchEvent(new Event("change"));})()',
+  );
+  await evaluate(cdp, setCase('upper'));
+  await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => String(v).includes('edited'), {
+    describe: 'the scoped edit to reach the document',
+  });
+  await check(
+    cdp,
+    'a scoped edit changes the document, not the block',
+    'document.querySelector("#template-status").textContent',
+    (v) => String(v).includes('edited'),
+  );
+  await check(
+    cdp,
+    'and it clears only the key it touched — the block keeps its other override',
+    '[...document.querySelectorAll("#blocks .row.active .tag")].map(t=>t.textContent).find(t=>/override/.test(t))',
+    (v) => String(v).startsWith('1 '),
+    '1 override(s) — the fill survives',
+  );
+  await check(
+    cdp,
+    'no other caption was given a fresh override of its own',
+    '[...document.querySelectorAll("#blocks .row")].filter(r=>[...r.querySelectorAll(".tag")].some(t=>/override/.test(t.textContent))).length',
+    (v) => v === 1,
+    'exactly one row',
+  );
+  // Back to a clean, unedited document so the sections below start where they expect to.
+  await evaluate(
+    cdp,
+    '(()=>{const c=document.querySelector("#style-all-toggle");c.checked=false;c.dispatchEvent(new Event("change"));})()',
+  );
+  await evaluate(cdp, 'document.querySelector("#reset-block").click()');
+  await evaluate(cdp, 'document.querySelector("#reset-style").click()');
+  await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => !String(v).includes('edited'), {
+    describe: 'the scope test to leave a clean document',
+  });
+
   console.log('\n■ document style edits');
   await check(
     cdp,
