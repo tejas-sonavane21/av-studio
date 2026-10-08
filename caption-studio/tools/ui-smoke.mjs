@@ -716,6 +716,73 @@ async function main() {
     describe: 'turning the flow back on to restore the unedited template',
   });
 
+  console.log('\n■ underline colour (and the sweep\u2019s own flow)');
+  // Sampling by *hue* is what makes this honest: it proves the renderer painted the chosen colour,
+  // not merely that the input kept the string it was handed. The test is a ratio rather than an
+  // exact rgb match so that a half-transparent antialiased edge counts too — at the thinned ends of
+  // a sweep stroke those edges are most of what there is.
+  await evaluate(
+    cdp,
+    `(()=>{
+      window.__magenta=()=>{
+        const c=document.querySelector('#preview-canvas');
+        const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data;
+        let n=0;
+        for(let i=0;i<d.length;i+=4){
+          const r=d[i],g=d[i+1],b=d[i+2],a=d[i+3];
+          if(a>80&&r>90&&b>90&&g<0.6*Math.min(r,b))n++;
+        }
+        return n;
+      };
+    })()`,
+  );
+  const setColor = (v) =>
+    `(()=>{const i=document.querySelector('#emphasis-color');i.value='${v}';i.dispatchEvent(new Event('input'));i.dispatchEvent(new Event('change'));})()`;
+  await evaluate(cdp, setColor('#ff00ff'));
+  await waitFor(cdp, 'document.querySelector("#emphasis-color-out").textContent', (v) => v === '#ff00ff', {
+    describe: 'the picked colour to reach the readout',
+  });
+  await evaluate(cdp, seekTo(15.7));
+  const magentaFull = await evaluate(cdp, 'window.__magenta()');
+  const stillLime = await evaluate(cdp, 'window.__green()');
+  assert('the underline is painted in the colour that was picked', magentaFull > 0, `${magentaFull} magenta px`);
+  assert('and no longer in the default lime', stillLime === 0, `${stillLime} lime px`);
+  await check(
+    cdp,
+    'the block inspector offers the same picker for one caption',
+    'document.querySelectorAll("#block-inspector input[type=color]").length',
+    (v) => v >= 1,
+  );
+  // The sweep is painted in the same colour, so its own flow can be measured on a hue nothing else
+  // in the frame uses — white text and a white stroke would be indistinguishable by pixels.
+  await evaluate(
+    cdp,
+    '(()=>{const s=document.querySelector("#emphasis-decoration");s.value="sweep";s.dispatchEvent(new Event("change"));})()',
+  );
+  await delay(150);
+  await evaluate(cdp, seekTo(15.7));
+  const sweepFull = await evaluate(cdp, 'window.__magenta()');
+  await evaluate(cdp, seekTo(15.35));
+  const sweepEarly = await evaluate(cdp, 'window.__magenta()');
+  assert('the curved sweep is drawn in the chosen colour too', sweepFull > 0, `${sweepFull} magenta px`);
+  assert(
+    'and it flows — part way through, the S is shorter than its full length',
+    sweepEarly > 0 && sweepEarly < sweepFull,
+    `${sweepEarly} vs ${sweepFull} magenta px`,
+  );
+  // leave the document on the parity look, which is what the sections after this one expect
+  await evaluate(cdp, setColor('#22c55e'));
+  await evaluate(cdp, 'document.querySelector("#reset-style").click()');
+  await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => !String(v).includes('edited'), {
+    describe: 'the parity style to be restored after the colour checks',
+  });
+  await check(
+    cdp,
+    'resetting puts the picker back on the verified lime',
+    'document.querySelector("#emphasis-color").value',
+    (v) => v === '#22c55e',
+  );
+
   console.log('\n■ audio import');
   // A synthetic, self-contained WAV: the smoke test must not depend on the (gitignored) reference
   // workspace, and a real file is the only way to exercise the object-URL → <audio> path end to end.
