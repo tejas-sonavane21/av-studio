@@ -175,8 +175,10 @@ test('the emphasis word is drawn italic and underlined', () => {
 
 test('THE RULE: the underline outlives the word and disappears with the block', () => {
   const { doc, renderer, ctx } = setup();
-  // "Just" is spoken 15.20–15.36; its underline must still be there at 16.71
-  for (const t of [15.2, 15.36, 16.0, 16.71]) {
+  // "Just" is spoken 15.20–15.36; its underline must still be there at 16.71. The samples start a
+  // hair after 15.20 because the bar is *drawn* in: at its word's own start instant it has zero
+  // length, which the flow test below pins down.
+  for (const t of [15.3, 15.36, 16.0, 16.71]) {
     ctx.reset();
     renderer.draw(doc, t);
     assert.equal(
@@ -189,6 +191,28 @@ test('THE RULE: the underline outlives the word and disappears with the block', 
   ctx.reset();
   renderer.draw(doc, 12.0);
   assert.equal(ctx.filledRects.filter((r) => r.fillStyle === '#22c55e').length, 0);
+});
+
+test('the underline flows to the word\'s own length instead of appearing whole', () => {
+  const { doc, renderer, ctx } = setup();
+  const underlineWidthAt = (t) => {
+    ctx.reset();
+    renderer.draw(doc, t);
+    const bar = ctx.filledRects.find((r) => r.fillStyle === '#22c55e');
+    return bar ? bar.w : null;
+  };
+  // "Just" is revealed at 15.20 and its draw takes 0.4 s, so it is complete at 15.60
+  assert.equal(underlineWidthAt(15.2), null, 'nothing is painted at zero progress');
+  const full = underlineWidthAt(15.6);
+  assert.ok(full > 0, 'a full-length bar exists once the draw has finished');
+  const quarter = underlineWidthAt(15.3);
+  assert.ok(quarter > 0 && quarter < full, `a partially drawn bar, got ${quarter} of ${full}`);
+  // the length it grows to is the length the word asks for — not a scaled-down or padded version
+  assert.equal(underlineWidthAt(16.71), full);
+  const just = ctx.drawnText.find((t) => t.text === 'Just');
+  ctx.reset();
+  renderer.draw(doc, 16.71);
+  close(ctx.filledRects.find((r) => r.fillStyle === '#22c55e').x, just.x, 1e-9);
 });
 
 test('the block shadow is applied to the text and suppressed on the underline', () => {

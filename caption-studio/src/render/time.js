@@ -28,6 +28,7 @@
  *    move the highlight from word to word; a static underline stays put.)
  */
 
+import { DRAW_EASE, ease } from './animation.js';
 import { clamp } from '../util/math.js';
 
 /** Extra on-screen padding around a block, in seconds. 0 = the v10 behaviour. */
@@ -119,6 +120,68 @@ export function wordState(word, t, { reveal = 'progressive', emphasisSource = 'k
 export function isEmphasised(word, t, { revealed, active, emphasisSource = 'keyword' }) {
   if (emphasisSource === 'active') return active;
   return revealed && !!word.emphasis;
+}
+
+/**
+ * How long the emphasis decoration takes to be *drawn*, in seconds.
+ *
+ * Short enough that a keyword is decorated almost as soon as it is spoken (the word itself is
+ * animated over `animation.inDur`, 0.12 s by default) and long enough that the growth is legible at
+ * 25–30 fps — about ten frames. Per document, via `style.emphasis.drawDuration`.
+ */
+export const DEFAULT_DRAW_DURATION = 0.4;
+
+/**
+ * When the emphasis decoration for a word first becomes visible.
+ *
+ * `keyword` decorations are painted whenever the word is revealed (see the module comment), so the
+ * moment depends on the reveal mode: a progressive reveal starts each word's decoration at that
+ * word's own start, while an `all` reveal puts the whole line (and its decorations) on screen at the
+ * block's start. `active` (karaoke) decoration exists only while the word is spoken, so it always
+ * begins with the word.
+ */
+export function emphasisStart(word, block, { reveal = 'progressive', emphasisSource = 'keyword' } = {}) {
+  if (emphasisSource === 'active') return word?.start ?? 0;
+  if (reveal === 'all') return block?.start ?? word?.start ?? 0;
+  return word?.start ?? 0;
+}
+
+/**
+ * How much of a word's emphasis decoration has been drawn at `t`, in `0..1`.
+ *
+ * This is the "flow" of the underline: at the instant the decoration appears it is zero, and it
+ * grows to its full length — the length the word itself asked for — over `duration` seconds. The
+ * value is *eased* (`DRAW_EASE`), not linear, because a constant-rate bar reads as a wipe rather
+ * than as a line being drawn.
+ *
+ * Two boundaries the naive version gets wrong, and this one does not:
+ *
+ * 1. **A scrub must land on a finished decoration.** The whole thing is a function of absolute
+ *    time, so seeking past `start + duration` always yields 1. There is no "has it played yet"
+ *    state anywhere.
+ * 2. **A decoration may not outlive its own visibility.** `keyword` decorations stay up until the
+ *    block ends, so they have room for the full duration; an `active` (karaoke) decoration exists
+ *    only inside `[word.start, word.end]`, so the duration is clamped to that window and the line
+ *    completes exactly as the word stops being spoken rather than freezing part-drawn.
+ *
+ * `animate: false` returns 1 everywhere — the pre-Phase-4 behaviour, and the escape hatch for
+ * anyone who wants the static parity look.
+ */
+export function emphasisDrawProgress(
+  word,
+  block,
+  t,
+  { reveal = 'progressive', emphasisSource = 'keyword', animate = true, duration = DEFAULT_DRAW_DURATION } = {},
+) {
+  if (!animate) return 1;
+  const start = emphasisStart(word, block, { reveal, emphasisSource });
+  const end = emphasisSource === 'active' ? (word?.end ?? start) : (block?.end ?? word?.end ?? start);
+  const window = Math.max(0, end - start);
+  // A block shorter than the configured duration draws over its whole life instead of freezing
+  // half-finished; a zero-length window is "already drawn" rather than a divide-by-zero.
+  const dur = Math.min(Math.max(0, duration), window);
+  if (!(dur > 0)) return t >= start ? 1 : 0;
+  return ease(DRAW_EASE, clamp((t - start) / dur, 0, 1));
 }
 
 /** `wordState` for every word in a block, indexed to match `block.words`. */

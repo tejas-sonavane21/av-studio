@@ -12,11 +12,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  DEFAULT_DRAW_DURATION,
   EMPHASIS_SOURCES,
   REVEAL_MODES,
   activeBlock,
   activeBlocks,
   blockWindow,
+  emphasisDrawProgress,
+  emphasisStart,
   isBlockActive,
   isEmphasised,
   isRevealed,
@@ -33,6 +36,68 @@ const doc = createDemoDocument();
 const block = doc.blocks[0]; // 15.20–16.72: Just | an | ordinary | boy
 /** Reveal flags for the demo block, so the mode tests read as tables. */
 const t2 = (t, opts) => wordStates(block, t, opts).map((w) => w.revealed);
+
+// ---------------------------------------------------------------------------
+// the draw-in "flow" of the emphasis decoration
+// ---------------------------------------------------------------------------
+
+/** The demo block's first word ("Just", 15.20–15.36), which is an `auto-highlight` keyword. */
+const keyword = block.words[0];
+const START = keyword.start; // 15.20
+test('the decoration is not drawn at the instant its word appears, and is complete one duration later', () => {
+  assert.equal(emphasisDrawProgress(keyword, block, START - 0.01), 0);
+  assert.equal(emphasisDrawProgress(keyword, block, START), 0);
+  assert.equal(emphasisDrawProgress(keyword, block, START + DEFAULT_DRAW_DURATION), 1);
+  // and it stays complete for the rest of the caption's life, so a scrub never lands mid-draw
+  assert.equal(emphasisDrawProgress(keyword, block, block.end), 1);
+  assert.equal(emphasisDrawProgress(keyword, block, block.end + 5), 1);
+});
+
+test('it starts slowly — the curve sits below a linear ramp for the first half', () => {
+  const at = (frac) => emphasisDrawProgress(keyword, block, START + DEFAULT_DRAW_DURATION * frac);
+  assert.ok(at(0.25) > 0 && at(0.25) < 0.25, `a slow start, got ${at(0.25)}`);
+  assert.ok(Math.abs(at(0.5) - 0.5) < 1e-12, 'symmetric about the midpoint');
+  assert.ok(at(0.75) > 0.75 && at(0.75) < 1, `an eased finish, got ${at(0.75)}`);
+});
+
+test('it never goes backwards', () => {
+  let last = -1;
+  for (let i = 0; i <= 40; i++) {
+    const p = emphasisDrawProgress(keyword, block, START + (DEFAULT_DRAW_DURATION * i) / 40);
+    assert.ok(p >= last);
+    last = p;
+  }
+});
+
+test('animate: false is the static parity decoration', () => {
+  assert.equal(emphasisDrawProgress(keyword, block, START, { animate: false }), 1);
+  assert.equal(emphasisDrawProgress(keyword, block, START - 100, { animate: false }), 1);
+});
+
+test('an `all` reveal draws the whole line\'s decorations from the block\'s start', () => {
+  const later = { ...keyword, start: 16.0, end: 16.1 };
+  assert.equal(emphasisStart(later, block, { reveal: 'all' }), block.start);
+  assert.equal(emphasisStart(later, block, { reveal: 'progressive' }), 16.0);
+  assert.equal(emphasisDrawProgress(later, block, block.start, { reveal: 'all' }), 0);
+  assert.equal(emphasisDrawProgress(later, block, block.start + DEFAULT_DRAW_DURATION, { reveal: 'all' }), 1);
+});
+
+test('a karaoke decoration completes exactly as its word stops being spoken', () => {
+  // 0.2 s of speech against a 0.4 s configured draw: the duration is clamped to the word
+  const word = { ...keyword, start: 16.0, end: 16.2 };
+  const opts = { emphasisSource: 'active', duration: DEFAULT_DRAW_DURATION };
+  assert.equal(emphasisDrawProgress(word, block, 16.0, opts), 0);
+  assert.equal(emphasisDrawProgress(word, block, 16.2, opts), 1);
+  // smoothstep at half the window is half — the line is not left part-drawn
+  assert.ok(Math.abs(emphasisDrawProgress(word, block, 16.1, opts) - 0.5) < 1e-9);
+});
+
+test('a zero-length window is "already drawn", never a divide-by-zero', () => {
+  const flat = { ...keyword, start: 16.0, end: 16.0 };
+  const tiny = { start: 16.0, end: 16.0 };
+  assert.equal(emphasisDrawProgress(flat, tiny, 16.0), 1);
+  assert.equal(emphasisDrawProgress(flat, tiny, 15.99), 0);
+});
 
 test('the demo document is itself valid', () => {
   const { errors, warnings } = validateDocument(doc);
