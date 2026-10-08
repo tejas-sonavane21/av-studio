@@ -239,12 +239,24 @@
         <button class="ghost" id="download-vtt" disabled>WebVTT (.vtt)</button>
       </div>
 
+      <div class="export-controls">
+        <label class="field-inline">
+          <span>Video quality</span>
+          <select id="export-quality">
+            <option value="balanced">balanced — smaller file</option>
+            <option value="high" selected>high — recommended</option>
+            <option value="best">best — largest file</option>
+          </select>
+        </label>
+      </div>
+
       <div class="progress"><div class="progress-bar" id="export-bar"></div></div>
       <div class="hint" id="export-note">
         <b>Download video</b> composites the caption layer over the picture and records it to .webm in
         real time — there is no ffmpeg here, so a three-minute video takes about three minutes. The
-        other buttons write the caption data itself: the project, the Veed master JSON, and plain
-        SRT / VTT that any other editor can read.
+        bitrate comes from <b>Video quality</b> (a real-time encoder has no second pass to fall back
+        on, so this is what decides how the result looks). The other buttons write the caption data
+        itself: the project, the Veed master JSON, and plain SRT / VTT that any other editor can read.
       </div>
     </section>
 

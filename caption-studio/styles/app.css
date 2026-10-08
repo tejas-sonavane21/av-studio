@@ -311,4 +311,5 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 .export-panel .progress-bar.busy { background: var(--accent-dim); }
 .export-panel .progress-bar.failed { background: #b91c1c; }
 .export-panel #export-note { margin-top: 10px; white-space: pre-wrap; }
+.export-panel .export-controls { display: flex; gap: 16px; align-items: flex-end; margin-top: 12px; }
 

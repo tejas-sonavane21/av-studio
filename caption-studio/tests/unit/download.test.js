@@ -1,5 +1,5 @@
 /**
- * download.test.js — the pure half of exporting: file names, caption payloads, codec choice.
+ * download.test.js — the pure half of exporting: file names, caption payloads, codec choice, bitrate.
  *
  * The recorder itself needs a browser (canvas, `MediaRecorder`, a real video), so it is exercised
  * through the UI smoke run; everything that can be decided without one is decided here.
@@ -8,7 +8,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { captionFiles, exportStem, pickVideoMime } from '../../src/io/download.js';
+import {
+  DEFAULT_QUALITY,
+  MAX_VIDEO_BITRATE,
+  MIN_VIDEO_BITRATE,
+  QUALITY_PRESETS,
+  audioBitrate,
+  captionFiles,
+  exportStem,
+  pickVideoMime,
+  videoBitrate,
+} from '../../src/io/download.js';
 import { createBlock, createDocument, createWord } from '../../src/model/schema.js';
 import { rebuildBlockText } from '../../src/model/document.js';
 import { parseSRT } from '../../src/io/srt.js';
@@ -66,6 +76,42 @@ test('captionFiles takes an explicit stem and can drop word timings', () => {
   assert.equal(files[2].name, 'song.srt');
   const vtt = parseVTT(files[3].text);
   assert.equal(vtt.cues[0].lines[0], 'Just words', 'no inline word timings when not asked for');
+});
+
+test('the bitrate scales with the frame, not with a flat number', () => {
+  const hd = videoBitrate({ width: 1920, height: 1080, fps: 30 });
+  const sd = videoBitrate({ width: 1280, height: 720, fps: 30 });
+  // 1920×1080×30×0.13 = 8.08 Mbps — several times the browser's own default for VP9 at this size,
+  // which is the whole reason the number is set explicitly
+  assert.equal(hd, Math.round(1920 * 1080 * 30 * QUALITY_PRESETS.high.bpp));
+  assert.ok(hd > 7e6 && hd < 9e6, `a sensible 1080p figure, got ${hd}`);
+  assert.ok(sd < hd, 'a smaller frame gets a smaller budget');
+  // 2.25× the pixels is 2.25× the bits — that is what "per pixel" means. (Both are well above the
+  // floor, so the clamp does not blur the comparison.)
+  assert.ok(Math.abs(hd / sd - 2.25) < 0.01, `${hd} / ${sd}`);
+});
+
+test('a lower quality preset really does mean fewer bits, and best is the largest', () => {
+  const at = (quality) => videoBitrate({ width: 1920, height: 1080, fps: 30, quality });
+  assert.ok(at('balanced') < at('high'));
+  assert.ok(at('high') < at('best'));
+  assert.equal(audioBitrate('balanced'), QUALITY_PRESETS.balanced.audio);
+  assert.ok(audioBitrate('balanced') < audioBitrate('best'), 'and the sound follows it');
+});
+
+test('the bitrate is clamped, so no setting can produce a 1 kbps or a 1 Gbps export', () => {
+  assert.equal(videoBitrate({ width: 16, height: 9, fps: 24 }), MIN_VIDEO_BITRATE);
+  assert.equal(videoBitrate({ width: 7680, height: 4320, fps: 60, quality: 'best' }), MAX_VIDEO_BITRATE);
+});
+
+test('an unknown or missing quality falls back to the default, not to zero', () => {
+  const expected = videoBitrate({ width: 1280, height: 720, fps: 30, quality: DEFAULT_QUALITY });
+  assert.equal(videoBitrate({ width: 1280, height: 720, fps: 30, quality: 'nonsense' }), expected);
+  assert.equal(videoBitrate({ width: 1280, height: 720, fps: 30 }), expected);
+  assert.equal(videoBitrate({}), MIN_VIDEO_BITRATE, 'a frame with no size is not a NaN');
+  assert.equal(videoBitrate(), MIN_VIDEO_BITRATE);
+  assert.equal(audioBitrate('nonsense'), QUALITY_PRESETS[DEFAULT_QUALITY].audio);
+  assert.equal(videoBitrate({ width: 1280, height: 720, fps: 0 }), videoBitrate({ width: 1280, height: 720, fps: 30 }));
 });
 
 test('pickVideoMime prefers the best supported codec and defers when none is', () => {
