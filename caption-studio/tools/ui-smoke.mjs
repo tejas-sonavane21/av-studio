@@ -1426,6 +1426,18 @@ async function main() {
     'document.querySelector("#download-video").disabled',
     (v) => v === true,
   );
+  await check(
+    cdp,
+    'the export offers a quality setting, high by default',
+    'document.querySelector("#export-quality").value',
+    (v) => v === 'high',
+  );
+  await check(
+    cdp,
+    'and it is the same set of presets the recorder reads',
+    '[...document.querySelectorAll("#export-quality option")].map((o)=>o.value).join("|")',
+    (v) => v === 'balanced|high|best',
+  );
   for (const [id, ext] of [
     ['#download-project', '.caproj'],
     ['#download-veed', '.veed.json'],
@@ -1446,12 +1458,18 @@ async function main() {
   // Record a one-second video in the page and hand it to #video-in, so the smoke test needs no
   // (gitignored) fixture. This leans on the same MediaRecorder the burn-in does, so a browser that
   // cannot record skips the check rather than failing it.
+  // The clip is 640×360 of *noise* on purpose. A tidy moving square gives a real-time encoder almost
+  // nothing to spend its bitrate on, so two quality settings would produce the same file and the
+  // measurement below would prove nothing.
   const madeVideo = await evaluate(
     cdp,
     `(async () => {
       if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) return 0;
-      const c = document.createElement('canvas'); c.width = 320; c.height = 240;
+      const W = 640, H = 360;
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
       const g = c.getContext('2d');
+      const img = g.createImageData(W, H);
+      const noise = new Uint8Array(W * H);
       let mime = '';
       for (const t of ['video/webm;codecs=vp8', 'video/webm']) { if (MediaRecorder.isTypeSupported(t)) { mime = t; break; } }
       const rec = new MediaRecorder(c.captureStream(15), mime ? { mimeType: mime } : {});
@@ -1462,8 +1480,15 @@ async function main() {
       await new Promise((resolve) => {
         const draw = () => {
           const t = (performance.now() - started) / 1000;
-          g.fillStyle = '#0f2a4a'; g.fillRect(0, 0, 320, 240);
-          g.fillStyle = '#e2e8f0'; g.fillRect(20 + t * 120, 90, 60, 60);
+          // crypto.getRandomValues refuses more than 64 KiB in one call, so fill in chunks
+          for (let o = 0; o < noise.length; o += 65536) {
+            crypto.getRandomValues(noise.subarray(o, Math.min(o + 65536, noise.length)));
+          }
+          const d = img.data;
+          for (let i = 0, o = 0; i < noise.length; i++, o += 4) {
+            d[o] = noise[i]; d[o + 1] = noise[(i + 37) % noise.length]; d[o + 2] = noise[(i + 101) % noise.length]; d[o + 3] = 255;
+          }
+          g.putImageData(img, 0, 0);
           if (t < 1.2) requestAnimationFrame(draw); else resolve();
         };
         draw();
@@ -1541,10 +1566,50 @@ async function main() {
       (v) => v === true,
     );
 
-    await evaluate(cdp, 'document.querySelector("#download-video").click()');
-    await waitFor(cdp, 'document.querySelector("#export-status").textContent', (v) => v === 'done' || v === 'failed', {
-      describe: 'the burn-in export to finish',
-    });
+    // One export at each end of the quality range, into a portrait frame at first so the letterbox
+    // path is exercised too (a 16:9 picture inside a 9:16 frame must be centred, never stretched).
+    //
+    // The source is re-selected before each take, which is what a person does and also what makes the
+    // comparison repeatable: the fixture is a webm *written by MediaRecorder*, so it carries no seek
+    // index and its reported duration drifts as it buffers — fine to export from once, not a fair
+    // yardstick to re-wind for a second run of the same measurement.
+    const reSelectVideo = async () => {
+      await evaluate(
+        cdp,
+        `(()=>{const dt=new DataTransfer();dt.items.add(window.__smokeVideo);const i=document.querySelector('#video-in');i.files=dt.files;i.dispatchEvent(new Event('change'));})()`,
+      );
+      await waitFor(
+        cdp,
+        '(()=>{const v=document.querySelector("#preview-video");return v.readyState>=1&&v.videoWidth>0})()',
+        (v) => v === true,
+        { describe: 'the fixture picture to be re-selected' },
+      );
+      await delay(150);
+    };
+    const exportWith = async (quality, aspect) => {
+      await reSelectVideo();
+      await evaluate(cdp, setAspect(aspect));
+      await evaluate(cdp, `(()=>{document.querySelector('#export-quality').value='${quality}';})()`);
+      const before = await evaluate(cdp, 'window.__blobSizes.length');
+      await evaluate(cdp, 'document.querySelector("#download-video").click()');
+      try {
+        await waitFor(
+          cdp,
+          `window.__blobSizes.length > ${before} && document.querySelector("#export-status").textContent !== "recording\u2026"`,
+          (v) => v === true,
+          { describe: `the ${quality} export to finish` },
+        );
+      } catch (err) {
+        // Say what the page said, rather than only that the wait ran out
+        const where = await evaluate(
+          cdp,
+          '(()=>{const v=document.querySelector("#preview-video");return JSON.stringify({video:{t:v.currentTime,d:String(v.duration),ended:v.ended,paused:v.paused,seeking:v.seeking,ready:v.readyState},status:document.querySelector("#export-status").textContent,note:document.querySelector("#export-note").textContent})})()',
+        );
+        throw new Error(`${quality} export did not finish: ${where} (${err.message})`);
+      }
+      return evaluate(cdp, 'window.__blobSizes[window.__blobSizes.length - 1]');
+    };
+    const portraitBytes = await exportWith('best', '9:16');
     await check(
       cdp,
       'the burn-in saved a .webm',
@@ -1557,12 +1622,43 @@ async function main() {
       'document.querySelector("#export-status").textContent',
       (v) => v === 'done',
     );
+    assert('the portrait export is a real file, not an empty blob', portraitBytes > 2000, `${portraitBytes} bytes`);
     await check(
       cdp,
-      'and the recording is a real file, not an empty blob',
-      'Math.max(0, ...window.__blobSizes)',
-      (v) => Number(v) > 2000,
-      'a multi-kilobyte webm',
+      'the export names the quality it recorded at rather than leaving it to the browser',
+      'document.querySelector("#log").textContent.includes("at best quality")',
+      (v) => v === true,
+    );
+    await check(
+      cdp,
+      'and reports the frame and the bitrate it actually used',
+      '/\\d+\\.\\d Mbps/.test(document.querySelector("#log").textContent)',
+      (v) => v === true,
+    );
+    // The measurement that answers "the download looks worse than the source": record the same clip
+    // at both ends of the range and compare what the encoder actually produced. Noise content makes
+    // the target bitrate the binding constraint, so the two really do differ.
+    const balancedBytes = await exportWith('balanced', '16:9');
+    const bestBytes = await exportWith('best', '16:9');
+    console.log(
+      `  \u2022 on the same 1.2s noise clip: balanced ${balancedBytes} bytes, ` +
+        `best ${bestBytes} bytes (${(bestBytes / Math.max(1, balancedBytes)).toFixed(2)}x), ` +
+        `portrait ${portraitBytes} bytes`,
+    );
+    assert(
+      'a better quality setting genuinely spends more bits on the same clip',
+      bestBytes > balancedBytes * 1.2 && balancedBytes > 0,
+      `balanced ${balancedBytes} bytes vs best ${bestBytes} bytes`,
+    );
+    assert('and the letterboxed portrait export was a real recording too', portraitBytes > 0, `${portraitBytes} bytes`);
+    // The imported WAV has long since played out by now (the transport seeks it), and an element like
+    // that hands out a finished audio track. A recorder given one produces nothing at all, so the
+    // take has to go ahead without it — silent, and honestly reported, rather than an empty file.
+    await check(
+      cdp,
+      'a played-out audio track is left out of a later take instead of poisoning it',
+      'document.querySelector("#log").textContent.includes("had already played out")',
+      (v) => v === true,
     );
   }
 

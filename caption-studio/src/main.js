@@ -451,7 +451,18 @@ async function onDownloadVideo() {
   $('#export-status').textContent = 'recording\u2026';
   setExportProgress(0);
   setStatus('recording\u2026');
-  log('export: burning the captions into the video — this runs in real time, so it takes as long as the video');
+  const quality = $('#export-quality').value || 'high';
+  log(
+    `export: burning the captions into the video at ${quality} quality — this runs in real time, so it takes as long as the video`,
+  );
+  // Honest about the one thing that silently costs quality: a frame smaller than the picture is a
+  // downscale, and the ratio picker is where that gets fixed.
+  if (video.videoWidth > doc.canvas.width || video.videoHeight > doc.canvas.height) {
+    log(
+      `  ⚠ recording at ${doc.canvas.width}×${doc.canvas.height} while the picture is ` +
+        `${video.videoWidth}×${video.videoHeight} — the export is downscaled (set the frame ratio to the picture’s own)`,
+    );
+  }
   preview.pause();
 
   try {
@@ -459,6 +470,8 @@ async function onDownloadVideo() {
       doc,
       video,
       audio: preview.audio,
+      fps: doc.canvas?.fps,
+      quality,
       onProgress: (fraction, message) => {
         setExportProgress(fraction);
         setExportNote(message);
@@ -468,12 +481,14 @@ async function onDownloadVideo() {
     downloadBlob(name, result.blob);
     setExportProgress(1);
     $('#export-status').textContent = 'done';
+    if (result.audioSkipped) log(`  ⚠ ${result.audioSkipped}`);
     const size = (result.blob.size / 1e6).toFixed(1);
+    const mbps = (result.videoBitsPerSecond / 1e6).toFixed(1);
     log(
-      `export: ${name} — ${size} MB, ${result.seconds.toFixed(1)}s, ${result.width}x${result.height}` +
+      `export: ${name} — ${size} MB, ${result.seconds.toFixed(1)}s, ${result.width}x${result.height} @ ${result.fps}fps, ${mbps} Mbps` +
         `${result.audio ? ' with audio' : ' (no audio track)'}`,
     );
-    setExportNote(`saved ${name} — ${size} MB${result.audio ? '' : ' (no audio track)'}`);
+    setExportNote(`saved ${name} — ${size} MB at ${mbps} Mbps${result.audio ? '' : ' (no audio track)'}`);
   } catch (err) {
     $('#export-bar').classList.add('failed');
     $('#export-status').textContent = 'failed';
@@ -537,8 +552,10 @@ async function showDocument(doc, label = 'document') {
   }
   $('#stage').classList.add('has-content');
   $('#play-btn').disabled = false;
-  // A new document brings its own frame, so the ratio lock belongs to the document that set it.
+  // A new document brings its own frame, so the ratio lock belongs to the document that set it — and
+  // if a picture is already loaded, the picture is still what decides the pixel size.
   aspectLocked = false;
+  if (adoptSourceCanvas(doc)) log(`frame: adopted the picture’s ${doc.canvas.width}×${doc.canvas.height}`);
   applyStageAspect();
   syncAspectSelect();
   await syncStyleControls(doc.defaults);
@@ -896,6 +913,26 @@ function wirePreview() {
 function sourceCanvas() {
   const video = $('#preview-video');
   return video && video.videoWidth > 0 ? { width: video.videoWidth, height: video.videoHeight } : null;
+}
+
+/**
+ * Give a document the picture's own *resolution*, when it is free to do so.
+ *
+ * Only the pixel count, never the shape: silently changing the frame's aspect would move every
+ * caption. The case this fixes is the common one where the video is loaded first and the captions
+ * arrive afterwards (transcribe, align, open a project) — the new document would otherwise carry
+ * whatever canvas the subtitle file mentioned and export a 1080p clip at 720p.
+ *
+ * @returns {boolean} whether the frame was changed
+ */
+function adoptSourceCanvas(doc) {
+  const source = sourceCanvas();
+  if (!doc?.canvas || !source) return false;
+  if (doc.canvas.width === source.width && doc.canvas.height === source.height) return false;
+  const sameShape = Math.abs(doc.canvas.width / doc.canvas.height - source.width / source.height) < 0.01;
+  if (!sameShape) return false;
+  doc.canvas = { ...doc.canvas, width: source.width, height: source.height };
+  return true;
 }
 
 /**
