@@ -160,6 +160,56 @@ export function promoteBlockToDocument(doc, blockId, { includePlacement = true }
   return doc.defaults;
 }
 
+/**
+ * Remove one leaf path (e.g. `font.size`) from a sparse override bag, pruning the parents it
+ * empties so a bag never keeps an object that no longer overrides anything.
+ */
+function clearOverridePath(overrides, path) {
+  if (!isPlainObject(overrides)) return;
+  const parts = String(path).split('.');
+  const trail = [];
+  let node = overrides;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const next = node[parts[i]];
+    if (!isPlainObject(next)) return;
+    trail.push([node, parts[i]]);
+    node = next;
+  }
+  delete node[parts[parts.length - 1]];
+  for (let i = trail.length - 1; i >= 0; i--) {
+    const [parent, key] = trail[i];
+    if (isPlainObject(parent[key]) && Object.keys(parent[key]).length === 0) delete parent[key];
+  }
+}
+
+/**
+ * "Make this setting the same on every caption."
+ *
+ * The granular sibling of `promoteBlockToDocument`: instead of folding a whole block's look into
+ * the document, this takes a *sparse* patch (one setting, or a few) and applies it globally — the
+ * patch goes into `doc.defaults`, and the same leaf keys are deleted from *every* block's overrides.
+ *
+ * Clearing the touched keys is the load-bearing half. Writing the default alone would leave a block
+ * that had an explicit value for that key masking the new global one, so "apply to all" would look
+ * broken on exactly the captions that had been edited before. Only the keys in the patch are
+ * touched: a caption that changed its own *size* keeps that size when you push the *case* globally —
+ * which is the difference between this and `promoteBlockToDocument`.
+ *
+ * A `null`/`undefined` leaf in the patch is "inherit", not a value, so it is ignored (matching
+ * `mergeDeep` and `overrideKeys`).
+ *
+ * @returns {object|null} the updated document defaults
+ */
+export function applyStyleToAll(doc, patch) {
+  if (!doc) return null;
+  const keys = overrideKeys(patch);
+  doc.defaults = mergeDeep(doc.defaults, patch);
+  for (const block of doc.blocks ?? []) {
+    for (const key of keys) clearOverridePath(block.overrides, key);
+  }
+  return doc.defaults;
+}
+
 /** Set a block's position (normalized fractions) without touching its other overrides. */
 export function setBlockPlacement(doc, blockId, placement, { preset = null } = {}) {
   const block = findBlock(doc, blockId);

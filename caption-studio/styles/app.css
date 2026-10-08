@@ -313,3 +313,75 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 .export-panel #export-note { margin-top: 10px; white-space: pre-wrap; }
 .export-panel .export-controls { display: flex; gap: 16px; align-items: flex-end; margin-top: 12px; }
 
+
+/* ------------------------------------------------------------------ *
+ * Phase 5 — section layout, control scope, professional dropdowns
+ * ------------------------------------------------------------------ */
+
+/* The preview's style bar is grouped into labelled sections (Frame / Type / Emphasis / Animation).
+   The group heading carries the divider, so the row inside it drops the border `.style-bar` draws
+   when it stands alone. */
+.style-sections { display: flex; flex-direction: column; }
+.style-section { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
+.style-section:first-child { border-top: none; padding-top: 0; margin-top: 12px; }
+.style-section-head {
+  margin: 0 0 8px; font-size: 10px; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text-2);
+}
+.style-section > .style-bar { border-top: none; margin-top: 0; padding-top: 0; align-items: flex-end; }
+
+/* A single, consistent dropdown everywhere a `<select>` is used as a field: the platform arrow is
+   replaced by one drawn chevron, so a select and a text input sit at the same height and weight
+   instead of each browser theme deciding for itself. */
+.field-inline select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b93a1' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  padding-right: 26px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.field-inline select:hover { border-color: var(--text-2); }
+.field-inline select:focus,
+.field-inline input:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.18);
+}
+
+/* The global text-colour field, sized to line up with the selects and the colour picker beside it. */
+.preview-panel .field-inline input[type='text'] {
+  width: 150px;
+  padding: 6px 8px;
+  background: var(--bg-2);
+  color: var(--text-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+/* The inspector's scope switch: a quiet, self-contained chip under the header rather than a bare
+   checkbox, so it reads as a mode you are in rather than another field. */
+.block-panel .scope-row {
+  display: inline-flex; align-items: center; gap: 7px;
+  margin-bottom: 12px; padding: 6px 11px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 11px; color: var(--text-1); cursor: pointer;
+  transition: border-color 0.12s ease;
+}
+.block-panel .scope-row:hover { border-color: var(--text-2); }
+.block-panel .scope-row input { accent-color: var(--accent); margin: 0; }
+
+/* Section headings inside the inspector grid. They span every column, so the fields below keep the
+   grid's responsive column count while the panel reads as Content → Placement → Look → Animation. */
+.block-panel .inspector-section {
+  grid-column: 1 / -1;
+  margin-top: 6px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text-2);
+}
+.block-panel .inspector-section:first-child { margin-top: 0; }

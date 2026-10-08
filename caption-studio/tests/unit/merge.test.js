@@ -14,6 +14,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  applyStyleToAll,
   applyTemplate,
   clearBlockOverrides,
   clearBlockPlacement,
@@ -226,6 +227,33 @@ test('promote can be asked to leave the position behind', () => {
   promoteBlockToDocument(doc, id, { includePlacement: false });
   assert.deepEqual(doc.defaults.anchor, createDefaultStyle().anchor, 'the document anchor is untouched');
   assert.deepEqual(findBlock(doc, id).placement, { posX: 0.25, posY: 0.75, gravity: 'center' });
+});
+
+test('applyStyleToAll pushes one setting to the document and clears it from every block', () => {
+  const doc = makeDoc();
+  // Two blocks each override `font.case`, with different values, and one of them also overrides
+  // something else entirely — the unrelated override has to survive.
+  setBlockOverrides(doc, doc.blocks[0].id, { font: { case: 'upper', size: 0.05 } });
+  setBlockOverrides(doc, doc.blocks[1].id, { font: { case: 'lower' } });
+
+  const defaults = applyStyleToAll(doc, { font: { case: 'title' } });
+  assert.equal(defaults.font.case, 'title', 'the setting reached the document defaults');
+  assert.deepEqual(doc.blocks[0].overrides, { font: { size: 0.05 } }, 'the same key is cleared, the rest kept');
+  assert.deepEqual(doc.blocks[1].overrides, {}, 'an emptied parent is pruned away');
+  // Every caption now renders the same case, whatever it used to say.
+  assert.equal(resolveStyle(doc, doc.blocks[0]).font.case, 'title');
+  assert.equal(resolveStyle(doc, doc.blocks[1]).font.case, 'title');
+});
+
+test('applyStyleToAll ignores "inherit" leaves and is a no-op without a document', () => {
+  const doc = makeDoc();
+  setBlockOverrides(doc, doc.blocks[0].id, { font: { case: 'upper' } });
+  assert.equal(applyStyleToAll(doc, { font: { case: null }, fill: undefined }), doc.defaults);
+  // A null/undefined leaf is "inherit", not a value: nothing is written and, crucially, the block's
+  // existing override is not cleared — so a caption that deliberately differs keeps differing.
+  assert.deepEqual(doc.blocks[0].overrides, { font: { case: 'upper' } });
+  assert.equal(resolveStyle(doc, doc.blocks[0]).font.case, 'upper');
+  assert.equal(applyStyleToAll(null, { font: { case: 'upper' } }), null);
 });
 
 test('setBlockPlacement normalises and keeps a preset id only when it is real', () => {

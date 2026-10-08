@@ -51,6 +51,7 @@ import { animationNames } from './render/animation.js';
 import { PRESET_IDS, anchorFromPreset, clampAnchorToCanvas, describeAnchor, presetFor } from './render/placement.js';
 import { allSwatches, getTemplate, templatesByOrigin } from './templates/index.js';
 import {
+  applyStyleToAll,
   applyTemplate,
   clearBlockOverrides,
   clearBlockPlacement,
@@ -87,6 +88,10 @@ let uiBusy = false;
 let dragAllState = null;
 // Bumped by every template application, so an overlapping application cannot repaint last.
 let templateRequest = 0;
+// The inspector's "apply style edits to every caption" scope. A UI mode, like `dragAllState` — it
+// lives here rather than in the document because it says *where an edit goes*, not what the document
+// contains. Kept across a selection change so it behaves like the transport's "drag all captions".
+let styleScopeAll = false;
 // True once the frame ratio has been chosen explicitly, so a video that arrives afterwards cannot
 // reset the frame back to its own shape. Cleared by "source" and whenever a new document is shown.
 let aspectLocked = false;
@@ -763,9 +768,33 @@ function updateSizeReadout() {
   $('#size-out').textContent = `${style.font.size.toFixed(3)} → ${px.toFixed(1)}px`;
 }
 
+/**
+ * Fill the global animation pickers once.
+ *
+ * The vocabulary lives in `render/animation.js`, so it is built here rather than typed into the
+ * HTML — a new registered preset then appears in the style bar without a second edit. "Out" gets a
+ * single `none` (the presets list already contains one, and duplicating it would be a puzzle).
+ */
+function buildAnimationControls() {
+  const names = animationNames();
+  const fill = (select, values) => {
+    if (!select || select.options.length) return;
+    select.replaceChildren(
+      ...values.map((n) => {
+        const o = el('option', null, n);
+        o.value = n;
+        return o;
+      }),
+    );
+  };
+  fill($('#anim-in'), names);
+  fill($('#anim-out'), ['none', ...names.filter((n) => n !== 'none')]);
+}
+
 async function syncStyleControls(defaults) {
   const style = defaults ?? preview.document?.defaults ?? createDefaultStyle();
   if (!$('#font-family').options.length) buildFontControls(style);
+  buildAnimationControls();
   $('#font-family').value = style.font.family;
   const entry = getFont(style.font.family);
   const weights = entry?.weights ?? [style.font.weight];
@@ -785,11 +814,16 @@ async function syncStyleControls(defaults) {
   $('#wrap-out').textContent = style.wrapWidth.toFixed(2);
   $('#autowrap-toggle').checked = style.autoWrap !== false;
   $('#underline-draw-toggle').checked = style.emphasis?.animate !== false;
+  $('#font-case').value = style.font.case ?? 'none';
+  $('#fill-color').value = style.fill?.color ?? '#ffffff';
+  $('#display-mode').value = DISPLAY_MODES.includes(style.display) ? style.display : 'NORMAL';
   $('#reveal-mode').value = style.reveal ?? 'progressive';
   $('#emphasis-decoration').value = style.emphasis?.decoration ?? 'none';
   $('#emphasis-source').value = style.emphasis?.source ?? 'keyword';
   $('#emphasis-color').value = toHexColor(style.emphasis?.decorationColor, '#22c55e');
   $('#emphasis-color-out').textContent = style.emphasis?.decorationColor ?? '#22c55e';
+  $('#anim-in').value = style.animation?.in ?? 'none';
+  $('#anim-out').value = style.animation?.out ?? 'none';
   updateSizeReadout();
 }
 
@@ -882,6 +916,23 @@ function wirePreview() {
         ? 'emphasis follows the spoken word (karaoke)'
         : 'emphasis marks the AI keywords (Veed)',
     );
+  });
+  $('#font-case').addEventListener('change', async (e) => {
+    await editDefaults({ font: { case: e.target.value } });
+  });
+  // `input` for the same reason as the emphasis picker: the text behind it should follow the value
+  // as it is typed, not only once the field is left.
+  $('#fill-color').addEventListener('input', async (e) => {
+    await editDefaults({ fill: { color: e.target.value } });
+  });
+  $('#display-mode').addEventListener('change', async (e) => {
+    await editDefaults({ display: e.target.value });
+  });
+  $('#anim-in').addEventListener('change', async (e) => {
+    await editDefaults({ animation: { in: e.target.value } });
+  });
+  $('#anim-out').addEventListener('change', async (e) => {
+    await editDefaults({ animation: { out: e.target.value === 'none' ? null : e.target.value } });
   });
   $('#reset-style').addEventListener('click', () => useTemplate('veed-auto-highlight'));
   $('#template-parity').addEventListener('click', () => useTemplate('veed-auto-highlight'));
@@ -1211,11 +1262,27 @@ function afterBlockEdit() {
   renderBlockInspector();
 }
 
-/** Sparse patch onto the selected block's overrides. */
+/**
+ * Apply a style edit from the inspector.
+ *
+ * Where it lands depends on the inspector's scope toggle: off, it is a sparse patch on the selected
+ * block's overrides (the default, unchanged); on, the same patch becomes a *document* setting and
+ * the matching keys are cleared from every block, so the change really does reach every caption
+ * instead of being masked by an existing override. Content and position never come through here, so
+ * flipping the toggle can never rewrite the words or move the captions.
+ */
 function applyBlockPatch(patch) {
   const doc = preview?.document;
   const block = selectedBlock();
   if (!doc || !block) return null;
+  if (styleScopeAll) {
+    applyStyleToAll(doc, patch);
+    redraw();
+    renderTemplates();
+    renderBlocks();
+    renderBlockStatus();
+    return doc.defaults;
+  }
   setBlockOverrides(doc, block.id, patch);
   redraw();
   renderBlockStatus();
@@ -1414,8 +1481,36 @@ function renderBlockInspector() {
   meta.append(el('div', 'hint', `${summary.text} · position ${describeAnchor(anchor)} (${presetFor(anchor) ?? 'custom'})`));
   host.append(meta);
 
+  // The scope switch sits directly under the header because it governs *every* appearance edit
+  // below it: off (the default) edits this caption alone, on edits the whole document. It is
+  // deliberately its own control — separate from the transport's "drag all captions" (that moves
+  // positions) and from "Push this caption's look to all" (that folds a whole look into the
+  // document in one go). Content and position are never routed through it, so it can only ever
+  // change how the captions *look*.
+  const scopeToggle = el('input');
+  scopeToggle.type = 'checkbox';
+  scopeToggle.id = 'style-all-toggle';
+  scopeToggle.checked = styleScopeAll;
+  scopeToggle.addEventListener('change', () => {
+    styleScopeAll = scopeToggle.checked;
+    log(
+      styleScopeAll
+        ? 'style scope: every caption — edits below now change the document'
+        : 'style scope: only the selected caption',
+    );
+  });
+  const scopeRow = el('label', 'scope-row');
+  scopeRow.append(scopeToggle, document.createTextNode(' Apply style edits to every caption'));
+  scopeRow.title =
+    'While checked, appearance edits in this panel change every caption, not just the selected one';
+  host.append(scopeRow);
+
   const grid = el('div', 'inspector-grid');
   const weights = getFont(style.font.family)?.weights ?? [style.font.weight];
+  // Section headings are grid rows: they span the full width and leave the responsive column count
+  // of the fields beneath them untouched, so the panel reads top-to-bottom as Content → Placement →
+  // Look → Animation instead of one undifferentiated slab of controls.
+  const sectionHead = (title) => el('div', 'inspector-section', title);
 
   // The content edit sits first and spans the grid: it is the reason most people open this panel.
   const textInput = buildText(block.text, (v) => onBlockText(v), {
@@ -1426,6 +1521,7 @@ function renderBlockInspector() {
   textField.classList.add('field-wide');
 
   grid.append(
+    sectionHead('Content'),
     textField,
     fieldInline(
       'Block',
@@ -1435,6 +1531,7 @@ function renderBlockInspector() {
         (id) => selectBlock(id),
       ),
     ),
+    sectionHead('Placement'),
     fieldInline(
       'Position',
       buildSelect(
@@ -1443,6 +1540,7 @@ function renderBlockInspector() {
         (id) => (id === 'custom' ? null : applyAnchorPreset(id)),
       ),
     ),
+    sectionHead('Look'),
     fieldInline(
       'Display',
       buildSelect(DISPLAY_MODES, style.display, (v) => {
@@ -1472,7 +1570,6 @@ function renderBlockInspector() {
       'Case',
       buildSelect(['none', 'upper', 'lower', 'title'], style.font.case ?? 'none', (v) => applyBlockPatch({ font: { case: v } })),
     ),
-    fieldInline('Reveal', buildSelect(REVEAL_MODES, style.reveal, (v) => applyBlockPatch({ reveal: v }))),
     fieldInline(
       'Emphasis',
       buildSelect(['underline', 'sweep', 'highlight', 'none'], style.emphasis?.decoration ?? 'none', (v) =>
@@ -1489,13 +1586,15 @@ function renderBlockInspector() {
       `Emphasis colour ${style.emphasis?.decorationColor ?? '—'}`,
       buildColor(style.emphasis?.decorationColor, (v) => applyBlockPatch({ emphasis: { decorationColor: v } })),
     ),
+    sectionHead('Animation'),
+    fieldInline('Reveal', buildSelect(REVEAL_MODES, style.reveal, (v) => applyBlockPatch({ reveal: v }))),
     fieldInline(
       'Animation in',
       buildSelect(animationNames(), style.animation?.in ?? 'none', (v) => applyBlockPatch({ animation: { in: v } })),
     ),
     fieldInline(
       'Animation out',
-      buildSelect(['none', ...animationNames()], style.animation?.out ?? 'none', (v) =>
+      buildSelect(['none', ...animationNames().filter((n) => n !== 'none')], style.animation?.out ?? 'none', (v) =>
         applyBlockPatch({ animation: { out: v === 'none' ? null : v } }),
       ),
     ),
@@ -1533,8 +1632,10 @@ function renderBlockInspector() {
   host.append(structure);
 
   const actions = el('div', 'actions');
-  const applyAll = el('button', 'ghost', 'Apply look to all captions');
+  const applyAll = el('button', 'ghost', "Push this caption's look to all");
   applyAll.id = 'apply-to-all';
+  applyAll.title =
+    'Fold this caption\'s whole look and position into the document and clear its overrides, so every caption matches it';
   applyAll.addEventListener('click', () => {
     promoteBlockToDocument(doc, block.id);
     afterBlockEdit();
