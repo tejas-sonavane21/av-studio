@@ -35,6 +35,29 @@ export function mergeDeep(...sources) {
   return out;
 }
 
+/**
+ * The largest rectangle with `src`'s shape that fits inside `dst`, centred on it.
+ *
+ * `mode: 'contain'` fits the whole thing (letterboxing); `'cover'` fills the box instead and lets
+ * the overflow hang outside it. Both callers here mean contain — the full-screen preview box and the
+ * video layer inside a frame of a different ratio — but `cover` is the other half of the same
+ * question and costs one branch.
+ *
+ * Returns a zero-safe full-size rect when either shape is degenerate, so a caller can never divide
+ * by zero or draw a NaN.
+ */
+export function fitRect(src, dst, { mode = 'contain' } = {}) {
+  const sw = Math.max(0, Number(src?.width) || 0);
+  const sh = Math.max(0, Number(src?.height) || 0);
+  const dw = Math.max(0, Number(dst?.width) || 0);
+  const dh = Math.max(0, Number(dst?.height) || 0);
+  if (!(sw > 0) || !(sh > 0) || !(dw > 0) || !(dh > 0)) return { x: 0, y: 0, width: dw, height: dh };
+  const scale = mode === 'cover' ? Math.max(dw / sw, dh / sh) : Math.min(dw / sw, dh / sh);
+  const width = sw * scale;
+  const height = sh * scale;
+  return { x: (dw - width) / 2, y: (dh - height) / 2, width, height };
+}
+
 /** Stable JSON stringify (sorted keys) — used to hash/compare config objects deterministically. */
 export function stableStringify(value) {
   if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';

@@ -38,7 +38,14 @@ import { joinBlockWithPrevious, setBlockText, setWordText, splitBlock, splitBloc
 import { createPreview } from './editor/preview.js';
 import { createCanvasOverlay } from './editor/canvas-overlay.js';
 import { fontFamilies, getFont } from './fonts/registry.js';
-import { DISPLAY_MODES, resolveAnchor, resolveStyle } from './model/schema.js';
+import {
+  CANVAS_PRESETS,
+  DISPLAY_MODES,
+  canvasForPreset,
+  presetIdFor,
+  resolveAnchor,
+  resolveStyle,
+} from './model/schema.js';
 import { REVEAL_MODES, EMPHASIS_SOURCES } from './render/time.js';
 import { animationNames } from './render/animation.js';
 import { PRESET_IDS, anchorFromPreset, clampAnchorToCanvas, describeAnchor, presetFor } from './render/placement.js';
@@ -80,6 +87,9 @@ let uiBusy = false;
 let dragAllState = null;
 // Bumped by every template application, so an overlapping application cannot repaint last.
 let templateRequest = 0;
+// True once the frame ratio has been chosen explicitly, so a video that arrives afterwards cannot
+// reset the frame back to its own shape. Cleared by "source" and whenever a new document is shown.
+let aspectLocked = false;
 
 // ---------------------------------------------------------------------------
 // logging + status
@@ -138,8 +148,12 @@ async function onVideo(file) {
       log(`video: ${video.videoWidth}×${video.videoHeight}, ${video.duration.toFixed(2)}s`);
       const doc = preview?.document;
       if (doc) {
-        doc.canvas = { ...doc.canvas, width: video.videoWidth, height: video.videoHeight };
+        // A picture normally sets the frame, but not over a ratio somebody has already chosen: the
+        // whole point of picking 9:16 is that the clip that arrives later does not undo it.
+        if (!aspectLocked) doc.canvas = { ...doc.canvas, width: video.videoWidth, height: video.videoHeight };
+        applyStageAspect();
         preview.resize();
+        syncAspectSelect();
         refreshSeekRange();
       }
     },
@@ -523,6 +537,10 @@ async function showDocument(doc, label = 'document') {
   }
   $('#stage').classList.add('has-content');
   $('#play-btn').disabled = false;
+  // A new document brings its own frame, so the ratio lock belongs to the document that set it.
+  aspectLocked = false;
+  applyStageAspect();
+  syncAspectSelect();
   await syncStyleControls(doc.defaults);
   refreshSeekRange();
   // A new document invalidates any selection from the previous one.
@@ -850,6 +868,140 @@ function wirePreview() {
   });
   $('#reset-style').addEventListener('click', () => useTemplate('veed-auto-highlight'));
   $('#template-parity').addEventListener('click', () => useTemplate('veed-auto-highlight'));
+
+  buildAspectControls();
+  $('#fullscreen-btn').addEventListener('click', () => toggleFullscreen());
+  // The full-screen box is the project's aspect, which lives on the stage as a custom property; the
+  // button itself is outside the stage, so it is covered while the preview is on the screen and
+  // there is nothing to re-label. Escape (or the browser's own gesture) is the way out.
+  document.addEventListener('fullscreenchange', () => {
+    const on = Boolean(document.fullscreenElement);
+    applyStageAspect();
+    preview.resize();
+    overlay?.refresh({ force: true });
+    log(on ? 'full screen preview on — Esc to leave' : 'full screen preview off');
+  });
+
+}
+
+// ---------------------------------------------------------------------------
+// the frame ratio — and the full-screen preview that shows it at full size
+// ---------------------------------------------------------------------------
+
+/**
+ * The picture's own size, when one is loaded — the cap every preset is scaled to.
+ * `videoWidth`/`videoHeight` are the *decoded* size, so they are the authority over anything a
+ * container header claims.
+ */
+function sourceCanvas() {
+  const video = $('#preview-video');
+  return video && video.videoWidth > 0 ? { width: video.videoWidth, height: video.videoHeight } : null;
+}
+
+/**
+ * Give the stage the document's aspect ratio.
+ *
+ * The stage's box *is* the frame as far as the eye is concerned — the caption canvas is fitted inside
+ * it and the video is `object-fit: contain` within it — so they only agree when the stage is the
+ * project's shape. The same number is published as `--fs-ar`, because the `:fullscreen` rule cannot
+ * read the canvas size out of JavaScript.
+ */
+function applyStageAspect() {
+  const canvas = preview?.document?.canvas ?? { width: 16, height: 9 };
+  const aspect = canvas.height > 0 ? canvas.width / canvas.height : 16 / 9;
+  // The stage's box in the editor. On the full screen the stage is the black *surround* instead —
+  // the browser pins a full-screen element to 100% of the display, overriding any size — and the
+  // frame inside it is the caption canvas, which `renderer.fit` already keeps at the project's own
+  // aspect (with the video pinned to the same box by `syncVideoBox`).
+  $('#stage').style.setProperty('--fs-ar', String(aspect));
+}
+
+/** Point the picker at whatever ratio the document is actually on. */
+function syncAspectSelect() {
+  const select = $('#aspect-select');
+  if (select) select.value = presetIdFor(preview?.document?.canvas);
+}
+
+/** The frame-ratio picker: `source` plus one entry per preset, from the registry itself. */
+function buildAspectControls() {
+  const select = $('#aspect-select');
+  const entries = [
+    { value: 'source', label: 'source — the picture’s own ratio' },
+    ...Object.entries(CANVAS_PRESETS).map(([value, preset]) => ({ value, label: preset.label })),
+  ];
+  select.replaceChildren(
+    ...entries.map(({ value, label }) => {
+      const option = el('option', null, label);
+      option.value = value;
+      return option;
+    }),
+  );
+  select.addEventListener('change', () => applyAspect(select.value));
+}
+
+/**
+ * Switch the frame ratio.
+ *
+ * `source` is the odd one out: it means "stop overriding and follow the picture", so it clears the
+ * lock and adopts the video's own size. Every other choice *locks* the ratio, which is what stops a
+ * video arriving later from silently resetting the frame back to its own shape.
+ */
+async function applyAspect(id) {
+  const doc = preview?.document;
+  if (!doc) {
+    log('frame ratio: open a document first');
+    return null;
+  }
+  const fps = doc.canvas?.fps ?? 30;
+  if (id === 'source') {
+    aspectLocked = false;
+    const source = sourceCanvas();
+    if (source) doc.canvas = { ...doc.canvas, width: source.width, height: source.height, fps };
+    else log('frame ratio: no picture is loaded, so the frame keeps its current shape');
+  } else {
+    const next = canvasForPreset(id, { source: sourceCanvas(), fps });
+    if (!next) return null;
+    aspectLocked = true;
+    doc.canvas = { ...doc.canvas, ...next };
+  }
+  // Resizing re-fits the caption canvas; the layout engine is invalidated by `resize()` and again by
+  // `redraw()`, which is cheap and removes any chance of a measurement surviving a frame change.
+  applyStageAspect();
+  preview.resize();
+  redraw();
+  updateSizeReadout();
+  syncAspectSelect();
+  const { width, height } = preview.document.canvas;
+  log(`frame ratio: ${id === 'source' ? 'the picture’s own' : id} → ${width}×${height}`);
+  return preview.document.canvas;
+}
+
+/**
+ * Show the frame on the whole screen.
+ *
+ * The **stage** goes full-screen, not the page. Everything inside it — the video, the caption canvas,
+ * the drag overlay — already knows how to re-fit itself to its container, so full-screen is a CSS
+ * change plus one resize rather than a second preview to keep in sync with the first. A 9:16 frame on
+ * a 16:9 monitor comes out letterboxed against the stage's black, exactly as the editor shows it.
+ */
+async function toggleFullscreen() {
+  const stage = $('#stage');
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+      return false;
+    }
+    if (!preview?.document) {
+      log('full screen: open a document first — there is nothing to show yet');
+      return false;
+    }
+    await stage.requestFullscreen?.();
+    return true;
+  } catch (err) {
+    // A browser or a policy can refuse full-screen; that is a limitation to report, not a crash.
+    log(`full screen unavailable here: ${err?.message ?? err}`);
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1556,6 +1708,7 @@ $('#download-vtt').addEventListener('click', () => onDownloadFile('.vtt'));
 refreshExportButtons();
 
 wirePreview();
+applyStageAspect();
 syncStyleControls(createDefaultStyle());
 renderTemplates();
 log('ready — load an AI source and a TRUTH subtitle file, or click "Demo document"');

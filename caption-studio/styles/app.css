@@ -89,11 +89,18 @@ button:hover:not(:disabled) { filter: brightness(1.08); }
 
 .stage {
   position: relative;
-  /* a fixed aspect on the *container* keeps the canvas fit stable: if the stage's height were
-     derived from the canvas, re-fitting on resize would oscillate */
-  aspect-ratio: 16 / 9;
+  /* A fixed aspect on the *container* keeps the canvas fit stable: if the stage's height were
+     derived from the canvas, re-fitting on resize would oscillate. The ratio is the *project's*,
+     published as `--fs-ar` by `applyStageAspect()`.
+
+     Both sides of the box are constrained by construction — `62vh` tall at most and never wider
+     than the panel — because a plain `width: 100%` with a `max-height` silently breaks the ratio
+     for a portrait project, and a stage that is not the frame's shape puts the video layer and the
+     caption layer out of register. */
+  width: min(100%, calc(62vh * var(--fs-ar, 1.7778)));
+  aspect-ratio: var(--fs-ar, 1.7778);
   max-height: 62vh;
-  width: 100%;
+  margin-inline: auto;
   background: #000;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -101,6 +108,8 @@ button:hover:not(:disabled) { filter: brightness(1.08); }
   display: grid;
   place-items: center;
 }
+/* The video's box is set from JS (see `syncVideoBox` in editor/preview.js) so that it always lands
+   exactly on the caption canvas. These are the pre-boot fallbacks. */
 .stage video {
   position: absolute;
   inset: 0;
@@ -108,6 +117,20 @@ button:hover:not(:disabled) { filter: brightness(1.08); }
   height: 100%;
   object-fit: contain;
   visibility: hidden;
+}
+
+/*
+ * Full screen. The browser forces a full-screen element to fill the display (`width`/`height` are
+ * 100% in the UA sheet and win even over an inline size), so the stage *cannot* be letterboxed to the
+ * project's shape directly. It does not need to be: it becomes the black surround, and the frame
+ * inside it — the caption canvas, with the video pinned to the same box by `syncVideoBox` — is
+ * fitted to the project's own aspect, exactly as in the editor. Only the editor-only chrome goes.
+ */
+.stage:fullscreen {
+  max-height: none;
+  margin: 0;
+  border: none;
+  border-radius: 0;
 }
 
 /* A controls-less <audio> has no box of its own, but it is still a grid item in the stage; pin it

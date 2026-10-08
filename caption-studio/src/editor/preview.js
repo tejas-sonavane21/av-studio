@@ -101,10 +101,35 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     return { width, height };
   };
 
+  /**
+   * Put the video layer exactly where the caption canvas is.
+   *
+   * The two have to agree pixel-for-pixel or the captions drift off the picture they were timed
+   * against. Letting the video position itself with `inset: 0` works only while its container is the
+   * frame's own shape — which is true in the editor but *not* on the full screen, where the browser
+   * forces the full-screen element to fill the display and the frame can only be letterboxed inside
+   * it. Copying the canvas's box is one rule that holds in both places, and it costs a couple of
+   * layout reads per resize rather than per frame.
+   */
+  function syncVideoBox() {
+    if (!video?.style || !canvas) return;
+    const host = container ?? canvas.parentElement;
+    const frame = canvas.getBoundingClientRect?.();
+    const parent = host?.getBoundingClientRect?.();
+    if (!frame || !parent || !frame.width || !frame.height) return;
+    video.style.inset = 'auto';
+    video.style.left = `${frame.left - parent.left}px`;
+    video.style.top = `${frame.top - parent.top}px`;
+    video.style.width = `${frame.width}px`;
+    video.style.height = `${frame.height}px`;
+  }
+
   /** Re-fit the canvas to the document's aspect inside its container. */
   function resize() {
     if (!doc) return null;
     const size = renderer.fit(doc, box());
+    // after the fit, not before: the box to copy is the one the fit just produced
+    syncVideoBox();
     return size;
   }
 
@@ -195,6 +220,7 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     resize();
     // fonts must resolve before the first measurement, or the layout is built with a fallback face
     const fonts = await renderer.ensureFonts(next);
+    syncVideoBox();
     renderFrame(currentTime());
     if (autoplay) start();
     return fonts;
@@ -236,6 +262,7 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     video = element;
     applyVideoVisibility();
     applyAudioRouting();
+    syncVideoBox();
     return video;
   }
 
