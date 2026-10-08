@@ -28,7 +28,21 @@
  */
 
 /** The reference width the absolute px constants in the verified spec were measured at. */
+import { clamp } from '../util/math.js';
+
 export const REFERENCE_WIDTH = 1280;
+
+/**
+ * A per-word draw progress, read from the render state and normalised to `0..1`.
+ *
+ * `undefined` means "animate nothing" — the state object may predate the field (a hand-built state
+ * in a test, or a decoration drawn from a cached layout), and a missing value must mean "fully
+ * drawn" rather than "invisible".
+ */
+function drawProgressOf(state) {
+  const p = state?.drawProgress;
+  return typeof p === 'number' && Number.isFinite(p) ? clamp(p, 0, 1) : 1;
+}
 
 export const UNDERLINE = Object.freeze({
   /** `max(4 × pxScale, effFontSize × 0.12)` — v10, verbatim. */
@@ -99,19 +113,33 @@ export function underlineRect(fragment, effFontSize, pxScale = 1) {
   };
 }
 
+/** How many points the round pen tip is sampled with while a stroke is still being drawn. */
+const TIP_STEPS = 8;
+
 /**
  * The polygon for one curved-underline stroke under a fragment.
  *
- * Pure: a fragment, a font size and a px scale in, a closed path out. The centreline is sampled
- * from `u = 0..1` and offset by a tapering half-thickness on each side, so the ribbon is fat in the
- * middle and comes to a point at both ends — the way a brush stroke begins and lifts.
+ * Pure: a fragment, a font size, a px scale and a draw progress in, a closed path out. The
+ * centreline is sampled from `u = 0..progress` and offset by a tapering half-thickness on each side,
+ * so the ribbon is fat in the middle and comes to a point at the trailing end — the way a brush
+ * stroke begins and lifts.
+ *
+ * `progress` is what makes the stroke flow: at 0.5 the ribbon *is* the first half of the S, not the
+ * whole S clipped to half its width. Clipping is the obvious cheap implementation and it is visibly
+ * wrong on a curve, because a vertical cut leaves the leading edge flat while the tail is a point.
+ * Here the leading edge while drawing is instead capped with a half-disc of the stroke's local
+ * half-width, which is exactly what a round pen tip looks like at that point of the curve.
+ *
+ * At `progress === 1` the tip radius is zero (the `sin` window closes), no cap is emitted, and the
+ * returned polygon is byte-for-byte the one this function produced before the animation existed.
  *
  * @param {{x:number, y:number, width:number}} fragment  laid-out run (in logical px)
  * @param {number} effFontSize                           the block's effective font size
  * @param {number} [pxScale=1]
- * @returns {{ points: Array<{x:number,y:number}>, thickness: number, x0: number, x1: number, baselineY: number }}
+ * @param {number} [progress=1]                          how much of the stroke has been drawn, 0..1
+ * @returns {{ points: Array<{x:number,y:number}>, thickness: number, x0: number, x1: number, baselineY: number, progress: number }}
  */
-export function sweepGeometry(fragment, effFontSize, pxScale = 1) {
+export function sweepGeometry(fragment, effFontSize, pxScale = 1, progress = 1) {
   const f = effFontSize > 0 ? effFontSize : 0;
   const width = Math.max(1, fragment?.width ?? 0);
   const x0 = (fragment?.x ?? 0) - SWEEP.overhangEm * f;
@@ -120,6 +148,7 @@ export function sweepGeometry(fragment, effFontSize, pxScale = 1) {
   const baselineY = (fragment?.y ?? 0) + SWEEP.offsetEm * f;
   const thickness = Math.max(SWEEP.thicknessMin * pxScale, f * SWEEP.thicknessEm);
   const n = SWEEP.segments;
+  const p = clamp(Number.isFinite(progress) ? progress : 1, 0, 1);
 
   /** The centreline point at `u` in 0..1: a gentle S plus an overall tilt. */
   const centre = (u) => {
@@ -130,29 +159,55 @@ export function sweepGeometry(fragment, effFontSize, pxScale = 1) {
   };
   /** Half-thickness at `u`: zero at both ends, widest in the middle (a `sin` window). */
   const halfWidth = (u) => (thickness / 2) * Math.pow(Math.sin(Math.PI * u), 0.6);
+  /** The unit tangent at `u`, so the ribbon can be offset perpendicular to its own direction. */
+  const tangent = (u) => {
+    const a = centre(Math.max(0, u - 1 / n));
+    const b = centre(Math.min(1, u + 1 / n));
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    return { tx: (b.x - a.x) / len, ty: (b.y - a.y) / len };
+  };
 
   const top = [];
   const bottom = [];
   for (let i = 0; i <= n; i++) {
-    const u = i / n;
+    const u = (i / n) * p;
     const c = centre(u);
-    const a = centre(Math.max(0, u - 1 / n));
-    const b = centre(Math.min(1, u + 1 / n));
-    let tx = b.x - a.x;
-    let ty = b.y - a.y;
-    const len = Math.hypot(tx, ty) || 1;
-    tx /= len;
-    ty /= len;
+    const { tx, ty } = tangent(u);
     const hw = halfWidth(u);
     top.push({ x: c.x - ty * hw, y: c.y + tx * hw });
     bottom.push({ x: c.x + ty * hw, y: c.y - tx * hw });
   }
+
+  const points = [...top];
+  // The pen tip: while the stroke is mid-draw its leading edge is the round end of the nib, drawn
+  // from the top edge, around the direction of travel, to the bottom edge. Without it the leading
+  // edge would be a straight cut across the stroke's full local width.
+  const tipRadius = halfWidth(p);
+  if (p < 1 && p > 0 && tipRadius > 1e-3) {
+    const c = centre(p);
+    const { tx, ty } = tangent(p);
+    const angleOf = (pt) => Math.atan2(pt.y - c.y, pt.x - c.x);
+    const twoPi = Math.PI * 2;
+    const norm = (a) => ((a % twoPi) + twoPi) % twoPi;
+    const toBottom = norm(angleOf(bottom[n]) - angleOf(top[n]));
+    const toForward = norm(Math.atan2(ty, tx) - angleOf(top[n]));
+    // Sweep in whichever direction passes through the direction of travel; the other way round
+    // would bulge the cap backwards and read as a blob rather than a nib.
+    const delta = toForward < toBottom ? toBottom : toBottom - twoPi;
+    for (let i = 1; i < TIP_STEPS; i++) {
+      const a = angleOf(top[n]) + delta * (i / TIP_STEPS);
+      points.push({ x: c.x + Math.cos(a) * tipRadius, y: c.y + Math.sin(a) * tipRadius });
+    }
+  }
+  points.push(...bottom.reverse());
+
   return {
-    points: [...top, ...bottom.reverse()],
+    points,
     thickness,
     x0,
     x1,
     baselineY,
+    progress: p,
   };
 }
 
@@ -230,6 +285,10 @@ export function fillDecoration(ctx, rect, color, { radius = 0, opacity = 1 } = {
  * lines gets an underline on each piece, which is what "underline the word" must look like).
  *
  * Called *after* the text so the underline sits above it (plan §9.2).
+ *
+ * Each bar is drawn to `state.drawProgress` of its full width — it is *unrolled* from the word's
+ * left edge rather than appearing whole, which is the plain-underline half of the "flow". A
+ * progress that is missing is 1, so a state object without the field draws the static parity bar.
  */
 export function drawEmphasisUnderlines(ctx, layout, states, style, pxScale = 1) {
   const color = style.emphasis?.decorationColor ?? '#22c55e';
@@ -238,9 +297,12 @@ export function drawEmphasisUnderlines(ctx, layout, states, style, pxScale = 1) 
   ctx.shadowColor = 'transparent';
   for (const line of layout.lines) {
     for (const frag of line.fragments) {
-      if (!states[frag.wordIndex]?.emphasis) continue;
+      const state = states[frag.wordIndex];
+      if (!state?.emphasis) continue;
+      const progress = drawProgressOf(state);
+      if (progress <= 0) continue;
       const rect = underlineRect(frag, layout.effFontSize, pxScale);
-      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.fillRect(rect.x, rect.y, rect.w * progress, rect.h);
     }
   }
   ctx.restore();
@@ -253,6 +315,10 @@ export function drawEmphasisUnderlines(ctx, layout, states, style, pxScale = 1) 
  * Like the plain underline it is painted *after* the text, and it suppresses the shadow the same way
  * (by making the shadow's colour transparent), so the stroke reads as part of the caption rather than
  * as a separate drop shadow under it.
+ *
+ * It also *flows* like the plain underline does: `state.drawProgress` (see `render/time.js`) says how
+ * much of the stroke has been drawn, and the geometry below is regenerated for that fraction, so the
+ * nib travels along the S rather than the finished S being clipped.
  */
 export function drawEmphasisSweep(ctx, layout, states, style, pxScale = 1) {
   const color = style.emphasis?.decorationColor ?? '#ffffff';
@@ -261,9 +327,14 @@ export function drawEmphasisSweep(ctx, layout, states, style, pxScale = 1) {
   ctx.shadowColor = 'transparent';
   for (const line of layout.lines) {
     for (const frag of line.fragments) {
-      if (!states[frag.wordIndex]?.emphasis) continue;
-      const { points } = sweepGeometry(frag, layout.effFontSize, pxScale);
-      if (!points.length) continue;
+      const state = states[frag.wordIndex];
+      if (!state?.emphasis) continue;
+      const progress = drawProgressOf(state);
+      if (progress <= 0) continue;
+      // The stroke is *grown* along its own centreline — see `sweepGeometry` — so the curve stays
+      // clean while it is being drawn instead of being a clipped-off piece of the finished S.
+      const { points } = sweepGeometry(frag, layout.effFontSize, pxScale, progress);
+      if (points.length < 2) continue;
       ctx.beginPath();
       ctx.moveTo(points[0].x, points[0].y);
       for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);

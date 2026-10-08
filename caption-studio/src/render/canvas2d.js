@@ -24,7 +24,7 @@ import { drawBlock, drawGuideRect } from './draw-text.js';
 import { createEmojiLayer } from './emoji.js';
 import { createLayoutEngine } from './layout.js';
 import { SAFE_AREAS } from './placement.js';
-import { activeBlocks, wordState } from './time.js';
+import { DEFAULT_DRAW_DURATION, activeBlocks, emphasisDrawProgress, wordState } from './time.js';
 
 const log = createLogger('render');
 
@@ -129,18 +129,33 @@ export function createCanvas2DRenderer(options = {}) {
     return result;
   }
 
-  /** Build (into a reused array) the per-word render state for a block at time `t`. */
+  /**
+   * Build (into a reused array) the per-word render state for a block at time `t`.
+   *
+   * Beyond visibility and the word's own entrance transform, this is where the emphasis decoration's
+   * **draw progress** is computed — the single number that makes an underline flow instead of appear.
+   * It is derived from `t` and nothing else (see `time.js#emphasisDrawProgress`), so seeking to the
+   * middle of a caption paints the decoration exactly as playing through it would have.
+   */
   function buildStates(block, style, t) {
     const words = block.words;
     const timing = { reveal: style.reveal, emphasisSource: style.emphasis?.source };
+    const draw = {
+      ...timing,
+      // `animate` defaults to on, so only an explicit `false` turns the flow off.
+      animate: style.emphasis?.animate !== false,
+      duration: style.emphasis?.drawDuration ?? DEFAULT_DRAW_DURATION,
+    };
     states.length = words.length;
     for (let i = 0; i < words.length; i++) {
       const word = words[i];
-      const state = states[i] ?? (states[i] = { revealed: false, active: false, emphasis: false });
+      const state =
+        states[i] ?? (states[i] = { revealed: false, active: false, emphasis: false, drawProgress: 1 });
       const st = wordState(word, t, timing);
       state.revealed = st.revealed;
       state.active = st.active;
       state.emphasis = st.emphasis;
+      state.drawProgress = emphasisDrawProgress(word, block, t, draw);
       const s = scratch[i] ?? (scratch[i] = { opacity: 1, scale: 1, dx: 0, dy: 0 });
       animationAt(style.animation, { start: word.start, end: block.end }, t, s);
       state.opacity = s.opacity;

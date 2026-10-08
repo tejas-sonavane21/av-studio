@@ -108,6 +108,11 @@ export function createDefaultStyle() {
       weightBoost: 0,
       // 'keyword' = the AI-keyword words (Veed). 'active' = the word being spoken (karaoke).
       source: 'keyword',
+      // The underline (or sweep) is *drawn* over `drawDuration` seconds as its word appears, rather
+      // than being painted whole. `animate: false` restores the static parity decoration. The length
+      // is unchanged either way: the line still spans exactly the word it belongs to.
+      animate: true,
+      drawDuration: 0.4,
     },
     emoji: { enabled: false, size: 0.08 },
   };

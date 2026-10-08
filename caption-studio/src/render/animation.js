@@ -26,6 +26,10 @@ export const EASINGS = {
   cubicOut: (t) => 1 - Math.pow(1 - t, 3),
   expoOut: (t) => (t >= 1 ? 1 : 1 - Math.pow(2, -10 * t)),
   sinOut: (t) => Math.sin((t * Math.PI) / 2),
+  // Smoothstep: starts gently, speeds through the middle, eases into the end. This is the shape a
+  // *drawn* line wants — the pen presses down slowly, sweeps, and settles — which is why the
+  // emphasis underline grows on this curve rather than on a linear ramp.
+  smoothInOut: (t) => t * t * (3 - 2 * t),
   squareIn: (t) => t * t * t * t,
   backOut: (t) => {
     const c = 1.70158;
@@ -37,6 +41,13 @@ export function ease(name, t) {
   const fn = EASINGS[name] ?? EASINGS.linear;
   return fn(t);
 }
+
+/**
+ * The easing an emphasis decoration is *drawn* on. Named here (rather than inline in the decoration
+ * layer) because it is the one thing that decides whether the underline reads as "alive" or as a
+ * rectangle that happens to be narrower for a few frames.
+ */
+export const DRAW_EASE = 'smoothInOut';
 
 /** The identity transform. Returned (never a fresh object) by presets that do nothing. */
 export const IDENTITY = Object.freeze({ opacity: 1, scale: 1, dx: 0, dy: 0 });

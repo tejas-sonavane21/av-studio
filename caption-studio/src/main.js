@@ -748,6 +748,7 @@ async function syncStyleControls(defaults) {
   $('#wrap-width').value = String(style.wrapWidth);
   $('#wrap-out').textContent = style.wrapWidth.toFixed(2);
   $('#autowrap-toggle').checked = style.autoWrap !== false;
+  $('#underline-draw-toggle').checked = style.emphasis?.animate !== false;
   $('#reveal-mode').value = style.reveal ?? 'progressive';
   $('#emphasis-decoration').value = style.emphasis?.decoration ?? 'none';
   $('#emphasis-source').value = style.emphasis?.source ?? 'keyword';
@@ -788,6 +789,14 @@ function wirePreview() {
       e.target.checked
         ? 'auto-wrap on — captions wrap at the frame edge and cannot overflow'
         : 'auto-wrap off — a long line stays on one line and can leave the frame',
+    );
+  });
+  $('#underline-draw-toggle').addEventListener('change', async (e) => {
+    await editDefaults({ emphasis: { animate: e.target.checked } });
+    log(
+      e.target.checked
+        ? 'underline draw on — the emphasis line flows to its full length as each word appears'
+        : 'underline draw off — the emphasis line appears already drawn (the static parity look)',
     );
   });
   $('#volume').addEventListener('input', (e) => preview.setVolume(Number(e.target.value)));

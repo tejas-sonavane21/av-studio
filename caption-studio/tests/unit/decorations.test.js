@@ -193,6 +193,89 @@ test('the default sweep colour is white — a pen stroke, unlike the lime underl
 });
 
 // ---------------------------------------------------------------------------
+// the draw-in "flow" — the decoration grows to the length the word asks for
+// ---------------------------------------------------------------------------
+
+const maxX = (pts) => Math.max(...pts.map((p) => p.x));
+const minX = (pts) => Math.min(...pts.map((p) => p.x));
+
+/** The nib points, sitting between the top run and the reversed bottom run. */
+function nibOf(geometry) {
+  const run = SWEEP.segments + 1;
+  return geometry.points.slice(run, geometry.points.length - run);
+}
+
+/** A layout with a *single* emphasised word, so one decoration is on the canvas. */
+function oneWordStates(progress) {
+  return [{ revealed: true, emphasis: true, drawProgress: progress }];
+}
+
+test('a half-drawn sweep is the first half of the S, not the finished S clipped in half', () => {
+  const frag = { x: 100, y: 200, width: 200 };
+  const full = sweepGeometry(frag, EFF, 1, 1);
+  const half = sweepGeometry(frag, EFF, 1, 0.5);
+  const span = full.x1 - full.x0;
+  // the finished stroke is unchanged by the animation — same points, no nib
+  assert.equal(full.points.length, 2 * (SWEEP.segments + 1));
+  assert.equal(half.progress, 0.5);
+  assert.equal(nibOf(full).length, 0, 'a finished stroke has no pen tip');
+  // the tail stays put ...
+  close(minX(half.points), minX(full.points), 1e-9);
+  // ... and the stroke reaches the halfway point of its own centreline, plus at most the nib
+  assert.ok(maxX(half.points) > full.x0 + 0.5 * span - 1e-6, 'the stroke got there');
+  assert.ok(maxX(half.points) <= full.x0 + 0.5 * span + full.thickness / 2 + 1e-9, 'and no further');
+  assert.ok(maxX(half.points) < maxX(full.points), 'a half-drawn stroke is shorter than the finished one');
+});
+
+test('the leading edge of a growing sweep is a round nib facing the way the stroke travels', () => {
+  const frag = { x: 0, y: 0, width: 200 };
+  const g = sweepGeometry(frag, EFF, 1, 0.5);
+  const nib = nibOf(g);
+  assert.ok(nib.length > 0, 'a nib is emitted while the stroke is mid-draw');
+  // at u = 0.5 the wave and the tilt are both zero, so the nib's centre is on the baseline exactly
+  const c = { x: g.x0 + 0.5 * (g.x1 - g.x0), y: g.baselineY };
+  const radius = sweepGeometry(frag, EFF, 1, 1).thickness / 2;
+  for (const p of nib) close(Math.hypot(p.x - c.x, p.y - c.y), radius, 1e-9);
+  const cx = nib.reduce((s, p) => s + p.x, 0) / nib.length;
+  assert.ok(cx > c.x, 'the nib bulges forward (to the right), never back up the stroke');
+});
+
+test('a sweep at zero progress is a point on the centreline, not a flick', () => {
+  const g = sweepGeometry({ x: 100, y: 200, width: 200 }, EFF, 1, 0);
+  assert.equal(g.progress, 0);
+  assert.ok(maxX(g.points) - minX(g.points) < 1e-9);
+  assert.equal(nibOf(g).length, 0);
+});
+
+test('the plain underline unrolls from its left edge to the word’s own length', () => {
+  const ctx = new FakeContext({});
+  drawEmphasisUnderlines(ctx, fakeLayout(), oneWordStates(0.5), { emphasis: { decorationColor: '#22c55e' } });
+  const rects = ctx.ops('fillRect');
+  assert.equal(rects.length, 1);
+  close(rects[0].args[0], 775.04, 1e-6); // starts at the word's left edge
+  close(rects[0].args[2], 92.16 * 0.5, 1e-6); // half the word, at half progress
+  // the thickness is not what flows — only the length is
+  close(rects[0].args[3], underlineRect({ x: 775.04, y: 610.56, width: 92.16 }, EFF, 1).h, 1e-9);
+});
+
+test('a decoration at zero progress paints nothing at all', () => {
+  const underline = new FakeContext({});
+  drawEmphasisUnderlines(underline, fakeLayout(), oneWordStates(0), {});
+  assert.equal(underline.ops('fillRect').length, 0);
+
+  const sweep = new FakeContext({});
+  drawEmphasisSweep(sweep, fakeLayout(), oneWordStates(0), {});
+  assert.equal(sweep.ops('fill').length, 0, 'no empty path is filled');
+  assert.equal(sweep.ops('lineTo').length, 0);
+});
+
+test('a state without a progress draws the full bar — static is the fallback', () => {
+  const ctx = new FakeContext({});
+  drawEmphasisUnderlines(ctx, fakeLayout(), states([true]), {});
+  close(ctx.ops('fillRect')[0].args[2], 92.16, 1e-6);
+});
+
+// ---------------------------------------------------------------------------
 // highlight (the CapCut-style variant)
 // ---------------------------------------------------------------------------
 

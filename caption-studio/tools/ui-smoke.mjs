@@ -652,6 +652,70 @@ async function main() {
     (v) => !String(v).includes('edited'),
   );
 
+  console.log('\n■ underline draw (the emphasis flow)');
+  // The draw-in is the one thing a *unit* test cannot see: the geometry and the progress curve are
+  // covered there, but "does the line actually get painted shorter on screen" is a question about
+  // pixels. So this counts them, on the real preview canvas, at the demo's first emphasised word
+  // ("Just", revealed at 15.20, draw complete at 15.60 under the parity template).
+  await evaluate(
+    cdp,
+    `(()=>{
+      window.__green=()=>{
+        const c=document.querySelector('#preview-canvas');
+        const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data;
+        let n=0;
+        for(let i=0;i<d.length;i+=4){if(d[i+3]>40&&d[i+1]>140&&d[i]<110&&d[i+2]<130)n++;}
+        return n;
+      };
+    })()`,
+  );
+  const seekTo = (t) =>
+    `(()=>{const s=document.querySelector('#seek');s.value='${t}';s.dispatchEvent(new Event('input'));})()`;
+  await evaluate(cdp, seekTo(15.7));
+  const greenFull = await evaluate(cdp, 'window.__green()');
+  await evaluate(cdp, seekTo(15.35));
+  const greenEarly = await evaluate(cdp, 'window.__green()');
+  await evaluate(cdp, seekTo(15.2));
+  const greenAtStart = await evaluate(cdp, 'window.__green()');
+  assert('the emphasised word has a lime underline at the end of its draw', greenFull > 0, `${greenFull} green px`);
+  assert(
+    'part way through the draw the underline is shorter than its full length',
+    greenEarly > 0 && greenEarly < greenFull,
+    `${greenEarly} vs ${greenFull} green px`,
+  );
+  assert(
+    'and at the word\u2019s own start instant it has not been drawn at all',
+    greenAtStart === 0,
+    `${greenAtStart} green px`,
+  );
+  await check(
+    cdp,
+    'underline draw defaults on, so a fresh document is not an edited template',
+    'document.querySelector("#underline-draw-toggle").checked',
+    (v) => v === true,
+  );
+  await evaluate(
+    cdp,
+    '(()=>{const c=document.querySelector("#underline-draw-toggle");c.checked=false;c.dispatchEvent(new Event("change"));})()',
+  );
+  await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => String(v).includes('edited'), {
+    describe: 'turning the flow off to mark the template edited',
+  });
+  await evaluate(cdp, seekTo(15.2));
+  const greenStatic = await evaluate(cdp, 'window.__green()');
+  assert(
+    'with the flow off the underline is already drawn at the word\u2019s start (the static parity look)',
+    greenStatic > 0,
+    `${greenStatic} green px`,
+  );
+  await evaluate(
+    cdp,
+    '(()=>{const c=document.querySelector("#underline-draw-toggle");c.checked=true;c.dispatchEvent(new Event("change"));})()',
+  );
+  await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => !String(v).includes('edited'), {
+    describe: 'turning the flow back on to restore the unedited template',
+  });
+
   console.log('\n■ audio import');
   // A synthetic, self-contained WAV: the smoke test must not depend on the (gitignored) reference
   // workspace, and a real file is the only way to exercise the object-URL → <audio> path end to end.
