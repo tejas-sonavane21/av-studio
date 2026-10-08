@@ -1,8 +1,9 @@
 /**
- * download.test.js — the pure half of exporting: file names, caption payloads, codec choice, bitrate.
+ * download.test.js — the pure half of the caption files and the bitrate arithmetic.
  *
- * The recorder itself needs a browser (canvas, `MediaRecorder`, a real video), so it is exercised
- * through the UI smoke run; everything that can be decided without one is decided here.
+ * The encoder itself needs a browser (canvas, WebCodecs, a real video), so it is exercised through
+ * the UI smoke run; everything that can be decided without one is decided here — and the codec
+ * choices that used to live with the recorder now live in `webcodecs-export.test.js`.
  */
 
 import test from 'node:test';
@@ -16,7 +17,6 @@ import {
   audioBitrate,
   captionFiles,
   exportStem,
-  pickVideoMime,
   videoBitrate,
 } from '../../src/io/download.js';
 import { createBlock, createDocument, createWord } from '../../src/model/schema.js';
@@ -112,19 +112,4 @@ test('an unknown or missing quality falls back to the default, not to zero', () 
   assert.equal(videoBitrate(), MIN_VIDEO_BITRATE);
   assert.equal(audioBitrate('nonsense'), QUALITY_PRESETS[DEFAULT_QUALITY].audio);
   assert.equal(videoBitrate({ width: 1280, height: 720, fps: 0 }), videoBitrate({ width: 1280, height: 720, fps: 30 }));
-});
-
-test('pickVideoMime prefers the best supported codec and defers when none is', () => {
-  assert.equal(pickVideoMime((t) => t.startsWith('video/webm;codecs=vp9,opus')), 'video/webm;codecs=vp9,opus');
-  assert.equal(pickVideoMime((t) => t === 'video/webm;codecs=vp8'), 'video/webm;codecs=vp8');
-  assert.equal(pickVideoMime(() => false), '', 'no supported type means "let the browser decide"');
-  assert.equal(pickVideoMime(undefined), '');
-  assert.equal(
-    pickVideoMime((t) => {
-      if (t.includes('vp9')) throw new Error('boom');
-      return t === 'video/webm;codecs=vp8';
-    }),
-    'video/webm;codecs=vp8',
-    'one refused probe must not abandon the rest',
-  );
 });

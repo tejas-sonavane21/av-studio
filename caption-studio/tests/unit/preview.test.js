@@ -267,20 +267,41 @@ test('play, pause and seek drive the audio as well as the video', async () => {
   assert.equal(audio.pauseCalls, 1);
 });
 
-test('an imported audio track owns the sound, so the video is force-muted', async () => {
+test('each sound source is switched on its own, with a master mute above both', async () => {
   const video = fakeVideo({ duration: 42 });
   const { preview } = mount({ video });
   assert.equal(video.muted, false, 'a video on its own is audible');
+  assert.equal(preview.videoAudioEnabled, true);
+  assert.equal(preview.playbackAudioEnabled, true);
 
   const audio = fakeAudio({ duration: 42 });
   preview.setAudio(audio);
-  assert.equal(video.muted, true, 'two tracks must not play over each other');
-  assert.equal(audio.muted, false);
+  assert.equal(audio.muted, false, 'the master track is audible as soon as it is loaded');
+  assert.equal(video.muted, false, 'adding a track no longer takes the choice away');
   assert.equal(preview.audio, audio);
 
+  // What main.js does when a master track arrives: turn the picture's own sound off, so two tracks do
+  // not play over each other — but as a switch the user can flip back, not a rule.
+  preview.setVideoAudioEnabled(false);
+  assert.equal(video.muted, true, "the video's own audio is muted");
+  assert.equal(audio.muted, false, 'while the uploaded track still plays');
+  assert.equal(preview.videoAudioEnabled, false);
+
+  preview.setPlaybackAudioEnabled(false);
+  assert.equal(audio.muted, true);
+  assert.equal(preview.playbackAudioEnabled, false);
+
+  // The master mute sits above both and must not rewrite either per-source switch.
+  preview.setVideoAudioEnabled(true);
+  preview.setPlaybackAudioEnabled(true);
   preview.setMuted(true);
+  assert.equal(video.muted, true);
   assert.equal(audio.muted, true);
   assert.equal(preview.muted, true);
+  assert.equal(preview.videoAudioEnabled, true, 'master mute is not a per-source switch');
+  preview.setMuted(false);
+  assert.equal(video.muted, false);
+  assert.equal(audio.muted, false);
 
   preview.setVolume(0.4);
   assert.equal(audio.volume, 0.4);

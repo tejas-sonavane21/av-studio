@@ -10,7 +10,7 @@
 <body>
   <header class="app-bar">
     <h1>Caption Studio</h1>
-    <span class="badge">Phase 4 — templates, placement &amp; per-block styling</span>
+    <span class="badge">Phase 6 — real export, per-source audio &amp; a timeline</span>
     <span class="spacer"></span>
     <span class="badge" id="status-badge">idle</span>
   </header>
@@ -42,7 +42,9 @@
         <label class="check"><input type="checkbox" id="guides-toggle" /> guides</label>
         <label class="check"><input type="checkbox" id="overlay-toggle" checked /> drag &amp; snap</label>
         <label class="check"><input type="checkbox" id="drag-all-toggle" /> drag all captions</label>
-        <label class="check"><input type="checkbox" id="mute-toggle" /> mute</label>
+        <label class="check" title="The picture's own soundtrack"><input type="checkbox" id="video-audio-toggle" checked /> video audio</label>
+        <label class="check" title="The uploaded audio file (the master track)"><input type="checkbox" id="audio-audio-toggle" checked /> playback audio</label>
+        <label class="check"><input type="checkbox" id="mute-toggle" /> mute all</label>
         <label class="check"><input type="checkbox" id="autowrap-toggle" checked /> auto-wrap</label>
         <label class="check"><input type="range" id="volume" min="0" max="1" step="0.05" value="1" /> volume</label>
       </div>
@@ -170,6 +172,17 @@
       </div>
     </section>
 
+    <!-- ============ TIMELINE ============ -->
+    <section class="panel timeline-panel">
+      <h2>
+        Timeline
+        <span class="tag" id="timeline-status">—</span>
+        <span class="spacer"></span>
+        <span class="hint">click to seek · drag to scrub · click a clip to select it</span>
+      </h2>
+      <div id="timeline"></div>
+    </section>
+
     <!-- ============ TEMPLATES ============ -->
     <section class="panel templates-panel">
       <h2>
@@ -290,7 +303,7 @@
       </h2>
 
       <div class="actions">
-        <button class="primary" id="download-video" disabled>Download video (.webm)</button>
+        <button class="primary" id="download-video" disabled>Export video</button>
         <button class="ghost" id="download-project" disabled>Project (.caproj)</button>
         <button class="ghost" id="download-veed" disabled>Veed JSON</button>
         <button class="ghost" id="download-srt" disabled>SubRip (.srt)</button>
@@ -298,6 +311,13 @@
       </div>
 
       <div class="export-controls">
+        <label class="field-inline">
+          <span>Format</span>
+          <select id="export-format" title="MP4 plays in every player and editor; WebM is the open format">
+            <option value="mp4" selected>MP4 — H.264, plays everywhere</option>
+            <option value="webm">WebM — VP9, open format</option>
+          </select>
+        </label>
         <label class="field-inline">
           <span>Video quality</span>
           <select id="export-quality">
@@ -310,16 +330,17 @@
 
       <div class="progress"><div class="progress-bar" id="export-bar"></div></div>
       <div class="hint" id="export-note">
-        <b>Download video</b> composites the caption layer over the picture and records it to .webm in
-        real time — there is no ffmpeg here, so a three-minute video takes about three minutes. The
-        bitrate comes from <b>Video quality</b> (a real-time encoder has no second pass to fall back
-        on, so this is what decides how the result looks). The other buttons write the caption data
+        <b>Export video</b> renders every frame at the document's own resolution and encodes it with
+        the browser's own encoder — no screen recording, so it is not tied to real time and no frames
+        are dropped. <b>Format</b> picks the container, <b>Video quality</b> the bits-per-pixel
+        budget. Sound comes from the audio file loaded under Sources (the master track); sound that
+        only exists inside the video file is not extracted. The other buttons write the caption data
         itself: the project, the Veed master JSON, and plain SRT / VTT that any other editor can read.
       </div>
     </section>
 
     <!-- ============ SOURCES ============ -->
-    <section class="panel">
+    <section class="panel sources-panel">
       <h2>Sources</h2>
 
       <div class="field">

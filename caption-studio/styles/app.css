@@ -24,9 +24,17 @@ header.app-bar .badge {
 }
 header .spacer { flex: 1; }
 
+/*
+ * Three equal columns, and every panel placed by an explicit span rather than by auto-flow.
+ *
+ * The earlier 320/1fr/380 rail split only ever applied to the panels that happened to fall after the
+ * full-width ones, which is how the Transcribe / Export / Sources row came out lopsided — one narrow,
+ * one wide, one narrow, each a different height. Equal thirds make that row read as the three
+ * parallel workflows it actually is, at any window width.
+ */
 main {
   display: grid;
-  grid-template-columns: 320px 1fr 380px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--gap);
   padding: var(--gap);
   align-items: start;
@@ -83,8 +91,11 @@ button:hover:not(:disabled) { filter: brightness(1.08); }
 
 /* ============ preview ============ */
 
-/* the preview spans the whole grid; the three working panels flow below it */
+/* the preview spans the whole grid; the working panels flow below it */
 .preview-panel { grid-column: 1 / -1; }
+/* The three workflow panels sit side by side, one per column — the horizontal row they were before
+   they briefly went narrow-and-stacked. */
+.transcribe-panel, .export-panel, .sources-panel { grid-column: auto; }
 .preview-panel h2 { display: flex; align-items: center; gap: 8px; }
 
 .stage {
@@ -214,7 +225,7 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 }
 .stage.has-content > .overlay-canvas:active { cursor: grabbing; }
 
-.templates-panel, .block-panel { grid-column: 1 / -1; }
+.templates-panel, .block-panel, .timeline-panel { grid-column: 1 / -1; }
 .templates-panel h2, .block-panel h2 { display: flex; align-items: center; gap: 8px; }
 .templates-panel h2 .spacer, .block-panel h2 .spacer { flex: 1; }
 
@@ -385,3 +396,66 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
   text-transform: uppercase; color: var(--text-2);
 }
 .block-panel .inspector-section:first-child { margin-top: 0; }
+
+
+/* ------------------------------------------------------------------ *
+ * Phase 6 — the timeline, and per-source audio in the transport
+ * ------------------------------------------------------------------ */
+
+.timeline-panel h2 { display: flex; align-items: center; gap: 8px; }
+.timeline-panel h2 .spacer { flex: 1; }
+.timeline-panel h2 .hint { font-weight: 400; text-transform: none; letter-spacing: 0; }
+
+#timeline { display: flex; flex-direction: column; gap: 8px; }
+.timeline-toolbar { display: flex; align-items: center; gap: 8px; }
+.timeline-toolbar .spacer { flex: 1; }
+.timeline-toolbar button { padding: 3px 10px; font-size: 12px; }
+.timeline-clock { color: var(--text-1); }
+
+/* `overflow-x: auto` is what makes zoom useful: at zoom 1 the whole document fits, and zooming in
+   grows the inner strip so the browser scrolls it. Scrolling is also how the playhead stays reachable
+   once it leaves the window. */
+.timeline-scroll {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: crosshair;
+  touch-action: none;
+}
+.timeline-inner { position: relative; height: 74px; min-width: 100%; }
+
+.timeline-ruler { position: absolute; top: 0; left: 0; height: 24px; }
+.timeline-tick { position: absolute; top: 16px; width: 1px; height: 6px; background: var(--border); }
+.timeline-tick.major { top: 9px; height: 13px; background: var(--text-2); }
+.timeline-tick-label {
+  position: absolute; top: -1px; left: 4px;
+  font-size: 9px; color: var(--text-2); font-family: var(--font-mono); white-space: nowrap;
+}
+
+.timeline-track { position: absolute; top: 28px; left: 0; height: 40px; }
+.timeline-clip {
+  position: absolute; top: 0; height: 40px; padding: 2px 6px; overflow: hidden;
+  display: flex; align-items: center;
+  background: var(--bg-3); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text-1); font-size: 11px; text-align: left; white-space: nowrap; cursor: pointer;
+}
+.timeline-clip:hover:not(:disabled) { border-color: var(--accent-dim); }
+.timeline-clip.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; color: var(--text-0); }
+.timeline-clip-text { overflow: hidden; text-overflow: ellipsis; }
+
+/* A playhead is a 2px line with a head, drawn over everything and never a pointer target — grabbing
+   the line instead of scrubbing the strip would be an infuriating way to miss a seek. */
+.timeline-playhead { position: absolute; top: 0; width: 2px; height: 100%; background: var(--accent); pointer-events: none; }
+.timeline-playhead::before {
+  content: ''; position: absolute; top: 0; left: -4px;
+  border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid var(--accent);
+}
+
+.timeline-empty {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  color: var(--text-2); font-size: 12px; pointer-events: none;
+}
+.timeline-empty[hidden] { display: none; }

@@ -28,7 +28,8 @@ import { parseSRT } from './io/srt.js';
 import { parseVTT } from './io/vtt.js';
 import { importJSON } from './io/project-file.js';
 import { describeStudioAudit, health, optionsFor, transcribeFile } from './io/audio-studio-client.js';
-import { captionFiles, downloadBlob, downloadText, exportStem, recordDocumentToWebm } from './io/download.js';
+import { captionFiles, downloadBlob, downloadText, exportStem } from './io/download.js';
+import { DEFAULT_FORMAT, exportDocumentToVideo } from './io/webcodecs-export.js';
 import { alignCaptions } from './align/aligner.js';
 import { validateDocument } from './model/document.js';
 import { createDefaultStyle } from './model/schema.js';
@@ -37,6 +38,7 @@ import { createDemoDocument } from './model/demo.js';
 import { joinBlockWithPrevious, setBlockText, setWordText, splitBlock, splitBlockAtTime } from './model/edit.js';
 import { createPreview } from './editor/preview.js';
 import { createCanvasOverlay } from './editor/canvas-overlay.js';
+import { createTimeline } from './editor/timeline.js';
 import { fontFamilies, getFont } from './fonts/registry.js';
 import {
   CANVAS_PRESETS,
@@ -79,6 +81,7 @@ let videoUrl = null;
 let audioUrl = null;
 let preview = null;
 let overlay = null;
+let timeline = null;
 // The only editing state this module owns: which block the inspector edits. Everything else about
 // an edit lives in the document (overrides / placement) or in a registry.
 let selectedBlockId = null;
@@ -183,6 +186,13 @@ async function onAudio(file) {
   if (audioUrl) URL.revokeObjectURL(audioUrl);
   audioUrl = URL.createObjectURL(file);
   preview?.setAudio(audio);
+  // A master track takes the sound over: the picture's own audio is switched off so the two cannot
+  // play over each other, and the transport switches are moved to match. Both are one click away
+  // from being changed back.
+  preview?.setPlaybackAudioEnabled(true);
+  preview?.setVideoAudioEnabled(false);
+  $('#audio-audio-toggle').checked = true;
+  $('#video-audio-toggle').checked = false;
   audio.src = audioUrl;
   audio.load();
   // an audio-only session is still a session: the transport has to work with no picture at all
@@ -430,51 +440,54 @@ function onDownloadFile(ext) {
 }
 
 /**
- * Burn the captions into the video and download the result.
+ * Render the captions into the video and download the result.
  *
- * The recording is real time — the frames are captured as the video plays — so this is the one
- * action in the studio that takes as long as the video does. The transport is stopped first so the
- * preview's own play loop cannot compete with the exporter for the clock.
+ * This is a real encode, not a screen recording: the frame stepping and the encoder live in
+ * `io/webcodecs-export.js`. The transport is stopped first so the preview's own play loop cannot
+ * fight the exporter for the video element the encoder is seeking.
  */
 async function onDownloadVideo() {
   const doc = preview?.document;
   const video = $('#preview-video');
   if (exporting) return;
   if (!doc) {
-    log('download: there are no captions yet — run the correction or open the demo first');
+    log('export: there are no captions yet — run the correction or open the demo first');
     return;
   }
   if (!store.getState().video) {
-    log('download video: load a video under Sources first — the caption files can be saved without one');
+    log('export video: load a video under Sources first — the caption files can be saved without one');
     return;
   }
 
+  const format = $('#export-format').value === 'webm' ? 'webm' : DEFAULT_FORMAT;
+  const quality = $('#export-quality').value || 'high';
+  const state = store.getState();
   exporting = true;
   refreshExportButtons();
   $('#export-bar').classList.remove('failed');
   $('#export-bar').classList.add('busy');
-  $('#export-status').textContent = 'recording\u2026';
+  $('#export-status').textContent = 'encoding\u2026';
   setExportProgress(0);
-  setStatus('recording\u2026');
-  const quality = $('#export-quality').value || 'high';
+  setStatus('encoding\u2026');
   log(
-    `export: burning the captions into the video at ${quality} quality — this runs in real time, so it takes as long as the video`,
+    `export: rendering the captions into a .${format} at ${quality} quality — frames are drawn and encoded, not recorded`,
   );
   // Honest about the one thing that silently costs quality: a frame smaller than the picture is a
   // downscale, and the ratio picker is where that gets fixed.
   if (video.videoWidth > doc.canvas.width || video.videoHeight > doc.canvas.height) {
     log(
-      `  ⚠ recording at ${doc.canvas.width}×${doc.canvas.height} while the picture is ` +
+      `  ⚠ encoding at ${doc.canvas.width}×${doc.canvas.height} while the picture is ` +
         `${video.videoWidth}×${video.videoHeight} — the export is downscaled (set the frame ratio to the picture’s own)`,
     );
   }
   preview.pause();
 
   try {
-    const result = await recordDocumentToWebm({
+    const result = await exportDocumentToVideo({
       doc,
       video,
-      audio: preview.audio,
+      audioBlob: state.audio ?? null,
+      format,
       fps: doc.canvas?.fps,
       quality,
       onProgress: (fraction, message) => {
@@ -482,7 +495,7 @@ async function onDownloadVideo() {
         setExportNote(message);
       },
     });
-    const name = `${exportStem(doc)}.webm`;
+    const name = `${exportStem(doc)}.${result.format}`;
     downloadBlob(name, result.blob);
     setExportProgress(1);
     $('#export-status').textContent = 'done';
@@ -490,10 +503,12 @@ async function onDownloadVideo() {
     const size = (result.blob.size / 1e6).toFixed(1);
     const mbps = (result.videoBitsPerSecond / 1e6).toFixed(1);
     log(
-      `export: ${name} — ${size} MB, ${result.seconds.toFixed(1)}s, ${result.width}x${result.height} @ ${result.fps}fps, ${mbps} Mbps` +
-        `${result.audio ? ' with audio' : ' (no audio track)'}`,
+      `export: ${name} — ${size} MB, ${result.seconds.toFixed(1)}s, ${result.width}×${result.height} @ ${result.fps}fps, ` +
+        `${result.frames} frames, ${result.videoCodec}, ${mbps} Mbps${result.audio ? ` with ${result.audioCodec} audio` : ' (no audio track)'}`,
     );
-    setExportNote(`saved ${name} — ${size} MB at ${mbps} Mbps${result.audio ? '' : ' (no audio track)'}`);
+    setExportNote(
+      `saved ${name} — ${size} MB, ${result.frames} frames at ${mbps} Mbps${result.audio ? '' : ' (no audio track)'}`,
+    );
   } catch (err) {
     $('#export-bar').classList.add('failed');
     $('#export-status').textContent = 'failed';
@@ -571,6 +586,7 @@ async function showDocument(doc, label = 'document') {
   renderTemplates();
   selectBlock(selectedBlockId);
   refreshExportButtons();
+  syncTimeline();
   log(`preview: ${label}`);
   return doc;
 }
@@ -651,7 +667,25 @@ const fmt = (t) => Number(t).toFixed(2).padStart(6, ' ');
  * Rows come from the *document*, not from the alignment result, because the document's blocks are
  * the ones that carry `overrides` / `placement` — the things the inspector edits.
  */
+/**
+ * Republish the document and the clock to the timeline, in one place.
+ *
+ * Everything that can change what the strip shows — a new document, an edit, a selection, a new
+ * duration — goes through here, so the timeline can never drift from the preview it is a view of.
+ */
+function syncTimeline() {
+  if (!timeline) return;
+  const doc = preview?.document;
+  timeline.setDocument(doc);
+  timeline.setDuration(preview?.duration() ?? 0);
+  timeline.setSelected(selectedBlockId);
+  const count = doc?.blocks?.length ?? 0;
+  const tag = $('#timeline-status');
+  if (tag) tag.textContent = count ? `${count} caption${count === 1 ? '' : 's'}` : '—';
+}
+
 function renderBlocks() {
+  syncTimeline();
   const { result } = store.getState();
   const blocks = preview?.document?.blocks?.length ? preview.document.blocks : result?.blocks;
   const host = $('#blocks');
@@ -711,9 +745,11 @@ function refreshSeekRange() {
   const seek = $('#seek');
   seek.max = String(Math.max(0.01, duration));
   seek.disabled = duration <= 0;
+  syncTimeline();
 }
 
 function onFrame(t, doc) {
+  timeline?.setTime(t);
   $('#preview-time').textContent = `${t.toFixed(2)}s`;
   const seek = $('#seek');
   if (document.activeElement !== seek) seek.value = String(t);
@@ -854,6 +890,14 @@ function wirePreview() {
   $('#mute-toggle').addEventListener('change', (e) => {
     preview.setMuted(e.target.checked);
     log(e.target.checked ? 'sound muted' : 'sound on');
+  });
+  $('#video-audio-toggle').addEventListener('change', (e) => {
+    preview.setVideoAudioEnabled(e.target.checked);
+    log(e.target.checked ? "the video's own audio is on" : "the video's own audio is muted");
+  });
+  $('#audio-audio-toggle').addEventListener('change', (e) => {
+    preview.setPlaybackAudioEnabled(e.target.checked);
+    log(e.target.checked ? 'the uploaded playback audio is on' : 'the uploaded playback audio is muted');
   });
   $('#autowrap-toggle').addEventListener('change', async (e) => {
     await editDefaults({ autoWrap: e.target.checked });
@@ -1212,6 +1256,7 @@ function updateSelectionUI() {
     document.querySelectorAll('#blocks .row').forEach((row) => {
       row.classList.toggle('active', row.dataset.blockId === selectedBlockId);
     });
+    timeline?.setSelected(selectedBlockId);
     renderBlockInspector();
     overlay?.refresh({ force: true });
   } finally {
@@ -1260,6 +1305,7 @@ function afterBlockEdit() {
   renderBlocks();
   renderBlockStatus();
   renderBlockInspector();
+  syncTimeline();
 }
 
 /**
@@ -1817,6 +1863,20 @@ preview = createPreview({
 });
 
 createOverlay();
+
+timeline = createTimeline({
+  container: $('#timeline'),
+  onSeek: (t) => {
+    preview?.seek(t);
+    overlay?.refresh();
+  },
+  onSelectBlock: (id) => {
+    selectBlock(id);
+    const block = findBlock(preview?.document, id);
+    if (block) preview?.seek(block.start + 0.01);
+  },
+});
+syncTimeline();
 
 $('#video-in').addEventListener('change', (e) => onVideo(e.target.files?.[0]));
 $('#audio-in').addEventListener('change', (e) => onAudio(e.target.files?.[0]));
