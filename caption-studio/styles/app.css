@@ -157,6 +157,15 @@ button:hover:not(:disabled) { filter: brightness(1.08); }
   min-width: 130px;
 }
 .field-inline input[type='range'] { width: 150px; }
+/* the emphasis colour picker, sized to sit on the same row as the selects it belongs with */
+.field-inline input[type='color'] {
+  width: 150px;
+  height: 26px;
+  padding: 1px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
 
 button.ghost { background: var(--bg-2); border-color: var(--border); color: var(--text-1); }
 

@@ -23,6 +23,7 @@
  */
 
 import { createStore } from './store/store.js';
+import { toHexColor } from './util/color.js';
 import { parseSRT } from './io/srt.js';
 import { parseVTT } from './io/vtt.js';
 import { importJSON } from './io/project-file.js';
@@ -752,6 +753,8 @@ async function syncStyleControls(defaults) {
   $('#reveal-mode').value = style.reveal ?? 'progressive';
   $('#emphasis-decoration').value = style.emphasis?.decoration ?? 'none';
   $('#emphasis-source').value = style.emphasis?.source ?? 'keyword';
+  $('#emphasis-color').value = toHexColor(style.emphasis?.decorationColor, '#22c55e');
+  $('#emphasis-color-out').textContent = style.emphasis?.decorationColor ?? '#22c55e';
   updateSizeReadout();
 }
 
@@ -829,6 +832,14 @@ function wirePreview() {
   $('#emphasis-decoration').addEventListener('change', async (e) => {
     await editDefaults({ emphasis: { decoration: e.target.value } });
   });
+  // `input` rather than `change`: the palette reports the colour continuously while it is dragged,
+  // so the caption behind the picker keeps up instead of jumping once the dialog is dismissed.
+  $('#emphasis-color').addEventListener('input', async (e) => {
+    const decorationColor = e.target.value;
+    $('#emphasis-color-out').textContent = decorationColor;
+    await editDefaults({ emphasis: { decorationColor } });
+  });
+  $('#emphasis-color').addEventListener('change', (e) => log(`emphasis colour: ${e.target.value}`));
   $('#emphasis-source').addEventListener('change', async (e) => {
     await editDefaults({ emphasis: { source: e.target.value } });
     log(
@@ -1155,6 +1166,21 @@ function buildText(value, onChange, { placeholder = '' } = {}) {
   return input;
 }
 
+/**
+ * A colour picker.
+ *
+ * The *shown* colour is normalised into what the input can hold (`toHexColor`) while the value
+ * written back is always a plain `#rrggbb` — so picking a colour is one round trip through the
+ * document, never a reformatting of a colour the user did not touch.
+ */
+function buildColor(value, onChange, fallback) {
+  const input = el('input');
+  input.type = 'color';
+  input.value = toHexColor(value, fallback);
+  input.addEventListener('change', () => onChange(input.value));
+  return input;
+}
+
 function buildRange({ min, max, step, value, onInput }) {
   const input = el('input');
   input.type = 'range';
@@ -1272,9 +1298,7 @@ function renderBlockInspector() {
     ),
     fieldInline(
       `Emphasis colour ${style.emphasis?.decorationColor ?? '—'}`,
-      buildText(style.emphasis?.decorationColor ?? '', (v) => applyBlockPatch({ emphasis: { decorationColor: v || null } }), {
-        placeholder: '#22c55e',
-      }),
+      buildColor(style.emphasis?.decorationColor, (v) => applyBlockPatch({ emphasis: { decorationColor: v } })),
     ),
     fieldInline(
       'Animation in',
