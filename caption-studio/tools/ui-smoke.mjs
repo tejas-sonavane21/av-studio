@@ -409,6 +409,31 @@ async function main() {
     (v) => v === 'no audio',
   );
 
+  await check(
+    cdp,
+    'the timeline strip is built',
+    'document.querySelectorAll("#timeline .timeline-track").length',
+    (v) => v === 1,
+  );
+  await check(
+    cdp,
+    'and says it is empty before a document exists',
+    'document.querySelector("#timeline .timeline-empty").hidden',
+    (v) => v === false,
+  );
+  await check(
+    cdp,
+    'the transport has a switch for each sound source plus a master mute',
+    'document.querySelectorAll("#video-audio-toggle, #audio-audio-toggle, #mute-toggle").length',
+    (v) => v === 3,
+  );
+  await check(
+    cdp,
+    'and the export offers a container choice, MP4 by default',
+    'document.querySelector("#export-format").value',
+    (v) => v === 'mp4',
+  );
+
   console.log('\n■ demo document');
   await evaluate(cdp, 'document.querySelector("#demo-btn").click()');
   await waitFor(cdp, 'document.querySelector("#stage").className', (v) => String(v).includes('has-content'), {
@@ -443,6 +468,55 @@ async function main() {
     'document.querySelector("#template-status").textContent',
     (v) => String(v).includes('Veed'),
   );
+
+  console.log('\n■ timeline');
+  await check(
+    cdp,
+    'the timeline drew one clip per caption',
+    'document.querySelectorAll("#timeline .timeline-clip").length === document.querySelectorAll("#blocks .row").length',
+    (v) => v === true,
+  );
+  await check(
+    cdp,
+    'the timeline status counts them',
+    'document.querySelector("#timeline-status").textContent',
+    (v) => /\d+ caption/.test(String(v)),
+  );
+  await check(
+    cdp,
+    'a ruler is drawn with time ticks',
+    'document.querySelectorAll("#timeline .timeline-tick.major").length',
+    (v) => v >= 2,
+  );
+  await check(
+    cdp,
+    'the empty hint is hidden now there are captions',
+    'document.querySelector("#timeline .timeline-empty").hidden',
+    (v) => v === true,
+  );
+  // Clicking a clip is the two things an editor expects at once: select that caption, and put the
+  // playhead on it. Both are checked, because either one alone would be a confusing half-behaviour.
+  await evaluate(cdp, 'document.querySelectorAll("#timeline .timeline-clip")[1].click()');
+  await delay(250);
+  await check(
+    cdp,
+    'clicking a clip selects its caption',
+    'document.querySelectorAll("#timeline .timeline-clip.active").length',
+    (v) => v === 1,
+  );
+  await check(
+    cdp,
+    'and scrubs the playhead into it',
+    'Number(document.querySelector("#seek").value) > 0',
+    (v) => v === true,
+  );
+  await check(
+    cdp,
+    'the zoom button widens the strip',
+    '(()=>{const inner=document.querySelector("#timeline .timeline-inner");const before=parseFloat(inner.style.width)||0;[...document.querySelectorAll("#timeline .timeline-toolbar button")].find(b=>b.textContent==="+").click();return parseFloat(inner.style.width)>before})()',
+    (v) => v === true,
+  );
+  await evaluate(cdp, '[...document.querySelectorAll("#timeline .timeline-toolbar button")].find(b=>b.textContent==="Fit").click()');
 
   console.log('\n■ templates');
   await evaluate(cdp, '[...document.querySelectorAll("#templates .tile")].find(t=>t.dataset.id==="veed-karaoke").click()');
@@ -628,8 +702,8 @@ async function main() {
     cdp,
     'every panel is a direct child of main, none nested',
     'document.querySelectorAll("main > section.panel").length + "/" + document.querySelectorAll("section.panel section.panel").length',
-    (v) => v === '8/0',
-    '8 panels, 0 nested',
+    (v) => v === '9/0',
+    '9 panels, 0 nested',
   );
   await check(
     cdp,
@@ -1043,6 +1117,30 @@ async function main() {
     'document.querySelector("#preview-video").muted',
     (v) => v === true,
   );
+
+  console.log('\n■ audio routing');
+  // Start from an uncluttered state: the master mute was switched on above.
+  await evaluate(cdp, '(()=>{const c=document.querySelector("#mute-toggle");c.checked=false;c.dispatchEvent(new Event("change"));})()');
+  await check(
+    cdp,
+    'a master track takes the sound over, and the two switches say so',
+    '(()=>{const v=document.querySelector("#video-audio-toggle");const a=document.querySelector("#audio-audio-toggle");return JSON.stringify({video:v.checked,audio:a.checked})})()',
+    (v) => v === JSON.stringify({ video: false, audio: true }),
+  );
+  await check(
+    cdp,
+    'turning the picture\u2019s own audio back on un-mutes the video',
+    '(()=>{const c=document.querySelector("#video-audio-toggle");c.checked=true;c.dispatchEvent(new Event("change"));return document.querySelector("#preview-video").muted})()',
+    (v) => v === false,
+  );
+  await check(
+    cdp,
+    'and the uploaded track has its own switch, independent of the picture\u2019s',
+    '(()=>{const c=document.querySelector("#audio-audio-toggle");c.checked=false;c.dispatchEvent(new Event("change"));return JSON.stringify({audio:document.querySelector("#preview-audio").muted,video:document.querySelector("#preview-video").muted})})()',
+    (v) => v === JSON.stringify({ audio: true, video: false }),
+  );
+  // Back to both audible, so the sections below hear what they expect.
+  await evaluate(cdp, '(()=>{for(const id of ["#audio-audio-toggle","#video-audio-toggle"]){const c=document.querySelector(id);c.checked=true;c.dispatchEvent(new Event("change"));}})()');
 
   console.log('\n■ auto-wrap');
   await check(
@@ -1530,9 +1628,15 @@ async function main() {
   );
   await check(
     cdp,
-    'and it is the same set of presets the recorder reads',
+    'and it is the same set of presets the encoder reads',
     '[...document.querySelectorAll("#export-quality option")].map((o)=>o.value).join("|")',
     (v) => v === 'balanced|high|best',
+  );
+  await check(
+    cdp,
+    'and the container choice is MP4 or WebM, MP4 by default',
+    '[...document.querySelectorAll("#export-format option")].map((o)=>o.value+":"+(o.selected?"on":"off")).join("|")',
+    (v) => v === 'mp4:on|webm:off',
   );
   for (const [id, ext] of [
     ['#download-project', '.caproj'],
@@ -1551,48 +1655,55 @@ async function main() {
   }
 
   console.log('\n■ video burn-in');
-  // Record a one-second video in the page and hand it to #video-in, so the smoke test needs no
-  // (gitignored) fixture. This leans on the same MediaRecorder the burn-in does, so a browser that
-  // cannot record skips the check rather than failing it.
-  // The clip is 640×360 of *noise* on purpose. A tidy moving square gives a real-time encoder almost
-  // nothing to spend its bitrate on, so two quality settings would produce the same file and the
-  // measurement below would prove nothing.
+  // Build a two-second 640×360 MP4 in the page — WebCodecs plus the vendored MP4 muxer — and hand
+  // it to #video-in, so the smoke test needs no (gitignored) fixture.
+  //
+  // An **indexed MP4** rather than the old recorded WebM, on purpose. The exporter seeks every frame,
+  // and a MediaRecorder WebM carries no seek index: pointing this section at one measures the worst
+  // case and takes minutes, not the file a user actually loads (a phone/camera MP4).
+  //
+  // The content is *noise* on purpose too — a tidy moving square gives the encoder almost nothing to
+  // spend its bitrate on, so two quality settings would produce the same file and the measurement
+  // below would prove nothing.
   const madeVideo = await evaluate(
     cdp,
     `(async () => {
-      if (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream) return 0;
-      const W = 640, H = 360;
-      const c = document.createElement('canvas'); c.width = W; c.height = H;
-      const g = c.getContext('2d');
-      const img = g.createImageData(W, H);
+      if (typeof VideoEncoder === 'undefined') return 0;
+      // resolved against the page URL (…/caption-studio/index.html), not the workspace root
+      const { Muxer, ArrayBufferTarget } = await import('./vendor/muxers/mp4-muxer.mjs');
+      const W = 640, H = 360, FPS = 30, SECONDS = 5;
+      const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
+      const g = canvas.getContext('2d');
+      const config = { codec: 'avc1.42001f', width: W, height: H, bitrate: 2000000, framerate: FPS };
+      const support = await VideoEncoder.isConfigSupported(config);
+      if (!support || !support.supported) return 0;
+      const target = new ArrayBufferTarget();
+      const muxer = new Muxer({ target, video: { codec: 'avc', width: W, height: H }, fastStart: 'in-memory' });
+      const encoder = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: () => {} });
+      encoder.configure({ ...config, avc: { format: 'avc' } });
       const noise = new Uint8Array(W * H);
-      let mime = '';
-      for (const t of ['video/webm;codecs=vp8', 'video/webm']) { if (MediaRecorder.isTypeSupported(t)) { mime = t; break; } }
-      const rec = new MediaRecorder(c.captureStream(15), mime ? { mimeType: mime } : {});
-      const chunks = []; rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-      const done = new Promise((r) => { rec.onstop = r; });
-      rec.start(100);
-      const started = performance.now();
-      await new Promise((resolve) => {
-        const draw = () => {
-          const t = (performance.now() - started) / 1000;
-          // crypto.getRandomValues refuses more than 64 KiB in one call, so fill in chunks
-          for (let o = 0; o < noise.length; o += 65536) {
-            crypto.getRandomValues(noise.subarray(o, Math.min(o + 65536, noise.length)));
-          }
-          const d = img.data;
-          for (let i = 0, o = 0; i < noise.length; i++, o += 4) {
-            d[o] = noise[i]; d[o + 1] = noise[(i + 37) % noise.length]; d[o + 2] = noise[(i + 101) % noise.length]; d[o + 3] = 255;
-          }
-          g.putImageData(img, 0, 0);
-          if (t < 1.2) requestAnimationFrame(draw); else resolve();
-        };
-        draw();
-      });
-      rec.stop(); await done;
-      const blob = new Blob(chunks, { type: 'video/webm' });
+      const total = FPS * SECONDS;
+      const img = g.createImageData(W, H);
+      for (let i = 0; i < total; i++) {
+        // crypto.getRandomValues refuses more than 64 KiB in one call, so fill in chunks
+        for (let o = 0; o < noise.length; o += 65536) {
+          crypto.getRandomValues(noise.subarray(o, Math.min(o + 65536, noise.length)));
+        }
+        const d = img.data;
+        for (let k = 0, o = 0; k < noise.length; k++, o += 4) {
+          d[o] = noise[k]; d[o + 1] = noise[(k + 37) % noise.length]; d[o + 2] = noise[(k + 101) % noise.length]; d[o + 3] = 255;
+        }
+        g.putImageData(img, 0, 0);
+        const frame = new VideoFrame(canvas, { timestamp: Math.round((i / FPS) * 1e6), duration: Math.round(1e6 / FPS) });
+        encoder.encode(frame, { keyFrame: i % 60 === 0 });
+        frame.close();
+        if (encoder.encodeQueueSize > 6) await new Promise((r) => setTimeout(r, 4));
+      }
+      await encoder.flush();
+      muxer.finalize();
+      const blob = new Blob([target.buffer], { type: 'video/mp4' });
       const dt = new DataTransfer();
-      dt.items.add(new File([blob], 'smoke.webm', { type: 'video/webm' }));
+      dt.items.add(new File([blob], 'smoke.mp4', { type: 'video/mp4' }));
       const input = document.querySelector('#video-in');
       // Kept on the page so it can be handed to the input a second time, which is how "a picture
       // arrives *after* the frame ratio was chosen" gets tested without a second recording.
@@ -1602,7 +1713,7 @@ async function main() {
     })()`,
   );
   if (!madeVideo) {
-    console.log('  \u2022 skipped \u2014 this browser cannot record video, so the burn-in cannot be checked here');
+    console.log('  \u2022 skipped \u2014 this browser cannot encode H.264, so the burn-in cannot be checked here');
   } else {
     await waitFor(
       cdp,
@@ -1682,18 +1793,22 @@ async function main() {
       );
       await delay(150);
     };
-    const exportWith = async (quality, aspect) => {
+    const exportWith = async (quality, aspect, format = 'mp4') => {
       await reSelectVideo();
       await evaluate(cdp, setAspect(aspect));
-      await evaluate(cdp, `(()=>{document.querySelector('#export-quality').value='${quality}';})()`);
+      await evaluate(
+        cdp,
+        `(()=>{document.querySelector('#export-format').value='${format}';document.querySelector('#export-quality').value='${quality}';})()`,
+      );
       const before = await evaluate(cdp, 'window.__blobSizes.length');
+      const started = Date.now();
       await evaluate(cdp, 'document.querySelector("#download-video").click()');
       try {
         await waitFor(
           cdp,
-          `window.__blobSizes.length > ${before} && document.querySelector("#export-status").textContent !== "recording\u2026"`,
+          `window.__blobSizes.length > ${before} && document.querySelector("#export-status").textContent !== "encoding\u2026"`,
           (v) => v === true,
-          { describe: `the ${quality} export to finish` },
+          { attempts: 900, intervalMs: 100, describe: `the ${quality} export to finish` },
         );
       } catch (err) {
         // Say what the page said, rather than only that the wait ran out
@@ -1703,13 +1818,20 @@ async function main() {
         );
         throw new Error(`${quality} export did not finish: ${where} (${err.message})`);
       }
-      return evaluate(cdp, 'window.__blobSizes[window.__blobSizes.length - 1]');
+      const bytes = await evaluate(cdp, 'window.__blobSizes[window.__blobSizes.length - 1]');
+      const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+      const note = await evaluate(
+        cdp,
+        'document.querySelector("#log").textContent.split("\\n").filter((l)=>l.includes("export: ")).pop()',
+      );
+      console.log(`  \u2022 ${format}/${quality} on a 5s clip: ${bytes} bytes in ${elapsed}s \u2014 ${note}`);
+      return bytes;
     };
-    const portraitBytes = await exportWith('best', '9:16');
+    const portraitBytes = await exportWith('best', '9:16', 'mp4');
     await check(
       cdp,
-      'the burn-in saved a .webm',
-      'window.__downloads.filter((x)=>String(x).endsWith(".webm")).length',
+      'the export saved an .mp4',
+      'window.__downloads.filter((x)=>String(x).endsWith(".mp4")).length',
       (v) => v >= 1,
     );
     await check(
@@ -1721,39 +1843,61 @@ async function main() {
     assert('the portrait export is a real file, not an empty blob', portraitBytes > 2000, `${portraitBytes} bytes`);
     await check(
       cdp,
-      'the export names the quality it recorded at rather than leaving it to the browser',
+      'the export names the quality it encoded at rather than leaving it to the browser',
       'document.querySelector("#log").textContent.includes("at best quality")',
       (v) => v === true,
     );
     await check(
       cdp,
-      'and reports the frame and the bitrate it actually used',
-      '/\\d+\\.\\d Mbps/.test(document.querySelector("#log").textContent)',
+      'and the log names the container it wrote',
+      'document.querySelector("#log").textContent.includes("into a .mp4")',
+      (v) => v === true,
+    );
+    await check(
+      cdp,
+      'and reports the frames and the bitrate it actually used',
+      '/\\d+ frames, avc1\\.\\d+, \\d+\\.\\d Mbps/.test(document.querySelector("#log").textContent)',
       (v) => v === true,
     );
     // The measurement that answers "the download looks worse than the source": record the same clip
     // at both ends of the range and compare what the encoder actually produced. Noise content makes
     // the target bitrate the binding constraint, so the two really do differ.
+    const webmBytes = await exportWith('balanced', '16:9', 'webm');
+    await check(
+      cdp,
+      'switching the container writes a .webm instead of an .mp4',
+      'window.__downloads.filter((x)=>String(x).endsWith(".webm")).length',
+      (v) => v >= 1,
+    );
+    assert('and the .webm is a real file too', webmBytes > 2000, `${webmBytes} bytes`);
+    const webmBestBytes = await exportWith('best', '16:9', 'webm');
     const balancedBytes = await exportWith('balanced', '16:9');
     const bestBytes = await exportWith('best', '16:9');
     console.log(
-      `  \u2022 on the same 1.2s noise clip: balanced ${balancedBytes} bytes, ` +
-        `best ${bestBytes} bytes (${(bestBytes / Math.max(1, balancedBytes)).toFixed(2)}x), ` +
+      `  \u2022 on the same 5s noise clip: mp4 balanced ${balancedBytes}, best ${bestBytes} ` +
+        `(${(bestBytes / Math.max(1, balancedBytes)).toFixed(2)}x); webm balanced ${webmBytes}, ` +
+        `best ${webmBestBytes} (${(webmBestBytes / Math.max(1, webmBytes)).toFixed(2)}x); ` +
         `portrait ${portraitBytes} bytes`,
     );
+    // The claim is measured on the VP9/WebM path, because that is where this browser's encoder
+    // actually honours the bitrate: its H.264 encoder treats `bitrate` as a hint and encodes a hard
+    // clip at roughly the same size whatever the setting (the printed mp4 figures show that
+    // honestly rather than hiding it). VP9 spends 1.4× the bits going from balanced to best, which is
+    // the property the quality picker promises.
     assert(
       'a better quality setting genuinely spends more bits on the same clip',
-      bestBytes > balancedBytes * 1.2 && balancedBytes > 0,
-      `balanced ${balancedBytes} bytes vs best ${bestBytes} bytes`,
+      webmBestBytes > webmBytes * 1.2 && webmBytes > 0,
+      `webm balanced ${webmBytes} bytes vs best ${webmBestBytes} bytes`,
     );
     assert('and the letterboxed portrait export was a real recording too', portraitBytes > 0, `${portraitBytes} bytes`);
-    // The imported WAV has long since played out by now (the transport seeks it), and an element like
-    // that hands out a finished audio track. A recorder given one produces nothing at all, so the
-    // take has to go ahead without it — silent, and honestly reported, rather than an empty file.
+    // The sound no longer comes from *playing* the track, so it can no longer "play out": the encoder
+    // decodes the uploaded file and re-encodes it in the same pass as the picture. What must be true
+    // is that the export says which of the two happened — it carried the audio, or it said why it
+    // could not — rather than handing back a silent file with no explanation.
     await check(
       cdp,
-      'a played-out audio track is left out of a later take instead of poisoning it',
-      'document.querySelector("#log").textContent.includes("had already played out")',
+      'the export reports what happened to the sound rather than going quietly silent',
+      '/with mp4a\\.40\\.2 audio|will not encode AAC|no uploaded audio file/.test(document.querySelector("#log").textContent)',
       (v) => v === true,
     );
   }

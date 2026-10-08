@@ -17,8 +17,9 @@ so this folder is self-contained.
 > and sparse per-block overrides. Alignment is validated end-to-end against the real `spidy.srt` +
 > `veed_master_v3…json` pair (71 blocks, 135 anchors, 0 document errors, 0 overlaps); the renderer is
 > validated by comparing its painted positions against a transcription of v10's own render loop; and
-> the editor UI is exercised in real headless Chrome (`npm run ui`, 62 checks). Timeline
-> and export are the next phases. See
+> the editor UI is exercised in real headless Chrome (`npm run ui`). Since Phase 6 it also has a
+> **real, offline export** — frames are rendered and encoded with WebCodecs into an `.mp4`/`.webm`,
+> not recorded off the screen — a **CapCut-style timeline**, and per-source audio switching. See
 > [`IMPLEMENTATION-PLAN.md`](IMPLEMENTATION-PLAN.md) §20.
 
 ## What works today
@@ -44,7 +45,10 @@ so this folder is self-contained.
 | Caption text editing — re-type a line, or fix a single word | ✅ `src/model/edit.js`, `src/main.js` |
 | Split a long caption in two / join it back (the line breaks) | ✅ `src/model/edit.js`, `src/main.js` |
 | Transcribe on the sibling studio (upload → poll → import) | ✅ `src/io/audio-studio-client.js` |
-| Timeline / export | ⏳ next phases |
+| Real offline export — WebCodecs + vendored muxer, `.mp4` / `.webm` | ✅ `src/io/webcodecs-export.js` |
+| CapCut-style timeline (ruler, clips, playhead, scrub, zoom) | ✅ `src/editor/timeline.js` |
+| Per-source audio — the picture's own track and the uploaded master track, each with its own switch | ✅ `src/editor/preview.js` |
+| Caption files — `.caproj`, Veed JSON, SRT, VTT | ✅ `src/io/download.js` |
 
 ## The renderer
 

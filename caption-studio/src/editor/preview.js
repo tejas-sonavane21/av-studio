@@ -40,10 +40,15 @@ export function createPreview({ canvas, video = null, audio = null, container = 
   // Whether the *video layer* is shown. Deliberately unrelated to caption drawing: hiding the
   // video must not stop the caption preview (that would make "show video" a rendering switch).
   let videoVisible = true;
-  // Whether the *sound* is off, and how loud it is. Likewise independent of `videoVisible`: mute
-  // must not stop the picture, and hiding the video must not mute the track.
-  let muted = false;
-  let volume = 1;
+  // The sound. Three orthogonal switches, because "mute" alone could never say *what* to mute:
+  // a master mute and volume that apply to everything, and a per-source enable for each of the two
+  // things that can make noise — the picture's own track and the uploaded playback file. All of them
+  // are independent of `videoVisible`: muting must not stop the picture, and hiding the video must
+  // not mute the track.
+  let muted = false; // master mute — silences both sources at once
+  let volume = 1; // master volume
+  let videoAudioEnabled = true; // the picture's own soundtrack
+  let playbackAudioEnabled = true; // the uploaded audio file
 
   /** Has this element a source and enough metadata loaded that it can be read or seeked? */
   const isReady = (m) => Boolean(m) && Number.isFinite(m.currentTime) && m.readyState > 0;
@@ -62,18 +67,20 @@ export function createPreview({ canvas, video = null, audio = null, container = 
   }
 
   /**
-   * Route the sound, in one place, from one rule: **an imported audio file owns the sound**, so the
-   * video is force-muted while it is loaded — otherwise the video's own track and the imported one
-   * would play over each other. With no audio element the video is heard, which is what "the
-   * preview plays with no sound" used to mean.
+   * Route the sound, in one place, from one rule: **each source is heard unless it is switched off**.
+   *
+   * The old rule force-muted the picture the moment a separate audio file was loaded, which avoided
+   * two tracks playing over each other but took the choice away. Now the choice is explicit: the
+   * caller turns the picture's own sound off when it hands over a master track (that is still the
+   * sensible default), and can turn it back on. The master mute/volume sit above both.
    */
   function applyAudioRouting() {
     if (video) {
-      video.muted = audio ? true : muted;
+      video.muted = muted || !videoAudioEnabled;
       video.volume = volume;
     }
     if (audio) {
-      audio.muted = muted;
+      audio.muted = muted || !playbackAudioEnabled;
       audio.volume = volume;
     }
   }
@@ -266,17 +273,32 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     return video;
   }
 
-  /** Swap in the audio track. Routing is re-applied, so adding one force-mutes the video. */
+  /** Swap in the audio track (or `null` to remove it). Routing is re-applied to the new element. */
   function setAudio(element) {
     audio = element;
     applyAudioRouting();
     return audio;
   }
 
+  /** Master mute — silences both sources without changing either per-source switch. */
   function setMuted(next) {
     muted = !!next;
     applyAudioRouting();
     return muted;
+  }
+
+  /** The picture's own soundtrack on/off. */
+  function setVideoAudioEnabled(next) {
+    videoAudioEnabled = !!next;
+    applyAudioRouting();
+    return videoAudioEnabled;
+  }
+
+  /** The uploaded playback file on/off. */
+  function setPlaybackAudioEnabled(next) {
+    playbackAudioEnabled = !!next;
+    applyAudioRouting();
+    return playbackAudioEnabled;
   }
 
   function setVolume(next) {
@@ -316,6 +338,8 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     setAudio,
     setMuted,
     setVolume,
+    setVideoAudioEnabled,
+    setPlaybackAudioEnabled,
     start,
     pause,
     toggle,
@@ -340,6 +364,12 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     },
     get volume() {
       return volume;
+    },
+    get videoAudioEnabled() {
+      return videoAudioEnabled;
+    },
+    get playbackAudioEnabled() {
+      return playbackAudioEnabled;
     },
     get options() {
       return { ...options };
