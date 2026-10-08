@@ -783,6 +783,101 @@ async function main() {
     (v) => v === '#22c55e',
   );
 
+  console.log('\n■ frame ratio');
+  const setAspect = (id) =>
+    `(()=>{const s=document.querySelector('#aspect-select');s.value='${id}';s.dispatchEvent(new Event('change'));})()`;
+  await check(
+    cdp,
+    'the frame-ratio picker is built from the presets, plus a way to follow the picture',
+    '[...document.querySelectorAll("#aspect-select option")].map((o)=>o.value).join("|")',
+    (v) => v === 'source|16:9|9:16|4:5|1:1|4:3|3:4|21:9',
+  );
+  await check(
+    cdp,
+    'and it reads back the ratio the document is already on',
+    'document.querySelector("#aspect-select").value',
+    (v) => v === '16:9',
+    '16:9 — the demo is 1280x720',
+  );
+  await evaluate(cdp, setAspect('9:16'));
+  await waitFor(cdp, 'document.querySelector("#aspect-select").value', (v) => v === '9:16', {
+    describe: 'the 9:16 ratio to be applied',
+  });
+  await check(
+    cdp,
+    'choosing 9:16 makes the caption canvas portrait',
+    '(()=>{const c=document.querySelector("#preview-canvas");return Math.round((c.width/c.height)*1000)/1000})()',
+    (v) => Math.abs(v - 0.5625) < 0.02,
+    '0.5625',
+  );
+  await check(
+    cdp,
+    'and the stage takes the project’s shape, so the video layer stays in register',
+    '(()=>{const s=document.querySelector("#stage");return Math.round((s.clientWidth/s.clientHeight)*1000)/1000})()',
+    (v) => Math.abs(v - 0.5625) < 0.02,
+    '0.5625',
+  );
+  await check(
+    cdp,
+    'and the log says what the frame became',
+    'document.querySelector("#log").textContent.includes("frame ratio: 9:16")',
+    (v) => v === true,
+  );
+
+  console.log('\n■ full-screen preview');
+  const fsButton = await evaluate(
+    cdp,
+    // scrolled into view first: the click below is delivered at viewport coordinates, so a button
+    // below the fold would receive it somewhere else entirely
+    '(()=>{const b=document.querySelector("#fullscreen-btn");b.scrollIntoView({block:"center"});const r=b.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()',
+  );
+  // A real input event, not a scripted `.click()`: `requestFullscreen` needs a user activation.
+  await mouse('mousePressed', fsButton.x, fsButton.y);
+  await mouse('mouseReleased', fsButton.x, fsButton.y);
+  await delay(500);
+  const fsElement = await evaluate(cdp, 'document.fullscreenElement ? document.fullscreenElement.id : ""');
+  assert(
+    'full screen puts the stage (not the whole page) on the screen',
+    fsElement === 'stage',
+    `fullscreenElement = ${JSON.stringify(fsElement)}`,
+  );
+  if (fsElement === 'stage') {
+    // The browser pins a full-screen element to 100% of the display, so the stage is the black
+    // surround; what has to be the project's shape is the *frame* inside it — the caption canvas —
+    // and the video has to sit on exactly that box or the captions drift off the picture.
+    await check(
+      cdp,
+      'the full-screen frame keeps the project’s ratio, not the monitor’s',
+      '(()=>{const c=document.querySelector("#preview-canvas");return Math.round((c.clientWidth/c.clientHeight)*1000)/1000})()',
+      (v) => Math.abs(v - 0.5625) < 0.03,
+      '0.5625',
+    );
+    await check(
+      cdp,
+      'and the video layer sits on exactly that frame',
+      `(()=>{const c=document.querySelector('#preview-canvas').getBoundingClientRect();const v=document.querySelector('#preview-video').getBoundingClientRect();return Math.max(Math.abs(c.left-v.left),Math.abs(c.top-v.top),Math.abs(c.width-v.width),Math.abs(c.height-v.height))})()`,
+      (v) => v <= 1,
+      'no more than a rounding pixel apart on any edge',
+    );
+    // The button lives outside the stage, so it is covered while the preview is full-screen — Escape
+    // (or the API, as here) is the way out, and the log has to say that it happened.
+    await evaluate(cdp, 'document.exitFullscreen()');
+    await delay(400);
+    await check(cdp, 'the preview does not get stuck on the screen', 'document.fullscreenElement === null', (v) => v === true);
+    await check(
+      cdp,
+      'and the way out is recorded',
+      'document.querySelector("#log").textContent.includes("full screen preview off")',
+      (v) => v === true,
+    );
+  } else {
+    console.log('  \u2022 skipped the full-screen geometry \u2014 this Chrome did not grant full screen');
+  }
+  await evaluate(cdp, setAspect('16:9'));
+  await waitFor(cdp, 'document.querySelector("#aspect-select").value', (v) => v === '16:9', {
+    describe: 'the frame to be put back to 16:9 for the sections after this one',
+  });
+
   console.log('\n■ audio import');
   // A synthetic, self-contained WAV: the smoke test must not depend on the (gitignored) reference
   // workspace, and a real file is the only way to exercise the object-URL → <audio> path end to end.
@@ -1378,6 +1473,9 @@ async function main() {
       const dt = new DataTransfer();
       dt.items.add(new File([blob], 'smoke.webm', { type: 'video/webm' }));
       const input = document.querySelector('#video-in');
+      // Kept on the page so it can be handed to the input a second time, which is how "a picture
+      // arrives *after* the frame ratio was chosen" gets tested without a second recording.
+      window.__smokeVideo = dt.files[0];
       input.files = dt.files; input.dispatchEvent(new Event('change'));
       return blob.size;
     })()`,
@@ -1397,6 +1495,52 @@ async function main() {
       'document.querySelector("#download-video").disabled',
       (v) => v === false,
     );
+
+    const rects = await evaluate(
+      cdp,
+      `(()=>{const c=document.querySelector('#preview-canvas').getBoundingClientRect();const v=document.querySelector('#preview-video').getBoundingClientRect();return {canvas:[c.left,c.top,c.width,c.height],video:[v.left,v.top,v.width,v.height]}})()`,
+    );
+    const drift = Math.max(...rects.canvas.map((x, i) => Math.abs(x - rects.video[i])));
+    assert(
+      'a real picture lands on the caption frame, so captions cannot drift off it',
+      drift <= 1,
+      `worst edge ${drift}px out — ${JSON.stringify(rects)}`,
+    );
+
+    // The frame-ratio lock. A picture normally sets the frame — but not over a ratio somebody has
+    // chosen, or the whole point of picking 9:16 would be undone by the clip loaded next.
+    await evaluate(cdp, setAspect('9:16'));
+    await check(
+      cdp,
+      'an explicitly chosen ratio turns the frame portrait even over a landscape picture',
+      '(()=>{const c=document.querySelector("#preview-canvas");return c.height>c.width})()',
+      (v) => v === true,
+    );
+    await evaluate(
+      cdp,
+      `(()=>{const dt=new DataTransfer();dt.items.add(window.__smokeVideo);const i=document.querySelector('#video-in');i.files=dt.files;i.dispatchEvent(new Event('change'));})()`,
+    );
+    await delay(500);
+    await check(
+      cdp,
+      'and a picture loaded afterwards does not undo it',
+      '(()=>{const c=document.querySelector("#preview-canvas");return c.height>c.width})()',
+      (v) => v === true,
+    );
+    await evaluate(cdp, setAspect('source'));
+    await check(
+      cdp,
+      '“source” hands the frame back to the picture’s own shape',
+      '(()=>{const c=document.querySelector("#preview-canvas");return c.width>c.height})()',
+      (v) => v === true,
+    );
+    await check(
+      cdp,
+      'and says so in the log',
+      'document.querySelector("#log").textContent.includes("frame ratio: the picture")',
+      (v) => v === true,
+    );
+
     await evaluate(cdp, 'document.querySelector("#download-video").click()');
     await waitFor(cdp, 'document.querySelector("#export-status").textContent', (v) => v === 'done' || v === 'failed', {
       describe: 'the burn-in export to finish',

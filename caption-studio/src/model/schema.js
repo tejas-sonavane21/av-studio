@@ -118,6 +118,76 @@ export function createDefaultStyle() {
   };
 }
 
+/**
+ * The frame ratios a caption project can be cut for — CapCut's vocabulary.
+ *
+ * These are **project settings**, not preview cosmetics: the document's canvas size is what the
+ * preview is fitted to, what the layout measures against (font size is a fraction of *width* by
+ * default) and what the burn-in export records at. Choosing 9:16 really does give a 9:16 file.
+ *
+ * The numbers are the delivery sizes each platform wants, and they are *targets*: `canvasForPreset`
+ * scales them down to a loaded picture's own long edge, because inventing pixels the source does not
+ * have is the one thing an export must never do.
+ */
+export const CANVAS_PRESETS = Object.freeze({
+  '16:9': { width: 1920, height: 1080, label: '16:9 — YouTube, landscape' },
+  '9:16': { width: 1080, height: 1920, label: '9:16 — Shorts, Reels, TikTok' },
+  '4:5': { width: 1080, height: 1350, label: '4:5 — Instagram feed' },
+  '1:1': { width: 1080, height: 1080, label: '1:1 — square' },
+  '4:3': { width: 1440, height: 1080, label: '4:3 — classic' },
+  '3:4': { width: 1080, height: 1440, label: '3:4 — portrait' },
+  '21:9': { width: 2520, height: 1080, label: '21:9 — cinemascope' },
+});
+
+/** Video encoders want even dimensions; an odd one is a codec failure waiting to happen. */
+const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+
+/**
+ * The canvas a preset resolves to, given the picture it will be laid over.
+ *
+ * The preset's long edge is the target, but it is capped at the source's own long edge: a 1280×720
+ * recording asked for 9:16 becomes 720×1280, not 1080×1920. The stored resolution then always
+ * reflects real detail, and turning a landscape clip into a vertical one costs no upscaling.
+ *
+ * @param {string} id                              a `CANVAS_PRESETS` key
+ * @param {object} [opts]
+ * @param {{width:number,height:number}|null} [opts.source]  the loaded picture, if any
+ * @param {number} [opts.fps=30]
+ * @returns {{width:number,height:number,fps:number}|null}   null for an unknown preset id
+ */
+export function canvasForPreset(id, { source = null, fps = 30 } = {}) {
+  const preset = CANVAS_PRESETS[id];
+  if (!preset) return null;
+  const aspect = preset.width / preset.height;
+  const targetLong = Math.max(preset.width, preset.height);
+  const sourceLong = Math.max(Number(source?.width) || 0, Number(source?.height) || 0);
+  const scale = sourceLong > 0 ? Math.min(1, sourceLong / targetLong) : 1;
+  const long = targetLong * scale;
+  return {
+    width: even(aspect >= 1 ? long : long * aspect),
+    height: even(aspect >= 1 ? long / aspect : long),
+    fps: Number(fps) > 0 ? Number(fps) : 30,
+  };
+}
+
+/**
+ * Which preset a canvas is (approximately) on, for reading the picker back out of the document.
+ *
+ * Tolerance matters because the presets' own pixel sizes are rounded (21:9 is 2520×1080, a ratio of
+ * 2.3333… but not exactly 21/9) and because a loaded video's size is whatever the camera wrote. A
+ * canvas matching nothing — a source clip's own odd shape — reports `'source'`, which is a real
+ * choice in the picker ("keep the picture's own ratio") rather than a failure.
+ */
+export function presetIdFor(canvas, tolerance = 0.02) {
+  const aspect = (Number(canvas?.width) || 0) / (Number(canvas?.height) || 0);
+  if (!(aspect > 0)) return 'source';
+  for (const [id, preset] of Object.entries(CANVAS_PRESETS)) {
+    const target = preset.width / preset.height;
+    if (Math.abs(target - aspect) <= tolerance * target) return id;
+  }
+  return 'source';
+}
+
 export function createWord(text, start = 0, end = 0, extra = {}) {
   return {
     id: newWordId(),
