@@ -8,9 +8,10 @@ node_modules/
 referece_material/
 **/referece_material/
 
-# A downloaded font pack (21 styles of one display face). Local research, and the
-# one face caption-studio needs is copied into src/fonts/packaged/, which has its own
-# .gitignore and its own note about licensing.
+# A downloaded font pack (21 styles). Local research material — it stays on disk, not in history.
+# The one face whose licence permits redistribution is committed from src/fonts/packaged/, which has
+# its own .gitignore and its own note about licensing; the pack itself, and its other 20 styles, do
+# not belong in a commit.
 hibernal_sentry/
 
 # ---- Research notes that must not be published ----
@@ -27,6 +28,11 @@ VEED-Subtitle-Replication-Complete-Understanding.md
 # one from here (or from GEMINI_API_KEY / OPENROUTER_API_KEY in the env).
 gemini_api_key.txt
 *.api_key
+
+# ---- Local agent/tooling state ----
+# Ignored locally via .git/info/exclude too, but that file is not cloned — so the rule lives here as
+# well, or a fresh clone is one `git add -A` away from committing session state.
+/.freebuff/
 
 # ---- Machine-specific / OS junk ----
 *.lnk

@@ -4,12 +4,33 @@ The loader tries this directory **first**, before Google Fonts and before the OS
 in here is what makes a family render identically with no network at all (`fonts/loader.js`).
 Filename → family mappings live in `../registry.js`.
 
-**Nothing in this directory is version controlled.** A face here is either a commercial font whose
-licence covers CapCut's use rather than ours, or a download the user already has on disk. Git is
-told to ignore everything but this README.
-
 A face here may be `.woff2` **or** `.ttf`/`.otf`: the loader hands the raw bytes to `FontFace`,
 which sniffs the format, so no conversion step is needed.
+
+## What is in version control, and what is not
+
+Two display faces are wired up, and they are not equally distributable — which is the whole reason
+this directory needs its own note:
+
+| File | Committed? | Why |
+|---|---|---|
+| `HibernalSentry.ttf` | **yes**, with `HibernalSentry.LICENSE.txt` | Iconian Fonts: *"may be freely distributed and is free for all non-commercial uses"* |
+| `ZyenaHibernal.ttf` | **no** | licensed to CapCut, not to us — see below |
+| `Inter-900.woff2` | **no** | a download you already have; drop it in for offline parity |
+
+Everything else in this directory is ignored by `.gitignore` (which allows only the two files above,
+the README and itself). If a family is not yours to redistribute, nothing needs doing — that is
+already the default.
+
+## `HibernalSentry.ttf` — Iconian Fonts' "Hibernal Sentry"
+
+* Iconian Fonts (Daniel Zadorozny), 2024, version 1.0.
+* Source: <https://www.dafont.com/hibernal-sentry.font> (the download contains 21 styles; only the
+  Regular face is wired up here).
+* Licence: **free for all non-commercial uses, and redistribution is explicitly permitted** — the
+  licence text travels with the binary as `HibernalSentry.LICENSE.txt`. **Commercial use needs a
+  licence** from <http://iconian.com/commercial.html>.
+* Unrelated to CapCut's Hibernal despite the shared word — this one is a techno/sci-fi display face.
 
 ## `ZyenaHibernal.ttf` — the face CapCut calls "Hibernal"
 
@@ -33,14 +54,6 @@ Open the project in CapCut and set the caption font to **Hibernal** once if the 
 that is what makes CapCut download it. The directory name is the `fontId` and the inner hash is the
 resource version, so grep for the name rather than hard-coding either.
 
-## `HibernalSentry.ttf` — Iconian Fonts' "Hibernal Sentry"
-
-* Iconian Fonts (Daniel Zadorozny), 2024. Free for **non-commercial** use; commercial use needs a
-  licence from `iconian.com/commercial.html`.
-* Source: <https://www.dafont.com/hibernal-sentry.font> (the download contains 21 styles; only the
-  Regular face is wired up here).
-* Unrelated to CapCut's Hibernal despite the shared word — this one is a techno/sci-fi display face.
-
 ## Adding another face
 
 1. Drop the file in here.
@@ -48,4 +61,5 @@ resource version, so grep for the name rather than hard-coding either.
    a `weights` list containing that weight, and a `stack` that starts with the family name and ends
    in a generic family (`cursive` or `sans-serif`).
 3. If the family is not yours to redistribute, confirm it is ignored by git — everything here but
-   this README already is.
+   the files named above already is. If it *is* yours to redistribute, add a `!<filename>` line to
+   `.gitignore` and commit the licence text next to the binary.

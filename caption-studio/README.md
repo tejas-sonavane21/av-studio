@@ -405,8 +405,13 @@ src/fonts/packaged/HibernalSentry.ttf    → "Hibernal Sentry"  — Iconian Font
 They are unrelated fonts, and worth being clear about because the name invites the mistake: CapCut's
 "Hibernal" is **Zyena Hibernal** (© Tianjin ZHUOMAN Technology Co., Ltd, CapCut `fontId`
 7044916245971341825), a marker script; Iconian's "Hibernal Sentry" is an angular sci-fi display face.
-Neither binary is in version control — `src/fonts/packaged/README.md` says why, and gives the `find`
-command that pulls CapCut's copy out of its own local cache instead.
+
+Only one of the two can ship, and the difference is the licence, so it is stated plainly:
+**Hibernal Sentry is committed** — Iconian permits redistribution, free for non-commercial use, and
+the licence text travels with the binary as `HibernalSentry.LICENSE.txt`. **Zyena Hibernal is not** —
+it is licensed to CapCut, so the editor renders it here and git is told to ignore it
+(`src/fonts/packaged/README.md` says so, and gives the `find` command that pulls CapCut's own copy
+out of its local cache instead).
 
 > Node 24 note: passing a bare directory (`node --test tests/unit`) is treated as a module and fails;
 > pass a glob (as the `npm test` script does).

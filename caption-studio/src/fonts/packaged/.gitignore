@@ -1,6 +1,10 @@
-# Font binaries are not version controlled. See README.md in this directory:
-# they are either licensed to someone else (CapCut's Hibernal / Zyena Hibernal) or
-# a download the user already has on disk.
+# Font binaries are *mostly* not version controlled. See README.md in this directory.
+#
+# Everything here is ignored except the README, this file, and the one face whose licence
+# explicitly permits redistribution — Iconian's "Hibernal Sentry", committed with its licence
+# text beside it. CapCut's Zyena Hibernal is licensed to CapCut, so it stays out of history.
 *
 !README.md
 !.gitignore
+!HibernalSentry.ttf
+!HibernalSentry.LICENSE.txt
