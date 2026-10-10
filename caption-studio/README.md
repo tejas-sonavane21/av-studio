@@ -23,8 +23,9 @@ so this folder is self-contained.
 > resolution, frame ratio, frame rate, quality and both bitrates, with a resolution preset that tunes
 > the rest and any control overridable afterwards), and a **CapCut-style timeline that cuts the video
 > and the audio** — trim a clip's edges, split at the playhead, cut left / cut right, delete — with
-> the cuts honoured by both the preview and the exported file. See
-> [`IMPLEMENTATION-PLAN.md`](IMPLEMENTATION-PLAN.md) §20.
+> the cuts honoured by both the preview and the exported file. The preview *plays* the cut too: it
+> jumps a removed region, and stops at the last frame the programme kept instead of running on into
+> what was dropped. See [`IMPLEMENTATION-PLAN.md`](IMPLEMENTATION-PLAN.md) §20.
 
 ## What works today
 
@@ -52,8 +53,10 @@ so this folder is self-contained.
 | Real offline export — WebCodecs + vendored muxer, `.mp4` / `.webm`, decodes from its own off-screen copy so the preview is never disturbed | ✅ `src/io/webcodecs-export.js` |
 | Audio that survives the bitrate — the encoder's accepted rate is searched for, not assumed | ✅ `resolveAudioBitrate` in `src/io/webcodecs-export.js` |
 | Professional export window — resolution, ratio, fps, quality, bitrates, preset auto-tune | ✅ `src/io/export-settings.js`, `src/editor/export-dialog.js` |
+| An export you can watch and a state you can read — visible track, percentage, and the saved file named | ✅ `describeExportResult` in `src/io/export-settings.js` |
 | CapCut-style timeline — caption, video and audio lanes on one source clock | ✅ `src/editor/timeline.js` |
 | Cuts — trim edges, split, cut left / cut right, delete, honoured by the preview *and* the export | ✅ `src/model/timeline.js`, `src/editor/preview.js` |
+| Playback that respects the cut — a gap is jumped, and the end of the kept material ends the programme | ✅ `playbackTarget` in `src/model/timeline.js` |
 | Per-source audio — the picture's own track and the uploaded master track, each with its own switch | ✅ `src/editor/preview.js` |
 | Tabbed workspace — Sources / Transcribe / Export share one column instead of three narrow ones | ✅ `index.html`, `src/main.js` |
 | Caption files — `.caproj`, Veed JSON, SRT, VTT | ✅ `src/io/download.js` |

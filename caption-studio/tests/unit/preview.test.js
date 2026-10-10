@@ -10,6 +10,7 @@ import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createDemoDocument } from '../../src/model/demo.js';
+import { ensureTimeline, setTrackRanges } from '../../src/model/timeline.js';
 import { createPreview } from '../../src/editor/preview.js';
 import { createFakeCanvas } from '../helpers/fake-canvas.js';
 
@@ -338,6 +339,100 @@ test('dispose pauses the media and is safe to call twice', async () => {
   assert.equal(video.pauseCalls, 1);
   preview.dispose();
   assert.equal(preview.playing, false);
+});
+
+/**
+ * Run the render loop for a bounded number of frames.
+ *
+ * The module-level stub deliberately parks the loop, which is what makes the other tests
+ * deterministic. This one needs the loop to actually *run*, so it takes the frames off `start()` and
+ * runs them itself — and it queues for a reason: `start()` schedules the first pass *before* it hands
+ * the media its `play()`, so a frame that ran inside that call would see a paused element and
+ * correctly do nothing. Running the queued frames after `start()` has returned makes every pass one
+ * where the transport is genuinely playing, which is the state under test.
+ */
+function runLoop(preview, frames = 1) {
+  const parked = globalThis.requestAnimationFrame;
+  const queued = [];
+  globalThis.requestAnimationFrame = (callback) => queued.push(callback);
+  try {
+    preview.start();
+    for (let i = 0; i < frames && queued.length; i++) queued.shift()();
+  } finally {
+    globalThis.requestAnimationFrame = parked;
+  }
+}
+
+/** A document that keeps only `ranges` of a `duration`-second picture. */
+async function mountWithCut(video, duration, ranges) {
+  const mounted = mount({ video });
+  const doc = createDemoDocument();
+  await mounted.preview.setDocument(doc);
+  ensureTimeline(doc, { video: duration, audio: 0 });
+  setTrackRanges(doc, 'video', ranges);
+  return { ...mounted, doc };
+}
+
+// The bug this exists for: a media element plays its own whole file and knows nothing about the cut,
+// so "Cut right" at 2 s of a 5 s clip left the preview running happily through the 3 s that had just
+// been dropped. The element cannot notice that; only the preview can.
+test('playback stops at the last frame the cut kept instead of running into material it dropped', async () => {
+  const video = fakeVideo({ duration: 5, currentTime: 2.5 });
+  const { preview } = await mountWithCut(video, 5, [{ id: 'keep', srcIn: 0, srcOut: 2 }]);
+
+  runLoop(preview);
+
+  assert.equal(preview.playing, false, 'the transport stopped rather than sailing past the cut');
+  assert.equal(video.paused, true);
+  assert.ok(video.pauseCalls >= 1);
+});
+
+test('playback jumps a region the cut removed rather than playing it', async () => {
+  const video = fakeVideo({ duration: 5, currentTime: 1.4 });
+  const { preview } = await mountWithCut(video, 5, [
+    { id: 'a', srcIn: 0, srcOut: 1 },
+    { id: 'b', srcIn: 3, srcOut: 5 },
+  ]);
+
+  runLoop(preview);
+
+  assert.equal(video.currentTime, 3, 'the removed second was skipped, not shown');
+  assert.equal(preview.playing, true, 'and the programme carries on');
+});
+
+test('a frame that is still kept is left alone — the decoder is not seeked every frame', async () => {
+  const video = fakeVideo({ duration: 5, currentTime: 1.5 });
+  const { preview } = await mountWithCut(video, 5, [
+    { id: 'a', srcIn: 0, srcOut: 2 },
+    { id: 'b', srcIn: 3, srcOut: 5 },
+  ]);
+
+  runLoop(preview);
+
+  assert.equal(video.currentTime, 1.5);
+  assert.equal(preview.playing, true);
+});
+
+// Seeking is the other half: parking the playhead on a frame the file does not contain would show a
+// caption over a picture that is not there. Forward to the next kept frame — or back onto the last one
+// when the picture has run out, rather than resuming inside the seconds that were cut.
+test('a seek into removed material lands on a frame that still exists', async () => {
+  const video = fakeVideo({ duration: 5, currentTime: 0 });
+  const { preview } = await mountWithCut(video, 5, [
+    { id: 'a', srcIn: 0, srcOut: 1 },
+    { id: 'b', srcIn: 3, srcOut: 5 },
+  ]);
+
+  preview.seek(1.5);
+  assert.equal(video.currentTime, 3, 'forward, into the gap');
+
+  const tail = fakeVideo({ duration: 5, currentTime: 0 });
+  const trimmed = await mountWithCut(tail, 5, [{ id: 'keep', srcIn: 0, srcOut: 2 }]);
+  trimmed.preview.seek(4);
+  assert.ok(
+    tail.currentTime < 2 && tail.currentTime > 1.9,
+    `a seek past the cut parks on the last kept frame, got ${tail.currentTime}`,
+  );
 });
 
 test('an empty document does not throw', async () => {

@@ -48,11 +48,11 @@ import {
   droppedCaptionIds,
   ensureTimeline,
   fullRanges,
-  outputDuration,
   removeAt,
   resetTrack,
   setTrackRanges,
   splitAt,
+  timelineSummary,
   trackRanges,
   trimEdge,
 } from './model/timeline.js';
@@ -532,6 +532,10 @@ function exportSize() {
  * `io/webcodecs-export.js`. It is handed a **URL**, not the element on screen, so the exporter
  * decodes from its own off-screen copy — the preview keeps playing (or stays parked) and is never
  * seeked out from under the user, which is what made the old burn-in look like a recording.
+ *
+ * **It resolves with the file it wrote** (`{name, bytes, seconds, frames}`) and rethrows a failure, so
+ * the export window can end in a state a person can read — "Saved x.mp4 — 9.2 MB" or the reason it
+ * could not — instead of leaving its last progress message on screen forever.
  */
 async function runExport(settings) {
   const doc = preview?.document;
@@ -594,11 +598,22 @@ async function runExport(settings) {
     setExportNote(
       `saved ${name} — ${mb} MB, ${result.frames} frames at ${mbps} Mbps${result.audio ? '' : ' (no audio track)'}`,
     );
+    return {
+      name,
+      bytes: result.blob.size,
+      seconds: result.seconds,
+      frames: result.frames,
+      audio: Boolean(result.audio),
+      audioNote: result.audioNote ?? '',
+      audioSkipped: result.audioSkipped ?? '',
+    };
   } catch (err) {
     $('#export-bar').classList.add('failed');
     $('#export-status').textContent = 'failed';
     log(`ERROR export: ${err.message}`);
     setExportNote(err.message);
+    // Re-thrown on purpose: the caller opening the window is the one that has to say so on screen.
+    throw err;
   } finally {
     exporting = false;
     $('#export-bar').classList.remove('busy');
@@ -812,14 +827,10 @@ function updateTimelineStatus() {
     tag.textContent = '—';
     return;
   }
-  const duration = sourceDuration();
-  const out = Math.max(
-    outputDuration(trackRanges(doc, 'video', duration)),
-    outputDuration(trackRanges(doc, 'audio', duration)),
-  );
-  const trimmed = Math.abs(out - duration) > 1e-3;
+  // The arithmetic lives in the model (and is unit-tested there); this is only the wording.
+  const { outputSeconds, sourceSeconds, trimmed } = timelineSummary(doc, sourceDuration());
   tag.textContent = trimmed
-    ? `${count} caption${count === 1 ? '' : 's'} · ${out.toFixed(1)}s of ${duration.toFixed(1)}s after the cuts`
+    ? `${count} caption${count === 1 ? '' : 's'} · ${outputSeconds.toFixed(1)}s of ${sourceSeconds.toFixed(1)}s after the cuts`
     : `${count} caption${count === 1 ? '' : 's'}`;
 }
 

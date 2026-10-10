@@ -153,3 +153,30 @@ export function describeSettings(settings, { aspect = 16 / 9, docSize = null } =
   const pixels = `${encoder.size.width}×${encoder.size.height}`;
   return `${encoder.format.toUpperCase()} · ${pixels} · ${encoder.fps} fps · ${settings.quality} · ${(encoder.videoBitsPerSecond / MBPS).toFixed(1)} Mbps video · ${Math.round(encoder.audioBitsPerSecond / 1000)} kbps audio`;
 }
+
+/**
+ * What the window says once the export is over — the line that used to be missing entirely.
+ *
+ * The export window is not a form that closes itself; it stays open over a job that takes a while, and
+ * a job that takes a while has to end *visibly*. The last thing it used to show was the last progress
+ * message ("muxing the file"), which is true of a finished export and of one that died between two
+ * frames — so there was no way to tell them apart. This turns the result into the two sentences that
+ * answer it:
+ *
+ * * `headline` — the file exists, and here is its name and its size;
+ * * `caveat` — the one compromise the encoder had to make, if any (the sound rate it could not honour).
+ *
+ * Both are plain strings, so the dialog is only wiring and this is unit-tested rather than read off a
+ * screenshot. Pure.
+ */
+export function describeExportResult(result = {}) {
+  const name = String(result?.name || 'the video');
+  const mb = (Number(result?.bytes) || 0) / MBPS;
+  const parts = [`${mb.toFixed(1)} MB`];
+  const seconds = Number(result?.seconds);
+  if (Number.isFinite(seconds)) parts.push(`${seconds.toFixed(1)}s`);
+  const frames = Number(result?.frames);
+  if (Number.isFinite(frames) && frames > 0) parts.push(`${Math.round(frames)} frames`);
+  const caveat = String(result?.audioSkipped || result?.audioNote || '');
+  return { headline: `Saved ${name} — ${parts.join(' · ')}`, caveat };
+}
