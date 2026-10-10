@@ -17,9 +17,13 @@ so this folder is self-contained.
 > and sparse per-block overrides. Alignment is validated end-to-end against the real `spidy.srt` +
 > `veed_master_v3…json` pair (71 blocks, 135 anchors, 0 document errors, 0 overlaps); the renderer is
 > validated by comparing its painted positions against a transcription of v10's own render loop; and
-> the editor UI is exercised in real headless Chrome (`npm run ui`). Since Phase 6 it also has a
+> the editor UI is exercised in real headless Chrome (`npm run ui`). Since Phase 7 it also has a
 > **real, offline export** — frames are rendered and encoded with WebCodecs into an `.mp4`/`.webm`,
-> not recorded off the screen — a **CapCut-style timeline**, and per-source audio switching. See
+> not recorded off the screen — reached through a **professional export window** (container,
+> resolution, frame ratio, frame rate, quality and both bitrates, with a resolution preset that tunes
+> the rest and any control overridable afterwards), and a **CapCut-style timeline that cuts the video
+> and the audio** — trim a clip's edges, split at the playhead, cut left / cut right, delete — with
+> the cuts honoured by both the preview and the exported file. See
 > [`IMPLEMENTATION-PLAN.md`](IMPLEMENTATION-PLAN.md) §20.
 
 ## What works today
@@ -45,9 +49,13 @@ so this folder is self-contained.
 | Caption text editing — re-type a line, or fix a single word | ✅ `src/model/edit.js`, `src/main.js` |
 | Split a long caption in two / join it back (the line breaks) | ✅ `src/model/edit.js`, `src/main.js` |
 | Transcribe on the sibling studio (upload → poll → import) | ✅ `src/io/audio-studio-client.js` |
-| Real offline export — WebCodecs + vendored muxer, `.mp4` / `.webm` | ✅ `src/io/webcodecs-export.js` |
-| CapCut-style timeline (ruler, clips, playhead, scrub, zoom) | ✅ `src/editor/timeline.js` |
+| Real offline export — WebCodecs + vendored muxer, `.mp4` / `.webm`, decodes from its own off-screen copy so the preview is never disturbed | ✅ `src/io/webcodecs-export.js` |
+| Audio that survives the bitrate — the encoder's accepted rate is searched for, not assumed | ✅ `resolveAudioBitrate` in `src/io/webcodecs-export.js` |
+| Professional export window — resolution, ratio, fps, quality, bitrates, preset auto-tune | ✅ `src/io/export-settings.js`, `src/editor/export-dialog.js` |
+| CapCut-style timeline — caption, video and audio lanes on one source clock | ✅ `src/editor/timeline.js` |
+| Cuts — trim edges, split, cut left / cut right, delete, honoured by the preview *and* the export | ✅ `src/model/timeline.js`, `src/editor/preview.js` |
 | Per-source audio — the picture's own track and the uploaded master track, each with its own switch | ✅ `src/editor/preview.js` |
+| Tabbed workspace — Sources / Transcribe / Export share one column instead of three narrow ones | ✅ `index.html`, `src/main.js` |
 | Caption files — `.caproj`, Veed JSON, SRT, VTT | ✅ `src/io/download.js` |
 
 ## The renderer

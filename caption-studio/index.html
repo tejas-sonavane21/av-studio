@@ -10,7 +10,7 @@
 <body>
   <header class="app-bar">
     <h1>Caption Studio</h1>
-    <span class="badge">Phase 6 — real export, per-source audio &amp; a timeline</span>
+    <span class="badge">Phase 7 — cuts, a professional export window &amp; a tabbed workspace</span>
     <span class="spacer"></span>
     <span class="badge" id="status-badge">idle</span>
   </header>
@@ -178,218 +178,220 @@
         Timeline
         <span class="tag" id="timeline-status">—</span>
         <span class="spacer"></span>
-        <span class="hint">click to seek · drag to scrub · click a clip to select it</span>
+        <span class="hint">drag a clip's edge to trim · Split / Cut left / Cut right / Delete · click to seek</span>
       </h2>
       <div id="timeline"></div>
     </section>
 
-    <!-- ============ TEMPLATES ============ -->
-    <section class="panel templates-panel">
-      <h2>
-        Templates
-        <span class="tag" id="template-status">—</span>
-        <span class="spacer"></span>
-        <button class="ghost" id="template-parity">Compare with Veed parity</button>
-      </h2>
-      <div class="templates" id="templates"></div>
-      <div class="hint" id="template-note">
-        Applying a template replaces the document style. Per-block positions and per-block overrides
-        are kept, and applying the same template twice changes nothing.
+    <!-- ============ WORKSPACE ============ -->
+    <div class="workspace">
+      <div class="workspace-main">
+        <!-- ============ TEMPLATES ============ -->
+        <section class="panel templates-panel">
+          <h2>
+            Templates
+            <span class="tag" id="template-status">—</span>
+            <span class="spacer"></span>
+            <button class="ghost" id="template-parity">Compare with Veed parity</button>
+          </h2>
+          <div class="templates" id="templates"></div>
+          <div class="hint" id="template-note">
+            Applying a template replaces the document style. Per-block positions and per-block overrides
+            are kept, and applying the same template twice changes nothing.
+          </div>
+        </section>
+
+        <!-- ============ BLOCK INSPECTOR ============ -->
+        <section class="panel block-panel">
+          <h2>
+            Selected block
+            <span class="tag" id="block-status">none</span>
+            <span class="spacer"></span>
+            <span class="hint" id="block-hint">drag on the canvas · arrows nudge · shift = ×4</span>
+          </h2>
+          <div id="block-inspector" class="empty">
+            Click a caption on the canvas (or a row in “Corrected blocks”) to edit just that one.
+          </div>
+        </section>
+
+        <!-- ============ REPORT + BLOCKS ============ -->
+        <section class="panel">
+          <h2>Alignment report</h2>
+          <div class="stat-grid" id="report">
+            <div class="empty">Run the correction to see the report.</div>
+          </div>
+
+          <h2 style="margin-top:20px">Corrected blocks</h2>
+          <div class="list" id="blocks"><div class="empty">—</div></div>
+        </section>
+
+        <!-- ============ CORRECTIONS ============ -->
+        <section class="panel">
+          <h2>Corrections <span class="tag" id="cor-count">0</span></h2>
+          <div class="list" id="corrections"><div class="empty">—</div></div>
+        </section>
       </div>
-    </section>
 
-    <!-- ============ BLOCK INSPECTOR ============ -->
-    <section class="panel block-panel">
-      <h2>
-        Selected block
-        <span class="tag" id="block-status">none</span>
-        <span class="spacer"></span>
-        <span class="hint" id="block-hint">drag on the canvas · arrows nudge · shift = ×4</span>
-      </h2>
-      <div id="block-inspector" class="empty">
-        Click a caption on the canvas (or a row in “Corrected blocks”) to edit just that one.
-      </div>
-    </section>
-
-    <!-- ============ TRANSCRIBE (audio-studio) ============ -->
-    <section class="panel transcribe-panel">
-      <h2>
-        Transcribe
-        <span class="tag" id="transcribe-status">server unchecked</span>
-        <span class="spacer"></span>
-        <button class="ghost" id="transcribe-probe">Check server</button>
-      </h2>
-
-      <div class="field">
-        <label for="transcribe-url">audio-studio server</label>
-        <input type="text" id="transcribe-url" value="http://127.0.0.1:8756" spellcheck="false" />
-        <div class="hint">
-          The Python studio beside this one, which measures word timings from the audio instead of
-          inheriting them. Start it with <b>python -m audio_studio serve</b>. Its output lands in the
-          AI source below — so a TRUTH subtitle file still corrects the spelling exactly as before,
-          while the timings are now measured rather than borrowed.
+      <!--
+        The three workflow panels share one column instead of each owning a narrow third of the page.
+        They were three equal columns, which made Transcribe — the tallest of them — a long thin ribbon
+        beside two short ones; a tab strip means whichever one you are using gets the full column, and
+        the two you are not are gone rather than merely narrow.
+      -->
+      <aside class="workspace-side">
+        <div class="tabs" role="tablist" aria-label="Workspace">
+          <button type="button" role="tab" id="tab-sources-btn" data-tab="sources" aria-selected="true">Sources</button>
+          <button type="button" role="tab" id="tab-transcribe-btn" data-tab="transcribe" aria-selected="false">Transcribe</button>
+          <button type="button" role="tab" id="tab-export-btn" data-tab="export" aria-selected="false">Export</button>
         </div>
-      </div>
 
-      <div class="field">
-        <label for="transcribe-in">Recording to transcribe</label>
-        <input type="file" id="transcribe-in" accept="audio/*,video/*" />
-      </div>
+        <!-- ============ SOURCES ============ -->
+        <section class="panel sources-panel tab-panel" id="tab-sources" role="tabpanel" aria-labelledby="tab-sources-btn">
+          <h2>Sources</h2>
 
-      <div class="field">
-        <label for="lyrics-in">Original lyrics — optional, SRT / VTT / TXT</label>
-        <input type="file" id="lyrics-in" accept=".srt,.vtt,.txt,text/plain" />
-        <div class="hint" id="lyrics-note">
-          The words the song actually has. Give them to the studio and the text comes from this file
-          while the timing still comes from the audio, so nothing is guessed — added lines are timed
-          by interpolation and then re-timed by the aligner. A file that is not this recording is
-          refused rather than applied. (The TRUTH source further down is a different pass: it fixes
-          spelling locally. The same file can be used in both.)
-        </div>
-      </div>
+          <div class="field">
+            <label for="video-in">Video (optional)</label>
+            <input type="file" id="video-in" accept="video/*" />
+          </div>
 
-      <div class="style-bar">
-        <label class="field-inline">
-          <span>Preset</span>
-          <select id="transcribe-preset">
-            <option value="fast">fast — base model</option>
-            <option value="balanced" selected>balanced — small model</option>
-            <option value="accurate">accurate — medium model</option>
-          </select>
-        </label>
-        <label class="field-inline">
-          <span>Language</span>
-          <input type="text" id="transcribe-language" placeholder="auto" size="5" />
-        </label>
-        <label class="field-inline">
-          <span>Align</span>
-          <select id="transcribe-align">
-            <option value="off">off — the transcriber's timing</option>
-            <option value="wav2vec" selected>wav2vec — re-time to the audio</option>
-            <option value="fake">fake — offline, synthetic</option>
-          </select>
-        </label>
-        <label class="field-inline">
-          <span>Validate</span>
-          <select id="transcribe-validate">
-            <option value="off" selected>off</option>
-            <option value="rules">rules — offline</option>
-            <option value="llm">llm — needs a key</option>
-          </select>
-        </label>
-        <label class="field-inline">
-          <span>Emphasis</span>
-          <select id="transcribe-emphasis">
-            <option value="" selected>off</option>
-            <option value="all">all — the whole line</option>
-            <option value="auto">auto — the AI's picked words</option>
-          </select>
-        </label>
-        <button class="primary" id="transcribe-btn" disabled>Transcribe</button>
-      </div>
+          <div class="field">
+            <label for="audio-in">Audio (optional)</label>
+            <input type="file" id="audio-in" accept="audio/*" />
+            <div class="hint">
+              The original track — plays with the transport and drives the clock when no video is loaded.
+            </div>
+          </div>
 
-      <div class="progress"><div class="progress-bar" id="transcribe-bar"></div></div>
-      <div class="hint" id="transcribe-note">
-        Choose a recording and press Transcribe. A three-minute song takes about a minute to
-        transcribe and two more to align, on CPU.
-      </div>
-    </section>
+          <div class="field">
+            <label for="ai-in">AI source — Veed master JSON</label>
+            <input type="file" id="ai-in" accept=".json,application/json" />
+            <div class="hint">Word-level timing + AI keyword emphasis (authoritative timing).</div>
+          </div>
 
-    <!-- ============ EXPORT ============ -->
-    <section class="panel export-panel">
-      <h2>
-        Export
-        <span class="tag" id="export-status">—</span>
-      </h2>
+          <div class="field">
+            <label for="truth-in">TRUTH source — SRT / VTT</label>
+            <input type="file" id="truth-in" accept=".srt,.vtt" />
+            <div class="hint">Spelling authority. Rolling cues are de-duplicated automatically.</div>
+          </div>
 
-      <div class="actions">
-        <button class="primary" id="download-video" disabled>Export video</button>
-        <button class="ghost" id="download-project" disabled>Project (.caproj)</button>
-        <button class="ghost" id="download-veed" disabled>Veed JSON</button>
-        <button class="ghost" id="download-srt" disabled>SubRip (.srt)</button>
-        <button class="ghost" id="download-vtt" disabled>WebVTT (.vtt)</button>
-      </div>
+          <button class="primary" id="align-btn" disabled>Run quality correction</button>
 
-      <div class="export-controls">
-        <label class="field-inline">
-          <span>Format</span>
-          <select id="export-format" title="MP4 plays in every player and editor; WebM is the open format">
-            <option value="mp4" selected>MP4 — H.264, plays everywhere</option>
-            <option value="webm">WebM — VP9, open format</option>
-          </select>
-        </label>
-        <label class="field-inline">
-          <span>Video quality</span>
-          <select id="export-quality">
-            <option value="balanced">balanced — smaller file</option>
-            <option value="high" selected>high — recommended</option>
-            <option value="best">best — largest file</option>
-          </select>
-        </label>
-      </div>
+          <h2 style="margin-top:20px">Log</h2>
+          <div id="log" class="empty">No activity yet.</div>
+        </section>
 
-      <div class="progress"><div class="progress-bar" id="export-bar"></div></div>
-      <div class="hint" id="export-note">
-        <b>Export video</b> renders every frame at the document's own resolution and encodes it with
-        the browser's own encoder — no screen recording, so it is not tied to real time and no frames
-        are dropped. <b>Format</b> picks the container, <b>Video quality</b> the bits-per-pixel
-        budget. Sound comes from the audio file loaded under Sources (the master track); sound that
-        only exists inside the video file is not extracted. The other buttons write the caption data
-        itself: the project, the Veed master JSON, and plain SRT / VTT that any other editor can read.
-      </div>
-    </section>
+        <!-- ============ TRANSCRIBE (audio-studio) ============ -->
+        <section class="panel transcribe-panel tab-panel" id="tab-transcribe" role="tabpanel" aria-labelledby="tab-transcribe-btn" hidden>
+          <h2>
+            Transcribe
+            <span class="tag" id="transcribe-status">server unchecked</span>
+            <span class="spacer"></span>
+            <button class="ghost" id="transcribe-probe">Check server</button>
+          </h2>
 
-    <!-- ============ SOURCES ============ -->
-    <section class="panel sources-panel">
-      <h2>Sources</h2>
+          <div class="field">
+            <label for="transcribe-url">audio-studio server</label>
+            <input type="text" id="transcribe-url" value="http://127.0.0.1:8756" spellcheck="false" />
+            <div class="hint">
+              The Python studio beside this one, which measures word timings from the audio instead of
+              inheriting them. Start it with <b>python -m audio_studio serve</b>. Its output lands in the
+              AI source below — so a TRUTH subtitle file still corrects the spelling exactly as before,
+              while the timings are now measured rather than borrowed.
+            </div>
+          </div>
 
-      <div class="field">
-        <label for="video-in">Video (optional)</label>
-        <input type="file" id="video-in" accept="video/*" />
-      </div>
+          <div class="field">
+            <label for="transcribe-in">Recording to transcribe</label>
+            <input type="file" id="transcribe-in" accept="audio/*,video/*" />
+          </div>
 
-      <div class="field">
-        <label for="audio-in">Audio (optional)</label>
-        <input type="file" id="audio-in" accept="audio/*" />
-        <div class="hint">
-          The original track — plays with the transport and drives the clock when no video is loaded.
-        </div>
-      </div>
+          <div class="field">
+            <label for="lyrics-in">Original lyrics — optional, SRT / VTT / TXT</label>
+            <input type="file" id="lyrics-in" accept=".srt,.vtt,.txt,text/plain" />
+            <div class="hint" id="lyrics-note">
+              The words the song actually has. Give them to the studio and the text comes from this file
+              while the timing still comes from the audio, so nothing is guessed — added lines are timed
+              by interpolation and then re-timed by the aligner. A file that is not this recording is
+              refused rather than applied. (The TRUTH source further down is a different pass: it fixes
+              spelling locally. The same file can be used in both.)
+            </div>
+          </div>
 
-      <div class="field">
-        <label for="ai-in">AI source — Veed master JSON</label>
-        <input type="file" id="ai-in" accept=".json,application/json" />
-        <div class="hint">Word-level timing + AI keyword emphasis (authoritative timing).</div>
-      </div>
+          <div class="style-bar">
+            <label class="field-inline">
+              <span>Preset</span>
+              <select id="transcribe-preset">
+                <option value="fast">fast — base model</option>
+                <option value="balanced" selected>balanced — small model</option>
+                <option value="accurate">accurate — medium model</option>
+              </select>
+            </label>
+            <label class="field-inline">
+              <span>Language</span>
+              <input type="text" id="transcribe-language" placeholder="auto" size="5" />
+            </label>
+            <label class="field-inline">
+              <span>Align</span>
+              <select id="transcribe-align">
+                <option value="off">off — the transcriber's timing</option>
+                <option value="wav2vec" selected>wav2vec — re-time to the audio</option>
+                <option value="fake">fake — offline, synthetic</option>
+              </select>
+            </label>
+            <label class="field-inline">
+              <span>Validate</span>
+              <select id="transcribe-validate">
+                <option value="off" selected>off</option>
+                <option value="rules">rules — offline</option>
+                <option value="llm">llm — needs a key</option>
+              </select>
+            </label>
+            <label class="field-inline">
+              <span>Emphasis</span>
+              <select id="transcribe-emphasis">
+                <option value="" selected>off</option>
+                <option value="all">all — the whole line</option>
+                <option value="auto">auto — the AI's picked words</option>
+              </select>
+            </label>
+            <button class="primary" id="transcribe-btn" disabled>Transcribe</button>
+          </div>
 
-      <div class="field">
-        <label for="truth-in">TRUTH source — SRT / VTT</label>
-        <input type="file" id="truth-in" accept=".srt,.vtt" />
-        <div class="hint">Spelling authority. Rolling cues are de-duplicated automatically.</div>
-      </div>
+          <div class="progress"><div class="progress-bar" id="transcribe-bar"></div></div>
+          <div class="hint" id="transcribe-note">
+            Choose a recording and press Transcribe. A three-minute song takes about a minute to
+            transcribe and two more to align, on CPU.
+          </div>
+        </section>
 
-      <button class="primary" id="align-btn" disabled>Run quality correction</button>
+        <!-- ============ EXPORT ============ -->
+        <section class="panel export-panel tab-panel" id="tab-export" role="tabpanel" aria-labelledby="tab-export-btn" hidden>
+          <h2>
+            Export
+            <span class="tag" id="export-status">—</span>
+          </h2>
 
-      <h2 style="margin-top:20px">Log</h2>
-      <div id="log" class="empty">No activity yet.</div>
-    </section>
+          <div class="actions">
+            <button class="primary" id="download-video" disabled>Export video…</button>
+            <button class="ghost" id="download-project" disabled>Project (.caproj)</button>
+            <button class="ghost" id="download-veed" disabled>Veed JSON</button>
+            <button class="ghost" id="download-srt" disabled>SubRip (.srt)</button>
+            <button class="ghost" id="download-vtt" disabled>WebVTT (.vtt)</button>
+          </div>
 
-    <!-- ============ REPORT + BLOCKS ============ -->
-    <section class="panel">
-      <h2>Alignment report</h2>
-      <div class="stat-grid" id="report">
-        <div class="empty">Run the correction to see the report.</div>
-      </div>
-
-      <h2 style="margin-top:20px">Corrected blocks</h2>
-      <div class="list" id="blocks"><div class="empty">—</div></div>
-    </section>
-
-    <!-- ============ CORRECTIONS ============ -->
-    <section class="panel">
-      <h2>Corrections <span class="tag" id="cor-count">0</span></h2>
-      <div class="list" id="corrections"><div class="empty">—</div></div>
-    </section>
+          <div class="progress"><div class="progress-bar" id="export-bar"></div></div>
+          <div class="hint" id="export-note">
+            <b>Export video…</b> opens the export window, where the container, resolution, frame rate,
+            quality and bitrates are all set — and where choosing a resolution tunes the rest for you.
+            The encode renders every frame offline with the browser's own encoder, so it is not tied to
+            real time, the preview stays usable while it runs, and the cuts you made on the timeline are
+            honoured. Sound comes from the audio file loaded under Sources (the master track). The other
+            buttons write the caption data itself: the project, the Veed master JSON, and plain SRT / VTT
+            that any other editor can read.
+          </div>
+        </section>
+      </aside>
+    </div>
   </main>
 
   <script type="module" src="./src/main.js"></script>

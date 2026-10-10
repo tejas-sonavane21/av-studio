@@ -29,7 +29,8 @@ import { parseVTT } from './io/vtt.js';
 import { importJSON } from './io/project-file.js';
 import { describeStudioAudit, health, optionsFor, transcribeFile } from './io/audio-studio-client.js';
 import { captionFiles, downloadBlob, downloadText, exportStem } from './io/download.js';
-import { DEFAULT_FORMAT, exportDocumentToVideo } from './io/webcodecs-export.js';
+import { exportDocumentToVideo } from './io/webcodecs-export.js';
+import { defaultExportSettings, encoderSettings, outputSize } from './io/export-settings.js';
 import { alignCaptions } from './align/aligner.js';
 import { validateDocument } from './model/document.js';
 import { createDefaultStyle } from './model/schema.js';
@@ -39,6 +40,22 @@ import { joinBlockWithPrevious, setBlockText, setWordText, splitBlock, splitBloc
 import { createPreview } from './editor/preview.js';
 import { createCanvasOverlay } from './editor/canvas-overlay.js';
 import { createTimeline } from './editor/timeline.js';
+import { createExportDialog } from './editor/export-dialog.js';
+import {
+  TIMELINE_TRACKS,
+  cutAfter,
+  cutBefore,
+  droppedCaptionIds,
+  ensureTimeline,
+  fullRanges,
+  outputDuration,
+  removeAt,
+  resetTrack,
+  setTrackRanges,
+  splitAt,
+  trackRanges,
+  trimEdge,
+} from './model/timeline.js';
 import { fontFamilies, getFont } from './fonts/registry.js';
 import {
   CANVAS_PRESETS,
@@ -82,6 +99,7 @@ let audioUrl = null;
 let preview = null;
 let overlay = null;
 let timeline = null;
+let exportDialog = null;
 // The only editing state this module owns: which block the inspector edits. Everything else about
 // an edit lives in the document (overrides / placement) or in a registry.
 let selectedBlockId = null;
@@ -98,6 +116,9 @@ let styleScopeAll = false;
 // True once the frame ratio has been chosen explicitly, so a video that arrives afterwards cannot
 // reset the frame back to its own shape. Cleared by "source" and whenever a new document is shown.
 let aspectLocked = false;
+// Which video/audio clip the timeline has selected — `{ track, id }`. The cut commands that act on
+// "the selected clip" read this; ones that act on the whole programme ignore it.
+let selectedClip = null;
 
 // ---------------------------------------------------------------------------
 // logging + status
@@ -163,6 +184,13 @@ async function onVideo(file) {
         preview.resize();
         syncAspectSelect();
         refreshSeekRange();
+        // A new picture means the old cut pointed into a file that is no longer loaded, so the video
+        // track starts again from the whole of this one.
+        resetTrack(doc, 'video', video.duration);
+        selectedClip = null;
+        timeline?.setSelectedClip(null);
+        refreshTimelineRanges();
+        updateTimelineStatus();
       }
     },
     { once: true },
@@ -204,6 +232,14 @@ async function onAudio(file) {
     () => {
       if (Number.isFinite(audio.duration)) log(`audio: ${audio.duration.toFixed(2)}s`);
       refreshSeekRange();
+      // Same rule as the picture: a new track starts uncut. The video track is left alone — the two
+      // are cut independently, which is the whole point of having two lanes.
+      const doc = preview?.document;
+      if (doc && Number.isFinite(audio.duration)) {
+        resetTrack(doc, 'audio', audio.duration);
+        refreshTimelineRanges();
+        updateTimelineStatus();
+      }
     },
     { once: true },
   );
@@ -440,16 +476,13 @@ function onDownloadFile(ext) {
 }
 
 /**
- * Render the captions into the video and download the result.
+ * Open the export window.
  *
- * This is a real encode, not a screen recording: the frame stepping and the encoder live in
- * `io/webcodecs-export.js`. The transport is stopped first so the preview's own play loop cannot
- * fight the exporter for the video element the encoder is seeking.
+ * Nothing is encoded until its Export button is pressed, so the resolution, frame rate, quality and
+ * bitrates can be looked at — and changed — before a long encode starts.
  */
-async function onDownloadVideo() {
+function openExportDialog() {
   const doc = preview?.document;
-  const video = $('#preview-video');
-  if (exporting) return;
   if (!doc) {
     log('export: there are no captions yet — run the correction or open the demo first');
     return;
@@ -458,9 +491,54 @@ async function onDownloadVideo() {
     log('export video: load a video under Sources first — the caption files can be saved without one');
     return;
   }
+  const ctx = exportContext();
+  exportDialog.open({ ratioId: ctx.ratioId, sourceFps: ctx.sourceFps });
+}
 
-  const format = $('#export-format').value === 'webm' ? 'webm' : DEFAULT_FORMAT;
-  const quality = $('#export-quality').value || 'high';
+/**
+ * Where the export gets its pixels, its shape and its frame rate: the document, the picture, and the
+ * ratio the project is already on.
+ */
+function exportContext() {
+  const doc = preview?.document ?? null;
+  const video = $('#preview-video');
+  const sourceSize =
+    video && video.videoWidth > 0 ? { width: video.videoWidth, height: video.videoHeight } : null;
+  const docSize = doc?.canvas ? { width: doc.canvas.width, height: doc.canvas.height } : sourceSize;
+  return {
+    doc,
+    sourceSize,
+    sourceFps: Number(doc?.canvas?.fps) || 0,
+    docSize,
+    aspect: docSize && docSize.height > 0 ? docSize.width / docSize.height : 16 / 9,
+    ratioId: presetIdFor(doc?.canvas),
+  };
+}
+
+/** The dialog's settings — what the Export window is currently set to. */
+function exportSettings() {
+  return exportDialog?.settings ?? defaultExportSettings();
+}
+
+/** The pixel size the export will produce, from those settings. */
+function exportSize() {
+  return outputSize(exportSettings(), exportContext());
+}
+
+/**
+ * Render the captions into the video and download the result.
+ *
+ * This is a real encode, not a screen recording: the frame stepping and the encoder live in
+ * `io/webcodecs-export.js`. It is handed a **URL**, not the element on screen, so the exporter
+ * decodes from its own off-screen copy — the preview keeps playing (or stays parked) and is never
+ * seeked out from under the user, which is what made the old burn-in look like a recording.
+ */
+async function runExport(settings) {
+  const doc = preview?.document;
+  const video = $('#preview-video');
+  if (exporting || !doc) return;
+  const encoder = encoderSettings(settings, exportContext());
+  const { format, quality, size, fps } = encoder;
   const state = store.getState();
   exporting = true;
   refreshExportButtons();
@@ -470,29 +548,35 @@ async function onDownloadVideo() {
   setExportProgress(0);
   setStatus('encoding\u2026');
   log(
-    `export: rendering the captions into a .${format} at ${quality} quality — frames are drawn and encoded, not recorded`,
+    `export: rendering the captions into a .${format} at ${size.width}\u00d7${size.height}, ${fps}fps, ${quality} quality, ` +
+      `${(encoder.videoBitsPerSecond / 1e6).toFixed(1)} Mbps video — frames are drawn and encoded, not recorded`,
   );
   // Honest about the one thing that silently costs quality: a frame smaller than the picture is a
   // downscale, and the ratio picker is where that gets fixed.
-  if (video.videoWidth > doc.canvas.width || video.videoHeight > doc.canvas.height) {
+  if (video.videoWidth > size.width || video.videoHeight > size.height) {
     log(
-      `  ⚠ encoding at ${doc.canvas.width}×${doc.canvas.height} while the picture is ` +
+      `  ⚠ encoding at ${size.width}×${size.height} while the picture is ` +
         `${video.videoWidth}×${video.videoHeight} — the export is downscaled (set the frame ratio to the picture’s own)`,
     );
   }
-  preview.pause();
+  // deliberately *not* `preview.pause()`: the exporter decodes from its own off-screen copy, so
+  // leaving the transport exactly where the user put it is the point of this path
 
   try {
     const result = await exportDocumentToVideo({
       doc,
-      video,
+      sourceUrl: video.currentSrc || video.src,
       audioBlob: state.audio ?? null,
       format,
-      fps: doc.canvas?.fps,
+      fps,
       quality,
+      size,
+      videoBitsPerSecond: encoder.videoBitsPerSecond,
+      audioBitsPerSecond: encoder.audioBitsPerSecond,
       onProgress: (fraction, message) => {
         setExportProgress(fraction);
         setExportNote(message);
+        exportDialog.setProgress(fraction, message);
       },
     });
     const name = `${exportStem(doc)}.${result.format}`;
@@ -500,14 +584,15 @@ async function onDownloadVideo() {
     setExportProgress(1);
     $('#export-status').textContent = 'done';
     if (result.audioSkipped) log(`  ⚠ ${result.audioSkipped}`);
-    const size = (result.blob.size / 1e6).toFixed(1);
+    else if (result.audioNote) log(`  note: ${result.audioNote}`);
+    const mb = (result.blob.size / 1e6).toFixed(1);
     const mbps = (result.videoBitsPerSecond / 1e6).toFixed(1);
     log(
-      `export: ${name} — ${size} MB, ${result.seconds.toFixed(1)}s, ${result.width}×${result.height} @ ${result.fps}fps, ` +
+      `export: ${name} — ${mb} MB, ${result.seconds.toFixed(1)}s, ${result.width}×${result.height} @ ${result.fps}fps, ` +
         `${result.frames} frames, ${result.videoCodec}, ${mbps} Mbps${result.audio ? ` with ${result.audioCodec} audio` : ' (no audio track)'}`,
     );
     setExportNote(
-      `saved ${name} — ${size} MB, ${result.frames} frames at ${mbps} Mbps${result.audio ? '' : ' (no audio track)'}`,
+      `saved ${name} — ${mb} MB, ${result.frames} frames at ${mbps} Mbps${result.audio ? '' : ' (no audio track)'}`,
     );
   } catch (err) {
     $('#export-bar').classList.add('failed');
@@ -580,6 +665,11 @@ async function showDocument(doc, label = 'document') {
   syncAspectSelect();
   await syncStyleControls(doc.defaults);
   refreshSeekRange();
+  // The cut belongs to the document, so a document that never had one starts as the whole recording.
+  // An existing cut is left exactly as it is — that is what makes a saved project reopen with its
+  // edits instead of with everything put back.
+  ensureTimeline(doc, { video: sourceDuration(), audio: sourceDuration() });
+  selectedClip = null;
   // A new document invalidates any selection from the previous one.
   selectedBlockId = doc.blocks[0]?.id ?? null;
   renderBlocks();
@@ -668,9 +758,9 @@ const fmt = (t) => Number(t).toFixed(2).padStart(6, ' ');
  * the ones that carry `overrides` / `placement` — the things the inspector edits.
  */
 /**
- * Republish the document and the clock to the timeline, in one place.
+ * Republish the document, the cut and the clock to the timeline, in one place.
  *
- * Everything that can change what the strip shows — a new document, an edit, a selection, a new
+ * Everything that can change what the strip shows — a new document, an edit, a selection, a cut, a new
  * duration — goes through here, so the timeline can never drift from the preview it is a view of.
  */
 function syncTimeline() {
@@ -679,9 +769,193 @@ function syncTimeline() {
   timeline.setDocument(doc);
   timeline.setDuration(preview?.duration() ?? 0);
   timeline.setSelected(selectedBlockId);
-  const count = doc?.blocks?.length ?? 0;
+  timeline.setSelectedClip(selectedClip);
+  refreshTimelineRanges();
+  updateTimelineStatus();
+}
+
+/** The source length the cut is measured against — the whole recording, cuts and all. */
+function sourceDuration() {
+  return preview?.duration() ?? 0;
+}
+
+/** Republish just the cut (the kept ranges), without rebuilding the caption row. */
+function refreshTimelineRanges() {
+  const doc = preview?.document;
+  if (!timeline) return;
+  const duration = sourceDuration();
+  if (!doc) {
+    timeline.setRanges({ video: [], audio: [] });
+    timeline.setDropped([]);
+    return;
+  }
+  timeline.setRanges({
+    video: trackRanges(doc, 'video', duration),
+    audio: trackRanges(doc, 'audio', duration),
+  });
+  timeline.setDropped(droppedCaptionIds(doc));
+}
+
+/**
+ * The tag beside the timeline: how many captions, and how much of the recording survives the cut.
+ *
+ * Showing both lengths is what makes a cut legible at a glance — the file is the *output* length, not
+ * the source length, and a strip that only ever showed one of them would make a trim look like it did
+ * nothing.
+ */
+function updateTimelineStatus() {
   const tag = $('#timeline-status');
-  if (tag) tag.textContent = count ? `${count} caption${count === 1 ? '' : 's'}` : '—';
+  if (!tag) return;
+  const doc = preview?.document;
+  const count = doc?.blocks?.length ?? 0;
+  if (!count) {
+    tag.textContent = '—';
+    return;
+  }
+  const duration = sourceDuration();
+  const out = Math.max(
+    outputDuration(trackRanges(doc, 'video', duration)),
+    outputDuration(trackRanges(doc, 'audio', duration)),
+  );
+  const trimmed = Math.abs(out - duration) > 1e-3;
+  tag.textContent = trimmed
+    ? `${count} caption${count === 1 ? '' : 's'} · ${out.toFixed(1)}s of ${duration.toFixed(1)}s after the cuts`
+    : `${count} caption${count === 1 ? '' : 's'}`;
+}
+
+// ---------------------------------------------------------------------------
+// the cut — trim, split, cut left / cut right, delete
+// ---------------------------------------------------------------------------
+
+/** Are two range lists the same cut? Used to tell a real edit from a no-op. */
+function sameRanges(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((range, i) => Math.abs(range.srcIn - b[i].srcIn) < 1e-6 && Math.abs(range.srcOut - b[i].srcOut) < 1e-6);
+}
+
+/** Write a new cut for one track, keeping the timeline honest about it. */
+function commitCut(track, next) {
+  const doc = preview?.document;
+  if (!doc) return false;
+  const duration = sourceDuration();
+  ensureTimeline(doc, { video: duration, audio: duration });
+  if (sameRanges(trackRanges(doc, track, duration), next)) return false;
+  setTrackRanges(doc, track, next);
+  return true;
+}
+
+/**
+ * One of the timeline's edit buttons.
+ *
+ * `split` cuts every track at the playhead (which is what a linked clip does); the rest act on the
+ * selected clip's track when one is selected and on both when nothing is, because "cut everything to
+ * the left" usually means the whole programme rather than one lane of it.
+ */
+function onTimelineCommand(command) {
+  const doc = preview?.document;
+  if (!doc) return;
+  const duration = sourceDuration();
+  ensureTimeline(doc, { video: duration, audio: duration });
+  const time = Math.max(0, preview?.currentTime() ?? 0);
+
+  if (command === 'reset') {
+    let changed = false;
+    for (const track of TIMELINE_TRACKS) {
+      if (!sameRanges(trackRanges(doc, track, duration), fullRanges(duration))) {
+        resetTrack(doc, track, duration);
+        changed = true;
+      }
+    }
+    if (changed) log('timeline: cuts cleared — the whole recording is back');
+    else log('timeline: there were no cuts to clear');
+  } else {
+    const tracks = selectedClip ? [selectedClip.track] : TIMELINE_TRACKS;
+    // Delete is the one command that prefers the *selected* clip over the playhead, because deleting
+    // the thing you just clicked is the only reading of "Delete" that is not a surprise. When nothing
+    // is selected it falls back to whatever the playhead is over, so the button still does something.
+    const edit = {
+      split: (ranges) => splitAt(ranges, time),
+      'cut-left': (ranges) => cutBefore(ranges, time),
+      'cut-right': (ranges) => cutAfter(ranges, time),
+      delete: (ranges) => {
+        if (!selectedClip) return removeAt(ranges, time);
+        const index = ranges.findIndex((range) => range.id === selectedClip.id);
+        return index < 0 ? ranges : ranges.filter((_, i) => i !== index);
+      },
+    }[command];
+    if (!edit) return;
+    let changed = 0;
+    for (const track of tracks) {
+      if (commitCut(track, edit(trackRanges(doc, track, duration)))) changed += 1;
+    }
+    const where = selectedClip ? `the ${selectedClip.track} track` : 'the video and audio tracks';
+    if (!changed) {
+      log(
+        command === 'split'
+          ? 'timeline: nothing to split — the playhead has to be inside a clip, away from its edges'
+          : `timeline: nothing to ${command.replace('-', ' ')} at ${time.toFixed(2)}s`,
+      );
+      return;
+    }
+    log(`timeline: ${command.replace('-', ' ')} at ${time.toFixed(2)}s on ${where}`);
+    // The selected clip may be the one that just went away.
+    if (command === 'delete' && selectedClip) {
+      const stillThere = (trackRanges(doc, selectedClip.track, duration) ?? []).some((r) => r.id === selectedClip.id);
+      if (!stillThere) {
+        selectedClip = null;
+        timeline?.setSelectedClip(null);
+      }
+    }
+  }
+
+  afterCut(time);
+}
+
+/** A drag on a clip's edge. Applied live, so the strip follows the pointer. */
+function onTimelineTrim(track, id, edge, seconds) {
+  const doc = preview?.document;
+  if (!doc) return;
+  const duration = sourceDuration();
+  ensureTimeline(doc, { video: duration, audio: duration });
+  const ranges = trackRanges(doc, track, duration);
+  const index = ranges.findIndex((range) => range.id === id);
+  if (index < 0) return;
+  commitCut(track, trimEdge(ranges, index, edge, seconds, duration));
+  refreshTimelineRanges();
+  updateTimelineStatus();
+  refreshExportButtons();
+}
+
+/** Select a picture/sound clip, so the cut commands know which one is meant. */
+function onTimelineSelectClip(track, id) {
+  selectedClip = track && id ? { track, id } : null;
+  timeline?.setSelectedClip(selectedClip);
+  const range = (trackRanges(preview?.document, track, sourceDuration()) ?? []).find((r) => r.id === id);
+  if (range) {
+    log(
+      `timeline: selected the ${track} clip ${formatSeconds(range.srcIn)}–${formatSeconds(range.srcOut)} ` +
+        `(${(range.srcOut - range.srcIn).toFixed(2)}s)`,
+    );
+  }
+}
+
+/**
+ * Settle everything after a cut.
+ *
+ * The one thing that is not merely a repaint: the playhead may now be sitting in a region that no
+ * longer exists, and leaving it there would put the preview on a frame the programme has cut away.
+ */
+function afterCut(time) {
+  refreshTimelineRanges();
+  updateTimelineStatus();
+  refreshExportButtons();
+  preview?.seek(time);
+  overlay?.refresh();
+}
+
+/** `12.345` as `12.35s`, for log lines. */
+function formatSeconds(value) {
+  return `${(Number(value) || 0).toFixed(2)}s`;
 }
 
 function renderBlocks() {
@@ -1048,10 +1322,12 @@ function applyStageAspect() {
   $('#stage').style.setProperty('--fs-ar', String(aspect));
 }
 
-/** Point the picker at whatever ratio the document is actually on. */
+/** Point the picker at whatever ratio the document is actually on — both of them. */
 function syncAspectSelect() {
   const select = $('#aspect-select');
   if (select) select.value = presetIdFor(preview?.document?.canvas);
+  // the export window has a ratio control too, and it is the same setting
+  exportDialog?.syncFromContext();
 }
 
 /** The frame-ratio picker: `source` plus one entry per preset, from the registry itself. */
@@ -1834,6 +2110,31 @@ function selectAfterShapeEdit(id) {
   overlay?.select(selectedBlockId);
 }
 
+/**
+ * The sidebar's tabs: Sources / Transcribe / Export, one visible at a time.
+ *
+ * They are three workflows you do in sequence but never simultaneously, and as three columns each got
+ * a third of the width and its own height — the "vertical" arrangement this replaces. The panels are
+ * all present in the DOM (so every control keeps its state and every test can still reach it); only
+ * `hidden` moves.
+ */
+function wireTabs() {
+  const tabs = [...document.querySelectorAll('.tabs [role="tab"]')];
+  if (!tabs.length) return null;
+  const panels = new Map(tabs.map((tab) => [tab.dataset.tab, $(`#tab-${tab.dataset.tab}`)]));
+  const select = (name) => {
+    for (const tab of tabs) tab.setAttribute('aria-selected', String(tab.dataset.tab === name));
+    for (const [key, panel] of panels) if (panel) panel.hidden = key !== name;
+    // A panel that was hidden had no width, so anything that measures itself has to be told to look
+    // again; the export window reads the project's ratio, which never changed but may never have
+    // been read either.
+    if (name === 'export') exportDialog?.syncFromContext();
+  };
+  for (const tab of tabs) tab.addEventListener('click', () => select(tab.dataset.tab));
+  select(tabs[0].dataset.tab ?? 'sources');
+  return select;
+}
+
 /** Build the overlay once a document exists — it needs the renderer's size and layouts. */
 function createOverlay() {
   if (overlay) return overlay;
@@ -1875,8 +2176,21 @@ timeline = createTimeline({
     const block = findBlock(preview?.document, id);
     if (block) preview?.seek(block.start + 0.01);
   },
+  onSelectClip: (track, id) => onTimelineSelectClip(track, id),
+  onTrim: (track, id, edge, seconds) => onTimelineTrim(track, id, edge, seconds),
+  onCommand: (command) => onTimelineCommand(command),
 });
 syncTimeline();
+
+exportDialog = createExportDialog({
+  getContext: exportContext,
+  onExport: (settings) => runExport(settings),
+  // The dialog's ratio is the *project's* ratio, not a second opinion: choosing it here moves the
+  // preview's frame too, and the preview's picker moves this one.
+  onRatioChange: (id) => applyAspect(id),
+});
+document.body.append(exportDialog.element);
+wireTabs();
 
 $('#video-in').addEventListener('change', (e) => onVideo(e.target.files?.[0]));
 $('#audio-in').addEventListener('change', (e) => onAudio(e.target.files?.[0]));
@@ -1898,7 +2212,7 @@ $('#transcribe-btn').addEventListener('click', onTranscribe);
 $('#transcribe-probe').addEventListener('click', onTranscribeProbe);
 refreshTranscribeButton();
 
-$('#download-video').addEventListener('click', onDownloadVideo);
+$('#download-video').addEventListener('click', openExportDialog);
 $('#download-project').addEventListener('click', () => onDownloadFile('.caproj'));
 $('#download-veed').addEventListener('click', () => onDownloadFile('.veed.json'));
 $('#download-srt').addEventListener('click', () => onDownloadFile('.srt'));
