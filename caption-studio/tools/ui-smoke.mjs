@@ -1992,6 +1992,51 @@ async function main() {
     );
     let progressChecked = false;
     let completionChecked = false;
+    // ---- stopping an export -------------------------------------------------
+    // Cancel used to be disabled for the whole run, so a long export could not be given up on: the
+    // button looked actionable and did nothing at all. It now stops the job through the AbortSignal the
+    // encoder already accepted, and reports a stop rather than dressing it up as a failure.
+    await reSelectVideo();
+    await evaluate(cdp, `window.__openExport({ format: 'mp4', quality: 'high', resolution: 'source' })`);
+    const blobsBeforeStop = await evaluate(cdp, 'window.__blobSizes.length');
+    await evaluate(cdp, 'document.querySelector("#export-dialog-go").click()');
+    const runningPercent = '(()=>{const m=/^(\\d+)%$/.exec(document.querySelector("#export-dialog-percent").textContent);return m?Number(m[1]):-1})()';
+    await waitFor(cdp, runningPercent, (v) => v >= 5 && v < 100, {
+      attempts: 200,
+      intervalMs: 100,
+      describe: 'the export to be genuinely mid-encode',
+    });
+    const stopButton = '[...document.querySelectorAll("#export-dialog button")].find((b)=>/^(cancel|stop)/i.test(b.textContent.trim()))';
+    await check(
+      cdp,
+      'a running export offers to stop itself instead of a dead Cancel button',
+      `(()=>{const c=${stopButton};return [c.textContent.trim(), c.disabled].join("/")})()`,
+      (v) => v === 'Stop export/false',
+    );
+    await evaluate(cdp, `${stopButton}.click()`);
+    await waitFor(cdp, 'document.querySelector("#export-dialog-go").disabled', (v) => v === false, {
+      attempts: 100,
+      intervalMs: 100,
+      describe: 'the stopped export to settle',
+    });
+    await check(
+      cdp,
+      'stopping it reports a stop rather than a failure, and leaves the window usable',
+      '(()=>{const bar=document.querySelector("#export-dialog-bar").classList;return {percent:document.querySelector("#export-dialog-percent").textContent,note:document.querySelector("#export-dialog-note").textContent,cancelled:bar.contains("cancelled"),failed:bar.contains("failed")}})()',
+      (v) =>
+        v.cancelled === true &&
+        v.failed === false &&
+        v.percent === 'stopped' &&
+        /no file was written/.test(String(v.note)),
+    );
+    await check(
+      cdp,
+      'and the export that was stopped wrote no file at all',
+      'window.__blobSizes.length',
+      (v) => v === blobsBeforeStop,
+    );
+    await evaluate(cdp, 'document.querySelector("#export-dialog").close()');
+
     const exportWith = async (quality, aspect, format = 'mp4') => {
       await reSelectVideo();
       await evaluate(cdp, setAspect(aspect));

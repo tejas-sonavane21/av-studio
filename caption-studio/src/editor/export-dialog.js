@@ -70,8 +70,11 @@ function selectOf(entries, value, onchange, attrs = {}) {
  *   Resolves with the file that was written — that is what the window reports as finished. Resolving
  *   with nothing is treated as a failure, because the window must never claim a file it cannot name.
  * @param {(ratioId:string) => void} [options.onRatioChange]
+ * @param {() => void} [options.onCancel]
+ *   Called when the user asks a *running* export to stop (the button says "Stop export" while it runs).
+ *   The caller owns the `AbortSignal`, so the window asks rather than reaching into the encoder itself.
  */
-export function createExportDialog({ getContext, onExport, onRatioChange = null } = {}) {
+export function createExportDialog({ getContext, onExport, onRatioChange = null, onCancel = null } = {}) {
   const dialog = el('dialog', 'export-dialog');
   dialog.id = 'export-dialog';
   dialog.setAttribute('aria-label', 'Export video');
@@ -234,6 +237,9 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
   let busy = false;
   let lastProgress = 0;
   let finished = false;
+  // Whether this window is the one that asked for the current job to stop. A cancelled export and a
+  // failed one both end in a rejection, and they must not read the same.
+  let cancelRequested = false;
 
   function context() {
     const raw = getContext() ?? {};
@@ -293,7 +299,11 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
     busy = !!next;
     go.disabled = busy;
     closeBtn.disabled = busy;
-    cancel.disabled = busy;
+    // Cancel stays **live** while the job runs, because that is the one moment it is wanted. It used to
+    // be disabled for the whole export — a button that looked like it should do something and could
+    // not — which read exactly as "Cancel is broken".
+    cancel.disabled = false;
+    cancel.textContent = busy ? 'Stop export' : 'Cancel';
     for (const control of [formatSelect, resolutionSelect, ratioSelect, fpsSelect, qualitySelect, audioBitsSelect]) {
       control.disabled = busy;
     }
@@ -330,9 +340,9 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
     lastProgress = Math.max(0, Math.min(1, Number(fraction) || 0));
     const whole = Math.round(lastProgress * 100);
     bar.style.width = `${whole}%`;
-    bar.classList.remove('done', 'failed');
+    bar.classList.remove('done', 'failed', 'cancelled');
     percent.textContent = `${whole}%`;
-    percent.classList.remove('done', 'failed');
+    percent.classList.remove('done', 'failed', 'cancelled');
     progress.setAttribute('aria-valuenow', String(whole));
     finished = false;
     if (message) note.textContent = message;
@@ -341,19 +351,47 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
   /** The job did not produce a file. Say that too, rather than leaving the last progress message up. */
   function markFailed(reason = '') {
     finished = false;
-    bar.classList.remove('busy', 'done');
+    bar.classList.remove('busy', 'done', 'cancelled');
     bar.classList.add('failed');
     percent.textContent = 'failed';
+    percent.classList.remove('done', 'cancelled');
     percent.classList.add('failed');
     note.textContent = reason
       ? `the export failed — ${reason}`
       : 'the export failed — the log has the reason';
   }
 
+  /**
+   * The user stopped it. Deliberately not shown as a failure — nothing went wrong, and saying "failed"
+   * over an action somebody chose is how a cancel button teaches people not to trust it.
+   */
+  function markCancelled() {
+    finished = false;
+    bar.classList.remove('busy', 'done', 'failed');
+    bar.classList.add('cancelled');
+    percent.textContent = 'stopped';
+    percent.classList.remove('done', 'failed');
+    percent.classList.add('cancelled');
+    note.textContent = 'the export was stopped — no file was written';
+  }
+
   closeBtn.addEventListener('click', () => dialog.close());
-  cancel.addEventListener('click', () => dialog.close());
+  cancel.addEventListener('click', () => {
+    // While a job runs the same button *stops* it. The signal travels down to the encoder, which checks
+    // it between output frames and audio chunks and then tears down its encoder and its off-screen
+    // decoder on the way out — so giving up on a long export costs nothing but the frames already done.
+    if (busy) {
+      cancelRequested = true;
+      cancel.disabled = true;
+      cancel.textContent = 'Stopping…';
+      onCancel?.();
+      return;
+    }
+    dialog.close();
+  });
   go.addEventListener('click', async () => {
     if (busy) return;
+    cancelRequested = false;
     setBusy(true);
     setProgress(0, 'preparing the encoder…');
     bar.classList.add('busy');
@@ -364,18 +402,25 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
       if (result?.name) finish(result);
       else markFailed('nothing was written — the log has the reason');
     } catch (err) {
-      markFailed(err?.message ?? String(err));
+      if (cancelRequested || err?.name === 'AbortError') markCancelled();
+      else markFailed(err?.message ?? String(err));
     } finally {
+      cancelRequested = false;
       setBusy(false);
       bar.classList.remove('busy');
     }
   });
 
-  // Escape and the backdrop close the dialog; a running export must not be thrown away by a stray
-  // keypress, so the dialog asks before it disappears (and refuses while busy).
+  // Escape and the backdrop must not *dismiss* a running export silently — but now that the job can be
+  // stopped, that is what the key does instead of being inert: ask it to stop, and keep the window up
+  // so the result is still on screen.
   dialog.addEventListener('cancel', (event) => {
     if (!busy) return;
     event.preventDefault();
+    cancelRequested = true;
+    cancel.disabled = true;
+    cancel.textContent = 'Stopping…';
+    onCancel?.();
   });
 
   return {
@@ -414,6 +459,10 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
     get isBusy() {
       return busy;
     },
+    /** Has this window asked the current job to stop? Read by the caller's cancel path. */
+    get cancelled() {
+      return cancelRequested;
+    },
     setProgress,
     get progress() {
       return lastProgress;
@@ -424,6 +473,7 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
     },
     finish,
     markFailed,
+    markCancelled,
     setNote(text) {
       note.textContent = text;
     },
