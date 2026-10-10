@@ -1,5 +1,9 @@
 # AV Studio
 
+```bash
+git clone https://github.com/tejas-sonavane21/av-studio.git
+```
+
 **Two cooperating studios over audio and video.** One edits the *captions* — text, style, placement,
 the cut, the render, the exported file. The other works out *what was said and when*, with the timing
 audited rather than guessed.
@@ -167,6 +171,21 @@ commercially, check that file before shipping: the Iconian face needs a commerci
   reference renderer does, measured rather than assumed.
 * [`audio-studio/README.md`](audio-studio/README.md) — the engine decisions, the pipeline passes, the
   validation ledger, and the numbers from the real track.
+
+## Licence
+
+**MIT** — see [`LICENSE`](LICENSE). Copyright (c) 2026 Tejas Sonavane.
+
+MIT covers the source code. It does **not** cover everything in the tree, and one bundled asset is
+more restrictive than the project itself, so please read [`THIRD-PARTY.md`](THIRD-PARTY.md) before
+shipping anything commercially:
+
+* the vendored container muxers are MIT, and their notice is retained beside them;
+* the one bundled display font, **HibernalSentry.ttf**, is *free for non-commercial use only* —
+  commercial use needs a licence from [Iconian Fonts](http://iconian.com/commercial.html).
+
+Each studio carries its own copy of the licence: [`caption-studio/LICENSE`](caption-studio/LICENSE)
+and [`audio-studio/LICENSE`](audio-studio/LICENSE).
 
 ## Notes
 
