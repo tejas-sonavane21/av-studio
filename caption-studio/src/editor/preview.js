@@ -18,6 +18,7 @@
 import { createRenderer } from '../render/renderer.js';
 import { createLogger } from '../util/log.js';
 import { mergeDeep } from '../util/math.js';
+import { inGap, nextKeptSource, outputToSource, sourceToOutput, trackRanges } from '../model/timeline.js';
 
 const log = createLogger('preview');
 
@@ -89,12 +90,73 @@ export function createPreview({ canvas, video = null, audio = null, container = 
   // frame-to-frame jitter never triggers a seek (which would click), small enough to stay invisible.
   const DRIFT_LIMIT = 0.25;
 
-  /** Keep the audio track glued to the video, which owns the clock. */
+  /**
+   * The cut, if the document has one: the kept ranges each element plays.
+   *
+   * `null` when there is no timeline at all, which keeps the no-cut path exactly as it has always
+   * been — one branch fewer to get wrong for the common case of a project nobody has trimmed.
+   */
+  function mediaMap() {
+    if (!doc?.timeline) return null;
+    const spanOf = (media) => (Number.isFinite(media?.duration) && media.duration > 0 ? media.duration : 0);
+    return {
+      video: trackRanges(doc, 'video', spanOf(video)),
+      audio: trackRanges(doc, 'audio', spanOf(audio)),
+    };
+  }
+
+  /**
+   * Step over a region the cut removed.
+   *
+   * A cut is a gap in the source, not a shorter programme, so playback has to *jump* it — otherwise
+   * trimming a clip would leave the preview playing exactly the seconds that were cut away, which is
+   * the one thing a cut is supposed to mean. Skipped per element, because the two tracks can be cut in
+   * different places; a track that has run out stops rather than pretending.
+   */
+  function skipCuts() {
+    const map = mediaMap();
+    if (!map) return;
+    for (const [media, ranges] of [
+      [video, map.video],
+      [audio, map.audio],
+    ]) {
+      if (!ranges.length || !isReady(media) || media.paused) continue;
+      const t = media.currentTime;
+      if (!inGap(ranges, t)) continue;
+      const next = nextKeptSource(ranges, t);
+      if (next == null) {
+        if (media === video) pause();
+        else media.pause();
+      } else {
+        try {
+          media.currentTime = next;
+        } catch {
+          /* not seekable yet — the next frame tries again */
+        }
+      }
+    }
+  }
+
+  /**
+   * Keep the audio track glued to the video, which owns the clock.
+   *
+   * With a cut in play the two are on *different* source times at the same moment — that is what two
+   * independent tracks mean — so the glue is the *output* clock: where the picture is in the finished
+   * file, and therefore where the sound should be too.
+   */
   function resyncAudio() {
     if (!isReady(video) || !isReady(audio)) return;
-    if (Math.abs(video.currentTime - audio.currentTime) < DRIFT_LIMIT) return;
+    let target = video.currentTime;
+    const map = mediaMap();
+    if (map) {
+      const out = sourceToOutput(map.video, video.currentTime);
+      const mapped = out == null ? null : outputToSource(map.audio, out);
+      if (mapped == null) return;
+      target = mapped;
+    }
+    if (Math.abs(target - audio.currentTime) < DRIFT_LIMIT) return;
     try {
-      audio.currentTime = video.currentTime;
+      audio.currentTime = target;
     } catch {
       /* not seekable yet — the next frame tries again */
     }
@@ -162,7 +224,10 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     // The wall clock is only a fallback: as soon as any media can drive the time, it does.
     if (playing && !activeMedia()) clock += (now - lastTick) / 1000;
     lastTick = now;
-    if (playing) resyncAudio();
+    if (playing) {
+      skipCuts();
+      resyncAudio();
+    }
 
     renderFrame(currentTime());
     raf = requestAnimationFrame(loop);
@@ -205,19 +270,44 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     return playing;
   }
 
-  /** Seek every loaded clock at once, so the picture and the sound cannot disagree. */
+  /**
+   * Seek every loaded clock at once, so the picture and the sound cannot disagree.
+   *
+   * The requested time is a *source* time (that is the clock the captions and the strip share), so a
+   * seek into a region the cut removed is nudged forward to the next frame that still exists — a
+   * playhead parked on a frame the file does not contain would show a caption over a picture that is
+   * not there.
+   */
   function seek(t) {
     const clamped = Math.max(0, t);
-    clock = clamped;
-    for (const m of [video, audio]) {
-      if (!isReady(m)) continue;
+    const map = mediaMap();
+    let videoTime = clamped;
+    if (map?.video?.length) {
+      const next = nextKeptSource(map.video, clamped);
+      videoTime = next == null ? clamped : next;
+    }
+    clock = videoTime;
+    if (isReady(video)) {
       try {
-        m.currentTime = clamped;
+        video.currentTime = videoTime;
       } catch {
         /* seeking before metadata is ready throws in some browsers — ignore, next frame is fine */
       }
     }
-    renderFrame(clamped);
+    if (isReady(audio)) {
+      let audioTime = videoTime;
+      if (map) {
+        const out = sourceToOutput(map.video, videoTime);
+        const mapped = out == null ? null : outputToSource(map.audio, out);
+        if (mapped != null) audioTime = mapped;
+      }
+      try {
+        audio.currentTime = audioTime;
+      } catch {
+        /* ignore, as above */
+      }
+    }
+    renderFrame(videoTime);
   }
 
   /** Swap in a new document (after alignment, loading a project, or a style change). */

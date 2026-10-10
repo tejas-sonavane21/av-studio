@@ -16,3 +16,4 @@ export const newProjectId = createIdFactory('proj');
 export const newBlockId = createIdFactory('blk');
 export const newWordId = createIdFactory('w');
 export const newCorrectionId = createIdFactory('cor');
+export const newSegmentId = createIdFactory('seg');

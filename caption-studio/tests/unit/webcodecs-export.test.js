@@ -11,15 +11,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  AUDIO_BITRATE_LADDER,
   DEFAULT_FORMAT,
   EXPORT_FORMATS,
+  evenSize,
   frameCount,
   lastCaptionEnd,
+  mapAudioToRanges,
   muxerAudioCodec,
   muxerVideoCodec,
   pickAudioCodec,
   pickCodec,
   pickVideoCodec,
+  resolutionFor,
+  resolveAudioBitrate,
 } from '../../src/io/webcodecs-export.js';
 
 test('pickCodec takes the first candidate the browser accepts', () => {
@@ -83,4 +88,109 @@ test('the two containers are described in one place, with MP4 the default', () =
   assert.equal(EXPORT_FORMATS.mp4.ext, 'mp4');
   assert.equal(EXPORT_FORMATS.mp4.mime, 'video/mp4');
   assert.equal(EXPORT_FORMATS.webm.mime, 'video/webm');
+});
+
+// ---------------------------------------------------------------------------
+// the audio bitrate search — the bug where "best" came out silent
+// ---------------------------------------------------------------------------
+
+/** The window this Chrome actually offers for AAC: 96 kbps up to 192 kbps, and nothing else. */
+const aacWindow = (rate) => rate >= 96000 && rate <= 192000;
+
+test('a refused audio bitrate is retried rather than turned into a silent track', async () => {
+  // 256 kbps ("best") is refused here; 192 ("high") is accepted. The old code took the refusal as
+  // "this browser cannot encode AAC" and dropped the sound entirely.
+  assert.equal(await resolveAudioBitrate(async (r) => aacWindow(r), 256000), 192000);
+  assert.equal(await resolveAudioBitrate(async (r) => aacWindow(r), 320000), 192000);
+});
+
+test('the search never upgrades a lower preference into a bigger file', async () => {
+  assert.equal(await resolveAudioBitrate(async (r) => aacWindow(r), 128000), 128000);
+  assert.equal(await resolveAudioBitrate(async (r) => aacWindow(r), 160000), 160000);
+  assert.equal(await resolveAudioBitrate(async (r) => aacWindow(r), 192000), 192000);
+  // A preference below the window is lifted to the floor, which is the smallest thing that works.
+  assert.equal(await resolveAudioBitrate(async (r) => aacWindow(r), 64000), 96000);
+  assert.equal(await resolveAudioBitrate(async (r) => aacWindow(r), 16000), 96000);
+});
+
+test('with nothing acceptable it reports failure rather than guessing', async () => {
+  assert.equal(await resolveAudioBitrate(async () => false, 192000), 0);
+  assert.equal(await resolveAudioBitrate(async () => { throw new Error('boom'); }, 192000), 0);
+});
+
+test('a probe that throws for one rate still tries the rest', async () => {
+  const choosy = async (rate) => {
+    if (rate === 192000) throw new Error('nope');
+    return rate === 128000;
+  };
+  assert.equal(await resolveAudioBitrate(choosy, 192000), 128000);
+});
+
+test('every rate the ladder tries is a real one, and a preference it lacks is still tried', async () => {
+  const asked = [];
+  await resolveAudioBitrate(async (r) => {
+    asked.push(r);
+    return false;
+  }, 111000);
+  assert.equal(asked[0], 111000, 'the caller\u2019s own rate is offered first');
+  assert.ok(asked.some((r) => AUDIO_BITRATE_LADDER.includes(r)), 'and the standard rates follow');
+  assert.equal(new Set(asked).size, asked.length, 'no rate is asked about twice');
+});
+
+// ---------------------------------------------------------------------------
+// the output size
+// ---------------------------------------------------------------------------
+
+test('evenSize rounds up so a codec never sees an odd width', () => {
+  assert.deepEqual(evenSize(1920, 1080), { width: 1920, height: 1080 });
+  assert.deepEqual(evenSize(1921, 1081), { width: 1922, height: 1082 });
+  assert.deepEqual(evenSize(0, -4), { width: 2, height: 2 }, 'a nonsense size still encodes');
+});
+
+test('a resolution preset names the short edge, whatever the frame shape', () => {
+  assert.deepEqual(resolutionFor(1080, 16 / 9), { width: 1920, height: 1080 });
+  assert.deepEqual(resolutionFor(720, 16 / 9), { width: 1280, height: 720 });
+  assert.deepEqual(resolutionFor(2160, 16 / 9), { width: 3840, height: 2160 }, '4K landscape');
+  assert.deepEqual(resolutionFor(1080, 9 / 16), { width: 1080, height: 1920 }, 'the same preset, portrait');
+  assert.deepEqual(resolutionFor(1080, 1), { width: 1080, height: 1080 }, 'square');
+  assert.deepEqual(resolutionFor(1080, 21 / 9), { width: 2520, height: 1080 }, 'cinemascope');
+  assert.deepEqual(resolutionFor(1080, 4 / 5), { width: 1080, height: 1350 }, 'and Instagram\u2019s own 4:5 delivery size');
+});
+
+test('resolutionFor will not mint a frame bigger than any camera makes', () => {
+  const huge = resolutionFor(999999, 21 / 9);
+  assert.ok(huge.width <= 7680 && huge.height <= 4320);
+});
+
+// ---------------------------------------------------------------------------
+// the sound, laid out along the cuts
+// ---------------------------------------------------------------------------
+
+/** A four-samples-a-second mono source, so the mapping arithmetic is readable. */
+const tone = () => ({
+  numberOfChannels: 1,
+  getChannelData: () => new Float32Array([0, 1, 2, 3, 4, 5, 6, 7]),
+});
+
+test('audio from a cut source is laid out along the kept ranges and stays in step', () => {
+  // keeps [0s, 1s) and [1.5s, 2s) — half a second cut out of the middle
+  const ranges = [
+    { id: 'a', srcIn: 0, srcOut: 1 },
+    { id: 'b', srcIn: 1.5, srcOut: 2 },
+  ];
+  const [left, right] = mapAudioToRanges(tone(), ranges, 4, 6, 2);
+  assert.deepEqual([...left], [0, 1, 2, 3, 6, 7], 'the removed half-second is not copied');
+  assert.deepEqual([...right], [...left], 'a mono source is heard on both sides');
+});
+
+test('a track shorter than the picture leaves silence rather than garbage', () => {
+  const ranges = [{ id: 'a', srcIn: 0, srcOut: 1 }];
+  const [left] = mapAudioToRanges(tone(), ranges, 4, 8, 2);
+  assert.deepEqual([...left], [0, 1, 2, 3, 0, 0, 0, 0]);
+});
+
+test('an empty cut list produces silence of the requested length', () => {
+  const [left] = mapAudioToRanges(tone(), [], 4, 5, 2);
+  assert.equal(left.length, 5);
+  assert.ok(left.every((v) => v === 0));
 });

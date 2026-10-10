@@ -411,9 +411,9 @@ async function main() {
 
   await check(
     cdp,
-    'the timeline strip is built',
-    'document.querySelectorAll("#timeline .timeline-track").length',
-    (v) => v === 1,
+    'the timeline draws a lane for the captions, the picture and the sound',
+    '[...document.querySelectorAll("#timeline .timeline-track")].map((t)=>t.className.replace("timeline-track","").trim()).join("|")',
+    (v) => v === 'captions|video|audio',
   );
   await check(
     cdp,
@@ -423,15 +423,39 @@ async function main() {
   );
   await check(
     cdp,
+    'the timeline offers the cut commands',
+    '[...document.querySelectorAll("#timeline .timeline-actions button")].map((b)=>b.dataset.command).join("|")',
+    (v) => v === 'split|cut-left|cut-right|delete|reset',
+  );
+  await check(
+    cdp,
     'the transport has a switch for each sound source plus a master mute',
     'document.querySelectorAll("#video-audio-toggle, #audio-audio-toggle, #mute-toggle").length',
     (v) => v === 3,
   );
   await check(
     cdp,
-    'and the export offers a container choice, MP4 by default',
-    'document.querySelector("#export-format").value',
+    'the sidebar offers the three workflows as tabs',
+    '[...document.querySelectorAll(".tabs [role=tab]")].map((b)=>b.dataset.tab).join("|")',
+    (v) => v === 'sources|transcribe|export',
+  );
+  await check(
+    cdp,
+    'with exactly one of them showing',
+    '[...document.querySelectorAll(".tab-panel")].filter((p)=>!p.hidden).length',
+    (v) => v === 1,
+  );
+  await check(
+    cdp,
+    'and the export window is built, MP4 by default',
+    'document.querySelector("#export-dialog-format").value',
     (v) => v === 'mp4',
+  );
+  await check(
+    cdp,
+    'the export window offers every resolution preset',
+    '[...document.querySelectorAll("#export-dialog-resolution option")].map((o)=>o.value).join("|")',
+    (v) => v === 'source|480p|720p|1080p|1440p|2160p',
   );
 
   console.log('\n■ demo document');
@@ -517,6 +541,89 @@ async function main() {
     (v) => v === true,
   );
   await evaluate(cdp, '[...document.querySelectorAll("#timeline .timeline-toolbar button")].find(b=>b.textContent==="Fit").click()');
+
+  // ---- the cut -------------------------------------------------------------
+  // Everything below is driven through the strip's own buttons and handles, so what is tested is the
+  // path a user takes rather than a function called directly.
+  const lane = (track) =>
+    `document.querySelectorAll('#timeline .timeline-track.${track} .timeline-segment').length`;
+  const clickCommand = (command) =>
+    `document.querySelector('#timeline .timeline-actions button[data-command="${command}"]').click()`;
+  const statusText = 'document.querySelector("#timeline-status").textContent';
+
+  await check(cdp, 'the picture lane starts as one uncut clip', lane('video'), (v) => v === 1);
+  await check(cdp, 'and so does the sound lane', lane('audio'), (v) => v === 1);
+  await check(cdp, 'the status line reports the whole recording while nothing is cut', statusText, (v) =>
+    /\d+ captions?$/.test(String(v)),
+  );
+
+  await evaluate(cdp, clickCommand('split'));
+  await delay(150);
+  await check(cdp, 'Split cuts the picture lane at the playhead', lane('video'), (v) => v === 2);
+  await check(cdp, 'and puts the same cut in the sound lane', lane('audio'), (v) => v === 2);
+
+  await evaluate(cdp, clickCommand('cut-right'));
+  await delay(150);
+  await check(cdp, 'Cut right drops everything after the playhead', lane('video'), (v) => v === 1);
+  await check(
+    cdp,
+    'and the status line now reports a file shorter than the recording',
+    statusText,
+    (v) => /\d+\.\ds of \d+\.\ds after the cuts/.test(String(v)),
+  );
+  await check(
+    cdp,
+    'a caption the cut removed is dimmed on the strip rather than deleted from the document',
+    'document.querySelectorAll("#timeline .timeline-clip.dropped").length',
+    (v) => v >= 1,
+  );
+
+  // A trim, through a real drag on the clip's own edge handle.
+  const trim = await evaluate(
+    cdp,
+    `(()=>{
+      const seg = document.querySelector('#timeline .timeline-track.video .timeline-segment');
+      const before = seg.getBoundingClientRect().width;
+      const handle = seg.querySelector('.timeline-handle.right');
+      const r = handle.getBoundingClientRect();
+      const at = (x) => ({ bubbles: true, cancelable: true, clientX: x, clientY: r.top + r.height / 2, pointerId: 1, isPrimary: true });
+      const scroll = document.querySelector('#timeline .timeline-scroll');
+      scroll.setPointerCapture = () => {};
+      handle.dispatchEvent(new PointerEvent('pointerdown', at(r.left + r.width / 2)));
+      scroll.dispatchEvent(new PointerEvent('pointermove', at(r.left - 60)));
+      scroll.dispatchEvent(new PointerEvent('pointerup', at(r.left - 60)));
+      const after = document.querySelector('#timeline .timeline-track.video .timeline-segment').getBoundingClientRect().width;
+      return { before, after };
+    })()`,
+  );
+  assert(
+    'dragging a clip\u2019s edge trims it shorter',
+    trim.after < trim.before - 5,
+    `was ${trim.before}px, now ${trim.after}px`,
+  );
+
+  await evaluate(cdp, 'document.querySelector("#timeline .timeline-track.video .timeline-segment").click()');
+  await delay(150);
+  await check(
+    cdp,
+    'clicking a picture clip selects it',
+    'document.querySelectorAll("#timeline .timeline-segment.active").length',
+    (v) => v === 1,
+  );
+  await evaluate(cdp, clickCommand('delete'));
+  await delay(150);
+  await check(cdp, 'Delete removes the selected clip', lane('video'), (v) => v === 0);
+
+  await evaluate(cdp, clickCommand('reset'));
+  await delay(150);
+  await check(cdp, 'Reset cuts puts the whole recording back', lane('video'), (v) => v === 1);
+  await check(cdp, 'and the sound lane with it', lane('audio'), (v) => v === 1);
+  await check(
+    cdp,
+    'and no caption is left dimmed',
+    'document.querySelectorAll("#timeline .timeline-clip.dropped").length',
+    (v) => v === 0,
+  );
 
   console.log('\n■ templates');
   await evaluate(cdp, '[...document.querySelectorAll("#templates .tile")].find(t=>t.dataset.id==="veed-karaoke").click()');
@@ -697,11 +804,13 @@ async function main() {
 
   console.log('\n■ control scope (apply a setting to every caption)');
   // `#block-inspector` used to be left unclosed in the markup, silently nesting the transcribe, export
-  // and sources panels inside it. Nothing asserted the layout, so nothing caught it. This does.
+  // and sources panels inside it. Nothing asserted the layout, so nothing caught it. This does — and
+  // the count is asked of `main section.panel` rather than of `main > section.panel`, because the
+  // panels now live inside `.workspace` and the sidebar deliberately, which is not nesting either.
   await check(
     cdp,
-    'every panel is a direct child of main, none nested',
-    'document.querySelectorAll("main > section.panel").length + "/" + document.querySelectorAll("section.panel section.panel").length',
+    'every panel lives inside main, and none is nested in another',
+    'document.querySelectorAll("main section.panel").length + "/" + document.querySelectorAll("section.panel section.panel").length',
     (v) => v === '9/0',
     '9 panels, 0 nested',
   );
@@ -1595,6 +1704,16 @@ async function main() {
   stub.close();
 
   console.log('\n■ export');
+  // The three workflow panels are tabs now, so this section starts by choosing the one it is about —
+  // the same click a user makes, which also proves the strip really does switch panels.
+  await evaluate(cdp, 'document.querySelector("#tab-export-btn").click()');
+  await delay(150);
+  await check(
+    cdp,
+    'choosing the Export tab shows that panel and hides the others',
+    'document.querySelector("#tab-export").hidden + "/" + document.querySelector("#tab-sources").hidden + "/" + document.querySelectorAll(".tab-panel:not([hidden])").length',
+    (v) => v === 'false/true/1',
+  );
   // Watch the two calls every download goes through, so the buttons are checked by what they
   // actually save rather than by a log line.
   await evaluate(
@@ -1622,22 +1741,23 @@ async function main() {
   );
   await check(
     cdp,
-    'the export offers a quality setting, high by default',
-    'document.querySelector("#export-quality").value',
+    'the export window offers a quality setting, high by default',
+    'document.querySelector("#export-dialog-quality").value',
     (v) => v === 'high',
   );
   await check(
     cdp,
     'and it is the same set of presets the encoder reads',
-    '[...document.querySelectorAll("#export-quality option")].map((o)=>o.value).join("|")',
+    '[...document.querySelectorAll("#export-dialog-quality option")].map((o)=>o.value).join("|")',
     (v) => v === 'balanced|high|best',
   );
   await check(
     cdp,
-    'and the container choice is MP4 or WebM, MP4 by default',
-    '[...document.querySelectorAll("#export-format option")].map((o)=>o.value+":"+(o.selected?"on":"off")).join("|")',
+    'the container choice is MP4 or WebM, MP4 by default',
+    '[...document.querySelectorAll("#export-dialog-format option")].map((o)=>o.value+":"+(o.selected?"on":"off")).join("|")',
     (v) => v === 'mp4:on|webm:off',
   );
+
   for (const [id, ext] of [
     ['#download-project', '.caproj'],
     ['#download-veed', '.veed.json'],
@@ -1793,16 +1913,40 @@ async function main() {
       );
       await delay(150);
     };
+    // Open the export window and set it the way a user would: the resolution stays `source`, so the
+    // export is at the project's own frame and the older assertions about the portrait letterbox keep
+    // meaning what they meant.
+    await evaluate(
+      cdp,
+      `(()=>{
+        window.__openExport = ({ format, quality, resolution }) => {
+          document.querySelector('#download-video').click();
+          const set = (sel, value) => {
+            const node = document.querySelector(sel);
+            node.value = value;
+            node.dispatchEvent(new Event('change', { bubbles: true }));
+          };
+          set('#export-dialog-resolution', resolution || 'source');
+          set('#export-dialog-format', format || 'mp4');
+          set('#export-dialog-quality', quality || 'high');
+          return document.querySelector('#export-dialog').open;
+        };
+      })()`,
+    );
     const exportWith = async (quality, aspect, format = 'mp4') => {
       await reSelectVideo();
       await evaluate(cdp, setAspect(aspect));
-      await evaluate(
+      await evaluate(cdp, `window.__openExport({ format: '${format}', quality: '${quality}', resolution: 'source' })`);
+      await check(cdp, 'the export window opens over the app', 'document.querySelector("#export-dialog").open', (v) => v === true);
+      await check(
         cdp,
-        `(()=>{document.querySelector('#export-format').value='${format}';document.querySelector('#export-quality').value='${quality}';})()`,
+        'and it says what the file will be before anything is encoded',
+        'document.querySelector("#export-readout").textContent',
+        (v) => /^(MP4|WEBM) /.test(String(v)) && String(v).includes(" fps ") && String(v).includes(" Mbps video ") && String(v).includes(" kbps audio")
       );
       const before = await evaluate(cdp, 'window.__blobSizes.length');
       const started = Date.now();
-      await evaluate(cdp, 'document.querySelector("#download-video").click()');
+      await evaluate(cdp, 'document.querySelector("#export-dialog-go").click()');
       try {
         await waitFor(
           cdp,
@@ -1818,6 +1962,7 @@ async function main() {
         );
         throw new Error(`${quality} export did not finish: ${where} (${err.message})`);
       }
+      await evaluate(cdp, 'document.querySelector("#export-dialog").close()');
       const bytes = await evaluate(cdp, 'window.__blobSizes[window.__blobSizes.length - 1]');
       const elapsed = ((Date.now() - started) / 1000).toFixed(1);
       const note = await evaluate(
@@ -1844,7 +1989,7 @@ async function main() {
     await check(
       cdp,
       'the export names the quality it encoded at rather than leaving it to the browser',
-      'document.querySelector("#log").textContent.includes("at best quality")',
+      'document.querySelector("#log").textContent.includes("best quality")',
       (v) => v === true,
     );
     await check(

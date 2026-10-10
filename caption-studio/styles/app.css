@@ -25,20 +25,45 @@ header.app-bar .badge {
 header .spacer { flex: 1; }
 
 /*
- * Three equal columns, and every panel placed by an explicit span rather than by auto-flow.
+ * One column: the preview and the timeline own the full width, and everything below them is split by
+ * `.workspace` into an editing column and a sidebar.
  *
- * The earlier 320/1fr/380 rail split only ever applied to the panels that happened to fall after the
- * full-width ones, which is how the Transcribe / Export / Sources row came out lopsided — one narrow,
- * one wide, one narrow, each a different height. Equal thirds make that row read as the three
- * parallel workflows it actually is, at any window width.
+ * This is the third arrangement of this page, and the reason for it is worth writing down. The rail
+ * split made Transcribe / Export / Sources lopsided; equal thirds made them three tall narrow ribbons,
+ * each a different height, none of them readable at a glance. The panels are workflows you use *one at
+ * a time*, so giving them one column and a tab strip is both wider and shorter — which is what
+ * "horizontal" was actually asking for.
  */
 main {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--gap);
   padding: var(--gap);
   align-items: start;
 }
+
+/* The editing column and the sidebar. The sidebar is a fixed sensible width rather than a fraction:
+   it holds forms, and a form that keeps changing width as the window moves is its own genre of bug. */
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+  gap: var(--gap);
+  align-items: start;
+}
+@media (max-width: 1080px) { .workspace { grid-template-columns: minmax(0, 1fr); } }
+.workspace-main { display: grid; gap: var(--gap); align-items: start; }
+.workspace-side { display: grid; gap: var(--gap); align-content: start; }
+
+/* A tab strip, not a stack of accordions: three workflows, one column, one visible at a time. */
+.tabs { display: flex; gap: 6px; }
+.tabs button {
+  flex: 1; padding: 8px 10px; font-size: 12px; letter-spacing: 0.04em;
+  background: var(--bg-1); color: var(--text-2);
+}
+.tabs button[aria-selected='true'] {
+  background: var(--bg-3); color: var(--text-0); border-color: var(--accent-dim);
+}
+.tab-panel[hidden] { display: none; }
 
 .panel {
   background: var(--bg-1);
@@ -93,9 +118,6 @@ button:hover:not(:disabled) { filter: brightness(1.08); }
 
 /* the preview spans the whole grid; the working panels flow below it */
 .preview-panel { grid-column: 1 / -1; }
-/* The three workflow panels sit side by side, one per column — the horizontal row they were before
-   they briefly went narrow-and-stacked. */
-.transcribe-panel, .export-panel, .sources-panel { grid-column: auto; }
 .preview-panel h2 { display: flex; align-items: center; gap: 8px; }
 
 .stage {
@@ -225,7 +247,7 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 }
 .stage.has-content > .overlay-canvas:active { cursor: grabbing; }
 
-.templates-panel, .block-panel, .timeline-panel { grid-column: 1 / -1; }
+.timeline-panel { grid-column: 1 / -1; }
 .templates-panel h2, .block-panel h2 { display: flex; align-items: center; gap: 8px; }
 .templates-panel h2 .spacer, .block-panel h2 .spacer { flex: 1; }
 
@@ -425,7 +447,12 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
   cursor: crosshair;
   touch-action: none;
 }
-.timeline-inner { position: relative; height: 74px; min-width: 100%; }
+.timeline-actions { display: flex; gap: 6px; }
+.timeline-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* The inner height and every row's top/height are set from `editor/timeline.js`, so the geometry the
+   eyeball sees and the geometry the hit-testing uses come from one set of numbers. */
+.timeline-inner { position: relative; min-width: 100%; }
 
 .timeline-ruler { position: absolute; top: 0; left: 0; height: 24px; }
 .timeline-tick { position: absolute; top: 16px; width: 1px; height: 6px; background: var(--border); }
@@ -435,16 +462,51 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
   font-size: 9px; color: var(--text-2); font-family: var(--font-mono); white-space: nowrap;
 }
 
-.timeline-track { position: absolute; top: 28px; left: 0; height: 40px; }
+.timeline-track { position: absolute; left: 0; }
+
+/* A row label that stays put while the strip scrolls under it — the alternative is a gutter column
+   outside the scroller, which would offset every time calculation by its width. */
+.timeline-row-label {
+  position: sticky; left: 0; z-index: 3;
+  display: inline-flex; align-items: center; padding: 0 6px;
+  font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-2);
+  background: linear-gradient(90deg, var(--bg-2) 70%, rgba(0, 0, 0, 0));
+  pointer-events: none; user-select: none;
+}
+
 .timeline-clip {
-  position: absolute; top: 0; height: 40px; padding: 2px 6px; overflow: hidden;
+  position: absolute; top: 0; padding: 2px 6px; overflow: hidden;
   display: flex; align-items: center;
   background: var(--bg-3); border: 1px solid var(--border); border-radius: 4px;
   color: var(--text-1); font-size: 11px; text-align: left; white-space: nowrap; cursor: pointer;
 }
 .timeline-clip:hover:not(:disabled) { border-color: var(--accent-dim); }
 .timeline-clip.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; color: var(--text-0); }
+/* A caption the cut removed: still visible (so the cut is legible) but plainly not in the file. */
+.timeline-clip.dropped { opacity: 0.35; border-style: dashed; }
 .timeline-clip-text { overflow: hidden; text-overflow: ellipsis; }
+
+/* The picture and the sound, as the parts of the recording that are still kept. */
+.timeline-segment {
+  position: absolute; top: 4px; overflow: hidden;
+  border-radius: 4px; border: 1px solid;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; user-select: none;
+}
+.timeline-track.video .timeline-segment { background: rgba(96, 165, 250, 0.2); border-color: #3b82f6; }
+.timeline-track.audio .timeline-segment { background: rgba(34, 197, 94, 0.16); border-color: #22c55e; }
+.timeline-segment.active { box-shadow: 0 0 0 1px var(--accent) inset; }
+.timeline-segment-text {
+  font-size: 10px; font-family: var(--font-mono); color: var(--text-1);
+  pointer-events: none; white-space: nowrap;
+}
+.timeline-handle {
+  position: absolute; top: 0; bottom: 0; width: 8px; z-index: 2;
+  cursor: ew-resize; background: rgba(255, 255, 255, 0.14);
+}
+.timeline-handle.left { left: 0; border-radius: 4px 0 0 4px; }
+.timeline-handle.right { right: 0; border-radius: 0 4px 4px 0; }
+.timeline-handle:hover { background: var(--accent); }
 
 /* A playhead is a 2px line with a head, drawn over everything and never a pointer target — grabbing
    the line instead of scrubbing the strip would be an infuriating way to miss a seek. */
@@ -459,3 +521,55 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
   color: var(--text-2); font-size: 12px; pointer-events: none;
 }
 .timeline-empty[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ *
+ * Phase 7 — the export window
+ * ------------------------------------------------------------------ */
+
+/* A native <dialog>, so Escape, the backdrop and focus containment are the browser's job rather than
+   a hand-rolled overlay's. `showModal()` puts it in the top layer, above the transport and the canvas. */
+.export-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--text-0);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+}
+.export-dialog::backdrop { background: rgba(0, 0, 0, 0.62); }
+.export-dialog.busy { cursor: progress; }
+
+.export-form { display: grid; gap: 14px; padding: 18px 20px 20px; }
+.export-head, .export-foot { display: flex; align-items: center; gap: 10px; }
+.export-head .spacer, .export-foot .spacer { flex: 1; }
+.export-head h2 {
+  margin: 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-2);
+}
+.export-close { padding: 4px 10px; }
+
+/* Two columns of labelled fields: wide enough for the labels, narrow enough that the window is not a
+   wall of controls. One column on a narrow viewport. */
+.export-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; }
+@media (max-width: 620px) { .export-grid { grid-template-columns: minmax(0, 1fr); } }
+.export-field { gap: 6px; }
+.export-field > span:first-child { font-size: 11px; text-transform: uppercase; color: var(--text-2); }
+.export-field select, .export-field input { width: 100%; }
+.export-field .hint { text-transform: none; letter-spacing: 0; }
+.export-inline { display: flex; align-items: center; gap: 8px; }
+.export-inline input[type='number'] { width: 6rem; }
+.export-inline .unit { font-size: 12px; color: var(--text-2); }
+.export-inline button { padding: 5px 10px; font-size: 12px; }
+
+/* What the file will actually be — the one line that has to be right. */
+.export-readout {
+  margin: 0; padding: 9px 12px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text-0);
+}
+.export-warning { margin: 0; color: #fcd34d; }
+.export-dialog .progress-bar { background: var(--bg-3); }
+.export-dialog .progress-bar.busy { background: var(--accent-dim); }
+.export-dialog .progress-bar.failed { background: #b91c1c; }
