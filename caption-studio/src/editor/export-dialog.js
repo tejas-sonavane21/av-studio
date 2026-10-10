@@ -26,10 +26,15 @@ import {
   RESOLUTION_PRESETS,
   applyResolution,
   defaultExportSettings,
+  describeExportResult,
   describeSettings,
   outputSize,
   recommendFor,
 } from '../io/export-settings.js';
+
+/** The line the window shows before a job starts. Also what it falls back to between jobs. */
+const IDLE_NOTE =
+  'Frames are rendered and encoded offline, so the export is not tied to real time and the preview stays usable while it runs.';
 
 const el = (tag, cls, text) => {
   const node = document.createElement(tag);
@@ -61,7 +66,9 @@ function selectOf(entries, value, onchange, attrs = {}) {
 /**
  * @param {object} options
  * @param {() => {sourceSize?:{width:number,height:number}, sourceFps?:number, docSize?:{width:number,height:number}, aspect?:number}} options.getContext
- * @param {(settings:object, encoder:object) => Promise<void>} options.onExport
+ * @param {(settings:object) => Promise<{name:string, bytes:number, seconds?:number, frames?:number, audioNote?:string, audioSkipped?:string}>} options.onExport
+ *   Resolves with the file that was written — that is what the window reports as finished. Resolving
+ *   with nothing is treated as a failure, because the window must never claim a file it cannot name.
  * @param {(ratioId:string) => void} [options.onRatioChange]
  */
 export function createExportDialog({ getContext, onExport, onRatioChange = null } = {}) {
@@ -196,12 +203,21 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
   const bar = el('div', 'progress-bar');
   bar.id = 'export-dialog-bar';
   const progress = el('div', 'progress');
-  progress.append(bar);
   progress.id = 'export-dialog-progress';
-  const note = el('p', 'hint');
+  progress.setAttribute('role', 'progressbar');
+  progress.setAttribute('aria-valuemin', '0');
+  progress.setAttribute('aria-valuemax', '100');
+  progress.append(bar);
+  // A track with no height is not a progress bar, and "muxing the file" is not a status. The bar says
+  // how far along this is; the number beside it says the same thing in the one unit nobody has to
+  // interpret, and stays readable even while the bar is too short to judge.
+  const percent = el('span', 'export-percent mono', '0%');
+  percent.id = 'export-dialog-percent';
+  const progressRow = el('div', 'export-progress');
+  progressRow.append(progress, percent);
+  const note = el('p', 'hint export-note');
   note.id = 'export-dialog-note';
-  note.textContent =
-    'Frames are rendered and encoded offline, so the export is not tied to real time and the preview stays usable while it runs.';
+  note.textContent = IDLE_NOTE;
 
   const foot = el('div', 'export-foot');
   const spacer = el('span', 'spacer');
@@ -212,11 +228,12 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
   go.id = 'export-dialog-go';
   foot.append(spacer, cancel, go);
 
-  form.append(head, grid, readout, warning, progress, note, foot);
+  form.append(head, grid, readout, warning, progressRow, note, foot);
   dialog.append(form);
 
   let busy = false;
   let lastProgress = 0;
+  let finished = false;
 
   function context() {
     const raw = getContext() ?? {};
@@ -285,16 +302,69 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
     dialog.classList.toggle('busy', busy);
   }
 
+  /**
+   * The job is over and the file is on disk. Say so — this is the state the window never had.
+   *
+   * A finished export and a wedged one used to look identical, because the only thing that ever
+   * changed was the last progress message. Now the bar completes, the number reads 100%, the note
+   * names the file and its size, and the colour of all three says "done" without being read.
+   */
+  function finish(result) {
+    const { headline, caveat } = describeExportResult(result);
+    finished = true;
+    lastProgress = 1;
+    bar.style.width = '100%';
+    bar.classList.remove('busy', 'failed');
+    bar.classList.add('done');
+    percent.textContent = '100%';
+    percent.classList.add('done');
+    progress.setAttribute('aria-valuenow', '100');
+    note.textContent = caveat ? `${headline}\n${caveat}` : headline;
+  }
+
+  /**
+   * Move the bar and the number. Also what clears a previous job's "done", so the window never shows a
+   * green 100% over a run that has only just started.
+   */
+  function setProgress(fraction, message) {
+    lastProgress = Math.max(0, Math.min(1, Number(fraction) || 0));
+    const whole = Math.round(lastProgress * 100);
+    bar.style.width = `${whole}%`;
+    bar.classList.remove('done', 'failed');
+    percent.textContent = `${whole}%`;
+    percent.classList.remove('done', 'failed');
+    progress.setAttribute('aria-valuenow', String(whole));
+    finished = false;
+    if (message) note.textContent = message;
+  }
+
+  /** The job did not produce a file. Say that too, rather than leaving the last progress message up. */
+  function markFailed(reason = '') {
+    finished = false;
+    bar.classList.remove('busy', 'done');
+    bar.classList.add('failed');
+    percent.textContent = 'failed';
+    percent.classList.add('failed');
+    note.textContent = reason
+      ? `the export failed — ${reason}`
+      : 'the export failed — the log has the reason';
+  }
+
   closeBtn.addEventListener('click', () => dialog.close());
   cancel.addEventListener('click', () => dialog.close());
   go.addEventListener('click', async () => {
     if (busy) return;
     setBusy(true);
-    bar.style.width = '0%';
-    bar.classList.remove('failed');
+    setProgress(0, 'preparing the encoder…');
     bar.classList.add('busy');
     try {
-      await onExport({ ...settings });
+      const result = await onExport({ ...settings });
+      // The caller names the file it wrote or it is not a success; a window that said "done" over an
+      // empty result would be exactly the ambiguity this state exists to remove.
+      if (result?.name) finish(result);
+      else markFailed('nothing was written — the log has the reason');
+    } catch (err) {
+      markFailed(err?.message ?? String(err));
     } finally {
       setBusy(false);
       bar.classList.remove('busy');
@@ -326,10 +396,9 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
       ratioSelect.value = ratioId;
       syncFields();
       refresh();
-      note.textContent =
-        'Frames are rendered and encoded offline, so the export is not tied to real time and the preview stays usable while it runs.';
-      bar.style.width = '0%';
-      bar.classList.remove('failed');
+      // A window that is opened again starts clean: the previous job's "done" is not this job's.
+      note.textContent = IDLE_NOTE;
+      setProgress(0, '');
       if (!dialog.open) {
         if (typeof dialog.showModal === 'function') dialog.showModal();
         else dialog.setAttribute('open', '');
@@ -345,19 +414,18 @@ export function createExportDialog({ getContext, onExport, onRatioChange = null 
     get isBusy() {
       return busy;
     },
-    setProgress(fraction, message) {
-      lastProgress = Math.max(0, Math.min(1, Number(fraction) || 0));
-      bar.style.width = `${lastProgress * 100}%`;
-      if (message) note.textContent = message;
-    },
+    setProgress,
     get progress() {
       return lastProgress;
     },
+    /** Has the last job in this window produced a file? The state the user asked to be able to see. */
+    get finished() {
+      return finished;
+    },
+    finish,
+    markFailed,
     setNote(text) {
       note.textContent = text;
-    },
-    markFailed() {
-      bar.classList.add('failed');
     },
     refresh,
     syncFromContext,

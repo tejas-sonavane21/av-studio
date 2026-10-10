@@ -23,11 +23,13 @@ import {
   normalizeRanges,
   outputDuration,
   outputToSource,
+  playbackTarget,
   rangeIndexAt,
   removeAt,
   resetTrack,
   sourceToOutput,
   splitAt,
+  timelineSummary,
   totalSourceEnd,
   trackRanges,
   trimEdge,
@@ -186,6 +188,92 @@ test('a caption is kept when most of it survives the cut', () => {
   assert.equal(captionKept(ranges, { start: 3, end: 6 }), false, 'half of it gone is gone');
   assert.equal(captionKept(ranges, { start: 3.9, end: 6 }), false);
   assert.equal(captionKept(ranges, { start: 0, end: 0 }), false, 'a zero-length caption is not drawn');
+});
+
+test('playbackTarget jumps a gap, keeps a kept frame, and ends past the last one', () => {
+  const ranges = [
+    { id: 'a', srcIn: 0, srcOut: 1 },
+    { id: 'b', srcIn: 3, srcOut: 5 },
+  ];
+
+  // inside the kept material: nothing to do, and the frame the element is on is the right one
+  assert.deepEqual(playbackTarget(ranges, 0.5), { time: 0.5, ended: false });
+  assert.deepEqual(playbackTarget(ranges, 4), { time: 4, ended: false });
+
+  // the two sides of the removed middle: jumped forward, never played through
+  assert.deepEqual(playbackTarget(ranges, 1.4), { time: 3, ended: false });
+  assert.deepEqual(playbackTarget(ranges, 1), { time: 3, ended: false }, 'the first removed frame jumps');
+
+  // before the first range a playhead is pulled forward to the first frame that exists
+  assert.deepEqual(playbackTarget([{ id: 'a', srcIn: 2, srcOut: 5 }], 0), { time: 2, ended: false });
+
+  // past the last kept frame there is nothing to play — this is the case a media element cannot
+  // notice on its own, because it only knows where its own file ends
+  const past = playbackTarget(ranges, 6);
+  assert.equal(past.ended, true);
+  assert.ok(past.time < 5 && past.time >= 4.9, `lands on the last kept frame, got ${past.time}`);
+  assert.equal(playbackTarget(ranges, 5).ended, true, 'and exactly at the end of it');
+
+  // an emptied track is not "past the end", it is nothing at all — and both read as ended
+  assert.deepEqual(playbackTarget([], 2), { time: 2, ended: true });
+});
+
+test('inGap stays the strip/exporter rule: past the end is the end, not a gap', () => {
+  // playbackTarget and inGap answer different questions on purpose. Keeping this pinned stops a
+  // later "simplification" from folding one into the other and losing the ending.
+  const ranges = [{ id: 'a', srcIn: 0, srcOut: 2 }];
+  assert.equal(inGap(ranges, 3), false, 'inGap: there is nothing after the end to call a gap');
+  assert.equal(playbackTarget(ranges, 3).ended, true, 'playbackTarget: and nothing left to play');
+});
+
+test('timelineSummary reports the file’s length, not the longer of the two lanes', () => {
+  const doc = {
+    blocks: [{ id: 'c', start: 0, end: 1 }],
+    timeline: {
+      video: { sourceDuration: 5, ranges: [{ id: 'a', srcIn: 0, srcOut: 2 }] },
+      audio: { sourceDuration: 23.2, ranges: [{ id: 'b', srcIn: 0, srcOut: 23.2 }] },
+    },
+  };
+  const summary = timelineSummary(doc, 5);
+  assert.equal(summary.outputSeconds, 2, 'the picture is what the encoder walks, so it is the file');
+  assert.equal(summary.sourceSeconds, 5);
+  assert.equal(summary.trimmed, true);
+});
+
+test('a lane is measured against its own source, so loading a short clip over a long document is not a cut', () => {
+  // The case that used to read "23.2s of 5.0s after the cuts" with nothing cut at all: a 23 s demo
+  // document, then a 5 s clip loaded into the picture lane.
+  const doc = {
+    blocks: [{ id: 'c', start: 0, end: 1 }],
+    timeline: {
+      video: { sourceDuration: 5, ranges: [{ id: 'a', srcIn: 0, srcOut: 5 }] },
+      audio: { sourceDuration: 23.2, ranges: [{ id: 'b', srcIn: 0, srcOut: 23.2 }] },
+    },
+  };
+  assert.deepEqual(timelineSummary(doc, 5), { outputSeconds: 5, sourceSeconds: 5, trimmed: false });
+
+  // and a full document with no media loaded yet is not a cut either
+  const untouched = {
+    blocks: [{ id: 'c', start: 0, end: 1 }],
+    timeline: {
+      video: { sourceDuration: 23.2, ranges: [{ id: 'a', srcIn: 0, srcOut: 23.2 }] },
+      audio: { sourceDuration: 23.2, ranges: [{ id: 'b', srcIn: 0, srcOut: 23.2 }] },
+    },
+  };
+  assert.equal(timelineSummary(untouched, 23.2).trimmed, false);
+});
+
+test('an emptied picture lane is a cut even though the sound still has a length to report', () => {
+  const doc = {
+    blocks: [{ id: 'c', start: 0, end: 1 }],
+    timeline: {
+      video: { sourceDuration: 5, ranges: [] },
+      audio: { sourceDuration: 5, ranges: [{ id: 'b', srcIn: 0, srcOut: 5 }] },
+    },
+  };
+  const summary = timelineSummary(doc, 5);
+  assert.equal(summary.trimmed, true, 'deleting every picture clip is a cut, not a no-op');
+  assert.equal(summary.outputSeconds, 5, 'and with no picture the sound stands in for the length');
 });
 
 test('droppedCaptionIds reports what the cut removed from the picture track', () => {

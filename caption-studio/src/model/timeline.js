@@ -164,6 +164,39 @@ export function isTrimmed(ranges, duration = 0) {
   return Math.abs(only.srcIn) > 1e-6 || Math.abs(only.srcOut - (Number(duration) || 0)) > 1e-6;
 }
 
+/**
+ * What the programme is now: how long the finished file is, how long the recording is, and whether the
+ * cut took anything away at all.
+ *
+ * Two decisions are worth stating, because both were wrong in a way the user could see.
+ *
+ * * **The picture sets the length.** The export walks the *video* track's kept ranges to decide how
+ *   many frames there are, so those ranges — not the longer of the two lanes — are the file. Only
+ *   when there is no picture left does the sound stand in for it, which keeps an audio-only session
+ *   reporting something sane.
+ * * **A track is compared against its own source.** A lane's recorded span is the length of the file
+ *   that was loaded into *it*; measuring it against whatever happens to be loaded in the other lane
+ *   invents a cut. Load a 5 s clip over a 23 s demo document and the sound lane still describes its
+ *   own 23 s span, which is not a trim — and must not be reported as one.
+ *
+ * Pure.
+ */
+export function timelineSummary(doc, duration = 0) {
+  const source = Math.max(0, Number(duration) || 0);
+  const spanOf = (track) => {
+    const span = Number(doc?.timeline?.[track]?.sourceDuration);
+    return Number.isFinite(span) && span > 0 ? span : source;
+  };
+  const picture = trackRanges(doc, 'video', source);
+  const sound = trackRanges(doc, 'audio', source);
+  const output = picture.length ? outputDuration(picture) : outputDuration(sound);
+  return {
+    outputSeconds: output,
+    sourceSeconds: source,
+    trimmed: isTrimmed(picture, spanOf('video')) || isTrimmed(sound, spanOf('audio')),
+  };
+}
+
 /** The index of the range holding source time `t`, or -1. Ranges are half-open [in, out). Pure. */
 export function rangeIndexAt(ranges, t) {
   const list = Array.isArray(ranges) ? ranges : [];
@@ -205,6 +238,36 @@ export function previousKeptSource(ranges, t) {
     if (range.srcIn <= t) best = Math.min(t, range.srcOut - 1e-3);
   }
   return best;
+}
+
+/**
+ * Where playback should be when it is at source time `t`.
+ *
+ * This is the rule the *player* needs, and it is deliberately not `inGap()`. A media element plays its
+ * whole file: it knows nothing about the cut, so once it reaches the last kept frame it carries on
+ * into material the programme dropped. `inGap()` is right about that — past the end *is* the end, not a
+ * gap — but "not a gap" is not the same as "there is something to play". `nextKeptSource()` alone
+ * cannot say it either: it answers `null` for two different situations (an emptied track, and a
+ * playhead that has run off the end), and the caller has to do something different in each case.
+ *
+ * So this returns both answers at once:
+ *
+ *   * `ended: false` — `time` is a source time that still exists; seek there if it is not where you
+ *     already are (a gap is jumped, a playhead before the first range is pulled forward);
+ *   * `ended: true` — nothing at or after `t` survives the cut. `time` is the last playable frame,
+ *     which is where a *seek* into removed material should land and where *playback* should stop.
+ *
+ * Pure.
+ */
+export function playbackTarget(ranges, t) {
+  const list = Array.isArray(ranges) ? ranges : [];
+  const time = Number(t) || 0;
+  if (!list.length) return { time, ended: true };
+  if (rangeIndexAt(list, time) !== -1) return { time, ended: false };
+  const next = nextKeptSource(list, time);
+  if (next != null) return { time: next, ended: false };
+  const previous = previousKeptSource(list, time);
+  return { time: previous == null ? time : previous, ended: true };
 }
 
 /** Where source time `t` lands in the exported programme, or `null` if it was cut away. Pure. */

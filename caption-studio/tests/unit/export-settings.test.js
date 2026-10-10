@@ -15,6 +15,7 @@ import {
   RESOLUTION_PRESETS,
   applyResolution,
   defaultExportSettings,
+  describeExportResult,
   describeSettings,
   effectiveBitrates,
   encoderSettings,
@@ -108,6 +109,33 @@ test('the encoder is configured from one place, so the readout and the encode ca
   assert.ok(encoder.videoBitsPerSecond > 0);
   assert.ok(encoder.audioBitsPerSecond > 0);
   assert.match(describeSettings(settings, { aspect: 16 / 9 }), /^WEBM · 1280×720 · 50 fps · high · [\d.]+ Mbps video · \d+ kbps audio$/);
+});
+
+test('the finished export is described by name and size, so the window can say it is done', () => {
+  const { headline, caveat } = describeExportResult({
+    name: 'clip.mp4',
+    bytes: 9156693,
+    seconds: 2,
+    frames: 50,
+  });
+  assert.equal(headline, 'Saved clip.mp4 — 9.2 MB · 2.0s · 50 frames');
+  assert.equal(caveat, '', 'a clean export has no caveat');
+});
+
+test('the one compromise the encoder had to make is carried on its own line', () => {
+  const note = 'the AAC encoder will not take 256 kbps, so the sound is encoded at 192 kbps';
+  assert.equal(describeExportResult({ name: 'a.mp4', bytes: 1000, audioNote: note }).caveat, note);
+  // a skipped audio track is the caveat that matters more, so it wins when both are present
+  assert.equal(
+    describeExportResult({ name: 'a.mp4', bytes: 1000, audioNote: note, audioSkipped: 'no uploaded audio file' })
+      .caveat,
+    'no uploaded audio file',
+  );
+});
+
+test('a result with nothing in it still describes something, rather than claiming a file it cannot name', () => {
+  assert.equal(describeExportResult({}).headline, 'Saved the video — 0.0 MB');
+  assert.equal(describeExportResult().caveat, '');
 });
 
 test('a nonsense frame rate or format is clamped rather than passed to the encoder', () => {

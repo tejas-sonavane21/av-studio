@@ -18,7 +18,7 @@
 import { createRenderer } from '../render/renderer.js';
 import { createLogger } from '../util/log.js';
 import { mergeDeep } from '../util/math.js';
-import { inGap, nextKeptSource, outputToSource, sourceToOutput, trackRanges } from '../model/timeline.js';
+import { outputToSource, playbackTarget, sourceToOutput, trackRanges } from '../model/timeline.js';
 
 const log = createLogger('preview');
 
@@ -106,12 +106,18 @@ export function createPreview({ canvas, video = null, audio = null, container = 
   }
 
   /**
-   * Step over a region the cut removed.
+   * Step over a region the cut removed — and stop when the cut reaches the end.
    *
    * A cut is a gap in the source, not a shorter programme, so playback has to *jump* it — otherwise
    * trimming a clip would leave the preview playing exactly the seconds that were cut away, which is
    * the one thing a cut is supposed to mean. Skipped per element, because the two tracks can be cut in
-   * different places; a track that has run out stops rather than pretending.
+   * different places.
+   *
+   * The end is the half that used to be missed. A media element plays its own whole file and knows
+   * nothing about the cut, so after the last kept frame it simply carries on: cutting the tail off a
+   * clip (`Cut right`) looked like it had done nothing at all while the preview ran on into material the
+   * programme had dropped. `playbackTarget()` answers that too — when it reports `ended`, this track has
+   * no kept material at or after the playhead, and the transport stops instead of sailing past the cut.
    */
   function skipCuts() {
     const map = mediaMap();
@@ -121,18 +127,20 @@ export function createPreview({ canvas, video = null, audio = null, container = 
       [audio, map.audio],
     ]) {
       if (!ranges.length || !isReady(media) || media.paused) continue;
-      const t = media.currentTime;
-      if (!inGap(ranges, t)) continue;
-      const next = nextKeptSource(ranges, t);
-      if (next == null) {
+      const at = media.currentTime;
+      const target = playbackTarget(ranges, at);
+      if (target.ended) {
+        // Nothing at or after this point survives the cut. The picture ending is the programme ending;
+        // a track that has run out stops rather than playing what was removed.
         if (media === video) pause();
         else media.pause();
-      } else {
-        try {
-          media.currentTime = next;
-        } catch {
-          /* not seekable yet — the next frame tries again */
-        }
+        continue;
+      }
+      if (target.time === at) continue; // still on kept material — leave the decoder alone
+      try {
+        media.currentTime = target.time;
+      } catch {
+        /* not seekable yet — the next frame tries again */
       }
     }
   }
@@ -274,18 +282,15 @@ export function createPreview({ canvas, video = null, audio = null, container = 
    * Seek every loaded clock at once, so the picture and the sound cannot disagree.
    *
    * The requested time is a *source* time (that is the clock the captions and the strip share), so a
-   * seek into a region the cut removed is nudged forward to the next frame that still exists — a
-   * playhead parked on a frame the file does not contain would show a caption over a picture that is
-   * not there.
+   * seek into a region the cut removed lands on the nearest frame that still exists — forward to the
+   * next kept frame, or back onto the last one when the picture has run out. A playhead parked on a
+   * frame the file does not contain would show a caption over a picture that is not there.
    */
   function seek(t) {
     const clamped = Math.max(0, t);
     const map = mediaMap();
-    let videoTime = clamped;
-    if (map?.video?.length) {
-      const next = nextKeptSource(map.video, clamped);
-      videoTime = next == null ? clamped : next;
-    }
+    const target = map?.video?.length ? playbackTarget(map.video, clamped) : null;
+    const videoTime = target ? target.time : clamped;
     clock = videoTime;
     if (isReady(video)) {
       try {

@@ -1859,6 +1859,63 @@ async function main() {
       `worst edge ${drift}px out — ${JSON.stringify(rects)}`,
     );
 
+    // The preview has to honour the cut. This is the bug this locks down: a media element plays its
+    // own whole file and knows nothing about the timeline, so cutting the tail off a clip used to
+    // leave the preview running happily through the seconds that had just been dropped. Only the
+    // preview can stop that, so it is checked through the real transport rather than by calling the
+    // model: scrub with the seek bar, press Play, and see where the picture actually stops.
+    const seekTo = (seconds) =>
+      `(()=>{const s=document.querySelector('#seek');s.value='${seconds}';s.dispatchEvent(new Event('input',{bubbles:true}));return document.querySelector('#preview-video').currentTime})()`;
+    await evaluate(cdp, seekTo(2));
+    await delay(150);
+    await evaluate(
+      cdp,
+      'document.querySelector(\'#timeline .timeline-actions button[data-command="cut-right"]\').click()',
+    );
+    await delay(250);
+    await check(
+      cdp,
+      'Cut right on a loaded picture really does shorten the programme',
+      'document.querySelector("#timeline-status").textContent',
+      (v) => /\d+\.\ds of \d+\.\ds after the cuts/.test(String(v)),
+    );
+    await evaluate(cdp, seekTo(0));
+    await delay(150);
+    await evaluate(cdp, 'document.querySelector("#play-btn").click()');
+    // Wait for the picture to stop, not for it to pass the cut: a preview that ignored the cut runs to
+    // the end of the file and stops there too, and the assertion below is what tells the two apart.
+    await waitFor(
+      cdp,
+      'document.querySelector("#preview-video").paused',
+      (v) => v === true,
+      { attempts: 80, intervalMs: 100, describe: 'the preview to stop' },
+    );
+    const playedTo = await evaluate(
+      cdp,
+      '(()=>{const v=document.querySelector("#preview-video");return {t:Number(v.currentTime.toFixed(2)),paused:v.paused,label:document.querySelector("#play-btn").textContent}})()',
+    );
+    assert(
+      'and the preview stops at the cut instead of playing on into the material it dropped',
+      playedTo.t < 2.2 && playedTo.paused,
+      `the picture was at ${playedTo.t}s (paused: ${playedTo.paused}) — the cut was at 2.0s`,
+    );
+    assert(
+      'the transport goes back to Play once it stops itself at the cut',
+      String(playedTo.label).includes('Play'),
+      `the button said ${JSON.stringify(playedTo.label)}`,
+    );
+    await evaluate(
+      cdp,
+      'document.querySelector(\'#timeline .timeline-actions button[data-command="reset"]\').click()',
+    );
+    await delay(250);
+    await check(
+      cdp,
+      'Reset puts the whole recording back before the export section measures it',
+      'document.querySelector("#timeline-status").textContent',
+      (v) => /^\d+ captions?$/.test(String(v)),
+    );
+
     // The frame-ratio lock. A picture normally sets the frame — but not over a ratio somebody has
     // chosen, or the whole point of picking 9:16 would be undone by the clip loaded next.
     await evaluate(cdp, setAspect('9:16'));
@@ -1933,6 +1990,8 @@ async function main() {
         };
       })()`,
     );
+    let progressChecked = false;
+    let completionChecked = false;
     const exportWith = async (quality, aspect, format = 'mp4') => {
       await reSelectVideo();
       await evaluate(cdp, setAspect(aspect));
@@ -1944,6 +2003,25 @@ async function main() {
         'document.querySelector("#export-readout").textContent',
         (v) => /^(MP4|WEBM) /.test(String(v)) && String(v).includes(" fps ") && String(v).includes(" Mbps video ") && String(v).includes(" kbps audio")
       );
+      // The window the report asked for: a bar with a real height, and a percentage to read. Both
+      // were missing before — `.progress` had no rule of its own inside the dialog, so the track and
+      // the bar inside it rendered zero pixels tall and an export ran with no visible sign at all.
+      // Measured while the dialog is open, because a closed `<dialog>` is `display: none`.
+      if (!progressChecked) {
+        progressChecked = true;
+        await check(
+          cdp,
+          'the export window shows a progress track with a real height rather than an invisible one',
+          '(()=>{const t=document.querySelector("#export-dialog-progress").getBoundingClientRect();const b=document.querySelector("#export-dialog-bar").getBoundingClientRect();return {track:Math.round(t.height),bar:Math.round(b.height),trackWidth:Math.round(t.width)}})()',
+          (v) => v.track >= 6 && v.bar >= 6 && v.trackWidth > 100,
+        );
+        await check(
+          cdp,
+          'and a percentage to read rather than a bar that has to be judged',
+          'document.querySelector("#export-dialog-percent").textContent',
+          (v) => /^\d+%$/.test(String(v)),
+        );
+      }
       const before = await evaluate(cdp, 'window.__blobSizes.length');
       const started = Date.now();
       await evaluate(cdp, 'document.querySelector("#export-dialog-go").click()');
@@ -1961,6 +2039,26 @@ async function main() {
           '(()=>{const v=document.querySelector("#preview-video");return JSON.stringify({video:{t:v.currentTime,d:String(v.duration),ended:v.ended,paused:v.paused,seeking:v.seeking,ready:v.readyState},status:document.querySelector("#export-status").textContent,note:document.querySelector("#export-note").textContent})})()',
         );
         throw new Error(`${quality} export did not finish: ${where} (${err.message})`);
+      }
+      // `runExport` resolves with the file it wrote and the window reports it in the same tick, so a
+      // short wait lets that continuation land before the finished state is read back.
+      await delay(250);
+      const finished = await evaluate(
+        cdp,
+        '(()=>({percent:document.querySelector("#export-dialog-percent").textContent,note:document.querySelector("#export-dialog-note").textContent}))()',
+      );
+      if (!completionChecked) {
+        completionChecked = true;
+        assert(
+          'the window reports the finished file by name and size instead of its last progress line',
+          /^Saved .+\.(mp4|webm) — [\d.]+ MB/.test(String(finished.note)),
+          `the note read ${JSON.stringify(finished.note)}`,
+        );
+        assert(
+          'and reads 100% rather than a stalled percentage',
+          finished.percent === '100%',
+          `the percentage read ${JSON.stringify(finished.percent)}`,
+        );
       }
       await evaluate(cdp, 'document.querySelector("#export-dialog").close()');
       const bytes = await evaluate(cdp, 'window.__blobSizes[window.__blobSizes.length - 1]');
