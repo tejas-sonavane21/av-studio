@@ -435,6 +435,22 @@ async function onTranscribe() {
 // ---------------------------------------------------------------------------
 
 let exporting = false;
+// The handle a running export can be stopped through. The encoder takes an `AbortSignal` for exactly
+// this, so a long export is something the user can give up on rather than wait out.
+let exportController = null;
+
+/**
+ * Ask a running export to stop.
+ *
+ * Aborting rejects `exportDocumentToVideo` with an `AbortError` at its next checkpoint, and its own
+ * `finally` blocks close the encoder and remove the off-screen decoder, so nothing is left running.
+ * The window reads the rejection as *cancelled*, not failed — it is the one that asked.
+ */
+function stopExport() {
+  if (!exportController) return;
+  log('export: stopping…');
+  exportController.abort();
+}
 
 function setExportNote(text) {
   $('#export-note').textContent = text;
@@ -544,6 +560,8 @@ async function runExport(settings) {
   const encoder = encoderSettings(settings, exportContext());
   const { format, quality, size, fps } = encoder;
   const state = store.getState();
+  const controller = new AbortController();
+  exportController = controller;
   exporting = true;
   refreshExportButtons();
   $('#export-bar').classList.remove('failed');
@@ -577,6 +595,7 @@ async function runExport(settings) {
       size,
       videoBitsPerSecond: encoder.videoBitsPerSecond,
       audioBitsPerSecond: encoder.audioBitsPerSecond,
+      signal: controller.signal,
       onProgress: (fraction, message) => {
         setExportProgress(fraction);
         setExportNote(message);
@@ -608,6 +627,14 @@ async function runExport(settings) {
       audioSkipped: result.audioSkipped ?? '',
     };
   } catch (err) {
+    // A cancel is not a failure. Nothing was written and nobody asked for a file, so it is reported as
+    // what it is rather than as an error to go and read the log about.
+    if (err?.name === 'AbortError') {
+      $('#export-status').textContent = 'stopped';
+      log('export: stopped before it finished — no file was written');
+      setExportNote('the export was stopped — no file was written');
+      throw err;
+    }
     $('#export-bar').classList.add('failed');
     $('#export-status').textContent = 'failed';
     log(`ERROR export: ${err.message}`);
@@ -616,6 +643,7 @@ async function runExport(settings) {
     throw err;
   } finally {
     exporting = false;
+    if (exportController === controller) exportController = null;
     $('#export-bar').classList.remove('busy');
     refreshExportButtons();
     setStatus('idle');
@@ -2196,6 +2224,7 @@ syncTimeline();
 exportDialog = createExportDialog({
   getContext: exportContext,
   onExport: (settings) => runExport(settings),
+  onCancel: () => stopExport(),
   // The dialog's ratio is the *project's* ratio, not a second opinion: choosing it here moves the
   // preview's frame too, and the preview's picker moves this one.
   onRatioChange: (id) => applyAspect(id),
