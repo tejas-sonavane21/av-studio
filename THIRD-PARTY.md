@@ -25,16 +25,26 @@ alongside them, which is what the MIT terms require.
 
 ## Bundled fonts
 
-Font binaries carry their own licences, and these two are **not** interchangeable. Only the first is
-in the repository.
+Font binaries carry their own licences, and these three are **not** interchangeable. Two are in the
+repository.
 
 | File | Face | Licence | Commercial use |
 |---|---|---|---|
 | `caption-studio/src/fonts/packaged/HibernalSentry.ttf` (+ `.LICENSE.txt`) | Iconian Fonts' "Hibernal Sentry" (Daniel Zadorozny, 2024) | free for all non-commercial uses, redistribution permitted | **needs a licence** — <http://iconian.com/commercial.html> |
+| `caption-studio/src/fonts/packaged/ZyenaHibernal.ttf` | CapCut's "Hibernal" — © Tianjin ZHUOMAN Technology Co., Ltd (`ZYENA`), 2021 | licensed to CapCut; **not ours to redistribute** | **not permitted** |
 
-That is the only font binary committed. `caption-studio/src/fonts/packaged/README.md` records which
-faces are wired up, which may legally ship, and why; it also gives the command that copies CapCut's
-own cached "Hibernal" face into place locally for anyone who wants that look.
+`caption-studio/src/fonts/packaged/README.md` records which faces are wired up, which may legally
+ship, and why.
+
+**About `ZyenaHibernal.ttf`:** this is the one bundled asset whose licence is narrower than "keep the
+notice and you are fine", and it is committed deliberately rather than by oversight. The project is a
+personal, local-first editor, and tracking the face is what makes a project render identically on every
+machine its owner uses without a manual step after cloning. It is **not** a grant anyone else can rely
+on: if you fork this, publish it, or use it commercially, remove that file (and the
+`!ZyenaHibernal.ttf` line in `caption-studio/src/fonts/packaged/.gitignore`, or it will reappear) and
+supply your own licensed copy. That is also the honest status of the file: including it makes the
+repository's *own* licence statement weaker than MIT, and this paragraph is here so nothing about that
+is implicit.
 
 ## Not in this repository
 
@@ -42,7 +52,8 @@ Deliberately absent, and documented rather than committed:
 
 * **Google Fonts** (Inter and the other families in the picker) — fetched at runtime from Google's
   CDN, or supplied locally by dropping a `.woff2` into `caption-studio/src/fonts/packaged/`.
-* **CapCut's "Hibernal"** (`ZyenaHibernal.ttf`, © Tianjin ZHUOMAN Technology Co., Ltd) — licensed to
-  CapCut, so it is not redistributed here. See the packaged-fonts README for the local copy step.
+* **The rest of the "Hibernal Sentry" pack** (the other 20 Iconian styles: 3D, laser, gradient,
+  condensed, …) — the download is local research material and stays gitignored; only the Regular face
+  the picker actually offers is committed. See the packaged-fonts README for how to add another.
 * **The reference material, the vendor dumps and the font pack** — local research data, gitignored;
   see [`.gitignore`](.gitignore).

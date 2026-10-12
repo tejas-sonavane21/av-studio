@@ -1,10 +1,17 @@
 # Font binaries are *mostly* not version controlled. See README.md in this directory.
 #
-# Everything here is ignored except the README, this file, and the one face whose licence
-# explicitly permits redistribution — Iconian's "Hibernal Sentry", committed with its licence
-# text beside it. CapCut's Zyena Hibernal is licensed to CapCut, so it stays out of history.
+# Everything here is ignored except the two display faces this editor actually uses, each committed
+# with the licence or the attribution that travels with it:
+#
+#   HibernalSentry.ttf   Iconian Fonts — redistribution is explicitly permitted by its licence
+#   ZyenaHibernal.ttf    CapCut's "Hibernal" (ZYENA) — © Tianjin ZHUOMAN Technology Co., Ltd
+#
+# The second one is included deliberately, for personal use, at the project owner's direction; read
+# README.md here and THIRD-PARTY.md before redistributing or shipping this commercially. Everything
+# else dropped in this folder (Inter, and any face you bring yourself) stays out of history.
 *
 !README.md
 !.gitignore
 !HibernalSentry.ttf
 !HibernalSentry.LICENSE.txt
+!ZyenaHibernal.ttf

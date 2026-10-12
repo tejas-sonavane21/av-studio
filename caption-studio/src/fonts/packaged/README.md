@@ -15,12 +15,12 @@ this directory needs its own note:
 | File | Committed? | Why |
 |---|---|---|
 | `HibernalSentry.ttf` | **yes**, with `HibernalSentry.LICENSE.txt` | Iconian Fonts: *"may be freely distributed and is free for all non-commercial uses"* |
-| `ZyenaHibernal.ttf` | **no** | licensed to CapCut, not to us — see below |
+| `ZyenaHibernal.ttf` | **yes**, with the attribution below | licensed to CapCut, not to us — committed deliberately, for personal use, so a fresh clone renders the intended look with no setup step |
 | `Inter-900.woff2` | **no** | a download you already have; drop it in for offline parity |
 
-Everything else in this directory is ignored by `.gitignore` (which allows only the two files above,
-the README and itself). If a family is not yours to redistribute, nothing needs doing — that is
-already the default.
+Everything else in this directory is ignored by `.gitignore` (which allows only the three faces
+above, their licence/attribution text, the README and itself). If a family is not yours to
+redistribute, nothing needs doing — that is already the default.
 
 ## `HibernalSentry.ttf` — Iconian Fonts' "Hibernal Sentry"
 
@@ -36,8 +36,14 @@ already the default.
 
 * Foundry: Tianjin ZHUOMAN Technology Co., Ltd (`ZYENA`), version 1.00, December 2021.
 * CapCut identifies it as `fontId 7044916245971341825`, `fontFamily "ZyenaHibernal"`, Regular.
-* **Do not commit this file and do not redistribute it.** It is licensed to CapCut; it is copied
-  here so this editor can render the same look locally, nothing more.
+* **This is CapCut's licensed resource, and it is committed here on purpose.** The project is a
+  personal, local-first editor: tracking the face is what makes the same project render the same way
+  on every machine its owner uses, with no hunt through CapCut's cache after a clone. The licence is
+  not ours to extend, so **do not redistribute this file or ship it commercially** — if this
+  repository is ever published or used for anything commercial, remove it (delete the
+  `!ZyenaHibernal.ttf` line from `.gitignore` first, or the file will simply come back).
+  [`THIRD-PARTY.md`](../../../../THIRD-PARTY.md) states the same thing in the repository's own list
+  of bundled assets.
 
 CapCut downloads a font the first time a project uses it, then keeps it in its local cache. To copy
 it out on Windows 11, find the cached resource under the user's CapCut data and copy the `.ttf`:
