@@ -436,7 +436,9 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 
 /* `overflow-x: auto` is what makes zoom useful: at zoom 1 the whole document fits, and zooming in
    grows the inner strip so the browser scrolls it. Scrolling is also how the playhead stays reachable
-   once it leaves the window. */
+   once it leaves the window. `touch-action: none` is what makes scrubbing and trimming work on a
+   touch screen; the wheel handler in `editor/timeline.js` is what covers the pan gestures that
+   gives up, so the strip is never unscrollable. */
 .timeline-scroll {
   position: relative;
   overflow-x: auto;
@@ -447,6 +449,9 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
   cursor: crosshair;
   touch-action: none;
 }
+.timeline-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.timeline-zoom { min-width: 42px; text-align: right; color: var(--text-2); font-size: 11px; }
+.timeline-toolbar button.active { border-color: var(--accent); color: var(--text-0); }
 .timeline-actions { display: flex; gap: 6px; }
 .timeline-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
 
@@ -484,7 +489,23 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 .timeline-clip.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; color: var(--text-0); }
 /* A caption the cut removed: still visible (so the cut is legible) but plainly not in the file. */
 .timeline-clip.dropped { opacity: 0.35; border-style: dashed; }
+/* A caption that claims to outlive the recording. It is drawn up to the end and marked, never past
+   it: a caption cannot appear after the audio ends, and the mark is how a timing fault in the
+   transcript is seen rather than silently cropped away. */
+.timeline-clip.beyond {
+  border-color: var(--warn, #f59e0b);
+  background: repeating-linear-gradient(135deg, rgba(245, 158, 11, 0.25) 0 6px, rgba(245, 158, 11, 0.08) 6px 12px);
+}
+.timeline-clip.outside { border-style: dashed; min-width: 6px; }
 .timeline-clip-text { overflow: hidden; text-overflow: ellipsis; }
+
+/* Where the recording stops. The strip's right-hand edge and the end of the material are only the
+   same thing at zoom 1, so the end is drawn rather than implied. */
+.timeline-end {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: repeating-linear-gradient(180deg, var(--text-2) 0 5px, transparent 5px 10px);
+  pointer-events: none;
+}
 
 /* The picture and the sound, as the parts of the recording that are still kept. */
 .timeline-segment {
@@ -601,3 +622,39 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 
 /* The completion line can carry a second sentence: the compromise the encoder had to make. */
 .export-dialog .export-note { white-space: pre-wrap; }
+
+/* ------------------------------------------------------------------ *
+ * Phase 8 — one way to say how a thing went, in all three panels
+ * ------------------------------------------------------------------ */
+
+/* The state line. Distinct from `.hint`, and deliberately: a hint is documentation that stays put,
+   and a state line is about *this* run. Writing one into the other is how a panel ends up explaining
+   what a control does when the thing the reader needs to know is that it just failed. */
+.notice {
+  margin: 0 0 10px; padding: 7px 10px;
+  border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius-sm);
+  background: var(--bg-2); color: var(--text-1); font-size: 12px; line-height: 1.5;
+  white-space: pre-wrap;
+}
+.notice:empty { display: none; }
+.notice.busy { border-left-color: var(--accent-dim); }
+.notice.ok { border-left-color: #22c55e; }
+.notice.failed { border-left-color: #b91c1c; color: #fca5a5; }
+.notice.warn { border-left-color: #f59e0b; color: #fcd34d; }
+
+/* The badge beside a panel's title, in the same four states. Colour carries it first so a glance is
+   enough, and the text says it in words second, because a colour alone is not a message. */
+.tag.busy { border-color: var(--accent-dim); color: var(--text-0); }
+.tag.ok { border-color: #22c55e; color: #86efac; }
+.tag.failed { border-color: #b91c1c; color: #fca5a5; }
+.tag.warn { border-color: #f59e0b; color: #fcd34d; }
+
+/* The lyrics field: a textarea sized like the file input beside it, so pasting is not a second-class
+   way to supply the words. */
+#lyrics-text {
+  width: 100%; box-sizing: border-box; margin-top: 6px; resize: vertical;
+  padding: 7px 9px; font-family: inherit; font-size: 12px; line-height: 1.45;
+  background: var(--bg-2); color: var(--text-0);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+#lyrics-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

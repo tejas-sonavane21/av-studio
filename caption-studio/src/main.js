@@ -132,7 +132,116 @@ function log(msg) {
 }
 
 function setStatus(text) {
-  $('#status-badge').textContent = text;
+  const badge = $('#status-badge');
+  badge.textContent = text;
+  badge.classList.toggle('busy', /ing\b|\u2026/.test(text));
+}
+
+// ---------------------------------------------------------------------------
+// saying how a thing went
+// ---------------------------------------------------------------------------
+
+/**
+ * One vocabulary for "busy / done / failed", shared by all three workflow panels.
+ *
+ * A single call fills the three places a person looks: the badge beside the panel's title, which
+ * carries the state in colour *and* in words; the panel's own state line, which carries the detail;
+ * and — through `log()` at the call site — the history. The panels each spelled this out for
+ * themselves before, and the predictable result was that the panel somebody was staring at was the
+ * one least likely to say whether its own work had finished.
+ *
+ * `failed` and `warn` are deliberately different. A failure needs doing something about; a warning is
+ * a compromised but finished result, and colouring the two the same is how a warning gets ignored
+ * until it becomes a failure.
+ */
+const NOTICES = {
+  sources: { badge: '#sources-status', line: '#sources-message' },
+  transcribe: { badge: '#transcribe-status', line: '#transcribe-message' },
+  export: { badge: '#export-status', line: '#export-message' },
+};
+
+const NOTICE_MARK = { busy: '\u2026', ok: '\u2713', failed: '\u2715', warn: '\u26a0', idle: '' };
+
+function stateOf(panel, state, badgeText, message = '') {
+  const target = NOTICES[panel];
+  const badge = target?.badge ? $(target.badge) : null;
+  if (badge) {
+    const mark = NOTICE_MARK[state] ?? '';
+    badge.textContent = [mark, badgeText].filter(Boolean).join(' ') || '\u2014';
+    badge.classList.remove('busy', 'ok', 'failed', 'warn');
+    if (state !== 'idle') badge.classList.add(state);
+  }
+  const line = target?.line ? $(target.line) : null;
+  if (line && message) {
+    line.textContent = message;
+    line.classList.remove('busy', 'ok', 'failed', 'warn');
+    if (state !== 'idle') line.classList.add(state);
+  }
+  return message;
+}
+
+/** A media element's own length, or 0 when it has none yet. */
+function mediaSeconds(media) {
+  const value = Number(media?.duration);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** A `MediaError` code, as something a person can act on. */
+function describeMediaError(error) {
+  const reasons = {
+    1: 'the load was stopped before it finished',
+    2: 'the file could not be read',
+    3: 'the file could not be decoded — the browser has no decoder for this codec',
+    4: 'this file or container is not supported by the browser',
+  };
+  return `${reasons[error?.code] ?? 'the browser refused it'}${error?.message ? ` (${error.message})` : ''}`;
+}
+
+/**
+ * Say how the two recordings compare, because the answer changes what the programme *is*.
+ *
+ * A picture shorter than the track is the normal case here (a cut-down music video against the
+ * full-length master), and it is the case that used to look like a bug: the transport stopped, or
+ * the track stuttered back to the picture's end. It is not a bug — it is a blank frame with the track
+ * still playing — but nothing said so, so it is said here, once, at the moment both are known.
+ */
+function reportMediaLengths() {
+  const picture = mediaSeconds($('#preview-video'));
+  const track = mediaSeconds($('#preview-audio'));
+  if (!picture && !track) return;
+  if (!picture || !track) {
+    stateOf(
+      'sources',
+      'ok',
+      picture ? `picture ${picture.toFixed(2)}s` : `track ${track.toFixed(2)}s`,
+      picture
+        ? `Picture loaded: ${picture.toFixed(2)}s. No track, so the picture's own sound is what you hear.`
+        : `Track loaded: ${track.toFixed(2)}s. It carries the clock and the programme's length.`,
+    );
+    return;
+  }
+  const diff = track - picture;
+  if (Math.abs(diff) < 0.5) {
+    stateOf(
+      'sources',
+      'ok',
+      `${picture.toFixed(2)}s`,
+      `Picture and track are both ${picture.toFixed(2)}s — the programme is exactly the recording, with no blank stretch.`,
+    );
+    return;
+  }
+  const programme = Math.max(picture, track);
+  const tail =
+    diff > 0
+      ? `Past ${picture.toFixed(2)}s the picture has run out: the preview keeps playing and drawing captions over a blank frame.`
+      : `Past ${track.toFixed(2)}s the track has run out: the programme carries on silent.`;
+  stateOf(
+    'sources',
+    'warn',
+    `${programme.toFixed(2)}s programme`,
+    `The picture is ${picture.toFixed(2)}s and the track is ${track.toFixed(2)}s, so the programme is ` +
+      `${programme.toFixed(2)}s long.\n${tail}`,
+  );
 }
 
 function renderLog() {
@@ -156,6 +265,8 @@ async function onVideo(file) {
   if (!file) return;
   store.setState({ video: file });
   log(`video loaded: ${file.name} (${(file.size / 1e6).toFixed(1)} MB)`);
+  stateOf('sources', 'busy', `reading ${file.name}\u2026`);
+  $('#video-note').textContent = `${file.name} — reading\u2026`;
 
   const video = $('#preview-video');
   if (videoUrl) URL.revokeObjectURL(videoUrl);
@@ -175,6 +286,10 @@ async function onVideo(file) {
     'loadedmetadata',
     () => {
       log(`video: ${video.videoWidth}×${video.videoHeight}, ${video.duration.toFixed(2)}s`);
+      $('#video-note').textContent =
+        `${file.name} — ${video.videoWidth}×${video.videoHeight}, ${video.duration.toFixed(2)}s, ` +
+        `${(file.size / 1e6).toFixed(1)} MB`;
+      reportMediaLengths();
       const doc = preview?.document;
       if (doc) {
         // A picture normally sets the frame, but not over a ratio somebody has already chosen: the
@@ -209,6 +324,8 @@ async function onAudio(file) {
   if (!file) return;
   store.setState({ audio: file });
   log(`audio loaded: ${file.name} (${(file.size / 1e6).toFixed(2)} MB)`);
+  stateOf('sources', 'busy', `reading ${file.name}\u2026`);
+  $('#audio-note').textContent = `${file.name} — reading\u2026`;
 
   const audio = $('#preview-audio');
   if (audioUrl) URL.revokeObjectURL(audioUrl);
@@ -231,6 +348,11 @@ async function onAudio(file) {
     'loadedmetadata',
     () => {
       if (Number.isFinite(audio.duration)) log(`audio: ${audio.duration.toFixed(2)}s`);
+      if (Number.isFinite(audio.duration)) {
+        $('#audio-note').textContent =
+          `${file.name} — ${audio.duration.toFixed(2)}s, ${(file.size / 1e6).toFixed(2)} MB`;
+      }
+      reportMediaLengths();
       refreshSeekRange();
       // Same rule as the picture: a new track starts uncut. The video track is left alone — the two
       // are cut independently, which is the whole point of having two lanes.
@@ -254,8 +376,10 @@ async function onAi(file) {
     const words = doc.blocks.reduce((n, b) => n + b.words.length, 0);
     log(`AI source: "${file.name}" → ${doc.blocks.length} blocks, ${words} words`);
     if (kind !== 'veed') log(`note: detected as ${kind}`);
+    $('#ai-note').textContent = `${file.name} — ${doc.blocks.length} blocks, ${words} words${kind !== 'veed' ? ` (detected as ${kind})` : ''}`;
   } catch (err) {
     log(`ERROR importing AI source: ${err.message}`);
+    $('#ai-note').textContent = `${file.name} could not be read: ${err.message}`;
   } finally {
     setStatus('idle');
     refreshAlignButton();
@@ -272,8 +396,11 @@ async function onTruth(file) {
     store.setState({ truthCues: cues });
     log(`TRUTH source: "${file.name}" → ${cues.length} ${isVtt ? 'VTT' : 'SRT'} cues`);
     warnings.forEach((w) => log(`  ⚠ ${w}`));
+    $('#truth-note').textContent =
+      `${file.name} — ${cues.length} ${isVtt ? 'VTT' : 'SRT'} cues${warnings.length ? `, ${warnings.length} warning(s)` : ''}`;
   } catch (err) {
     log(`ERROR parsing TRUTH source: ${err.message}`);
+    $('#truth-note').textContent = `${file.name} could not be parsed: ${err.message}`;
   } finally {
     setStatus('idle');
     refreshAlignButton();
@@ -345,17 +472,25 @@ async function onTranscribe() {
   const file = $('#transcribe-in').files?.[0];
   if (!file || transcribing) return;
 
-  // The lyrics are read here, in the page, because the server never sees the user's disk.
-  // A file that cannot be read stops the run before anything is uploaded: sending the
-  // recording anyway would transcribe it and then quietly ignore the lyrics.
+  // The lyrics are read here, in the page, because the server never sees the user's disk. A file
+  // that cannot be read stops the run before anything is uploaded: sending the recording anyway
+  // would transcribe it and then quietly ignore the lyrics, which is the worst of both.
+  //
+  // Pasted words count exactly as much as a file does. This is the field that keeps a sung
+  // transcript from drifting, and "save your lyrics as a .txt first" is a step nobody takes — so a
+  // pasted reference is not a convenience, it is the difference between the feature being used and
+  // the feature being skipped.
   const lyricsFile = $('#lyrics-in').files?.[0];
-  let lyrics = '';
+  let lyrics = $('#lyrics-text')?.value?.trim() || '';
+  let lyricsName = lyrics ? 'pasted lyrics' : undefined;
   if (lyricsFile) {
     try {
       lyrics = await lyricsFile.text();
+      lyricsName = lyricsFile.name;
     } catch (err) {
       log(`ERROR lyrics: could not read "${lyricsFile.name}" — ${err}`);
       setTranscribeNote(`could not read ${lyricsFile.name}`);
+      stateOf('transcribe', 'failed', 'failed', `The lyrics file "${lyricsFile.name}" could not be read: ${err}`);
       return;
     }
   }
@@ -370,22 +505,31 @@ async function onTranscribe() {
     emphasis: $('#transcribe-emphasis').value || undefined,
     emit: 'json,veed,srt,vtt',
     referenceText: lyrics,
-    referenceName: lyricsFile?.name,
+    referenceName: lyricsName,
   });
 
   transcribing = true;
   refreshTranscribeButton();
   $('#transcribe-bar').classList.remove('failed');
   $('#transcribe-bar').classList.add('busy');
-  $('#transcribe-status').textContent = 'transcribing…';
   setTranscribeProgress(0);
   setStatus('transcribing…');
+  stateOf(
+    'transcribe',
+    'busy',
+    'transcribing…',
+    `Transcribing "${file.name}" (${(file.size / 1e6).toFixed(1)} MB)` +
+      (lyricsName ? ` with the words from ${lyricsName}.` : '. No reference lyrics: the transcriber decides both the words and the timing.'),
+  );
   log(
     `transcribe: "${file.name}" (${(file.size / 1e6).toFixed(1)} MB)` +
       `${options.align ? ` · align ${options.align}` : ''}${options.validate ? ` · validate ${options.validate}` : ''}` +
       `${options.emphasis ? ` · emphasis ${options.emphasis}` : ''}` +
-      `${lyricsFile ? ` · lyrics "${lyricsFile.name}"` : ''}`,
+      `${lyricsName ? ` · lyrics "${lyricsName}"` : ''}`,
   );
+  if (!lyricsName) {
+    log('  note: no reference lyrics — the text and the timing both come from the audio alone');
+  }
 
   let lastLogged = -1;
   try {
@@ -413,14 +557,30 @@ async function onTranscribe() {
     for (const line of audit) log(`  ${line}`);
     setTranscribeNote(audit.join('\n'));
     setTranscribeProgress(1);
-    $('#transcribe-status').textContent = 'done';
 
+    // The credits, and then the captions themselves: a run that finished and left the stage empty
+    // would have done all the work and shown nothing, which is what used to happen here.
     await onAudio(file);
+    await showDocument(
+      doc,
+      `transcribed captions → ${doc.blocks.length} blocks from "${file.name}"`,
+    );
+    stateOf(
+      'transcribe',
+      'ok',
+      'done',
+      `Done — ${doc.blocks.length} captions, ${words} words from "${file.name}". They are on the stage and on the timeline now.`,
+    );
   } catch (err) {
     $('#transcribe-bar').classList.add('failed');
-    $('#transcribe-status').textContent = 'failed';
     log(`ERROR transcribe: ${err.toString()}`);
     setTranscribeNote(err.toString());
+    stateOf(
+      'transcribe',
+      'failed',
+      'failed',
+      `The transcription did not finish.\n${err.toString()}`,
+    );
   } finally {
     transcribing = false;
     $('#transcribe-bar').classList.remove('busy');
@@ -481,14 +641,23 @@ function refreshExportButtons() {
 function onDownloadFile(ext) {
   const doc = preview?.document;
   if (!doc) {
-    log('download: there are no captions yet — run the correction or open the demo first');
+    const message = 'There are no captions to save yet — run the correction, transcribe a recording, or open the demo first.';
+    log(`download: ${message}`);
+    stateOf('export', 'warn', 'nothing to save', message);
     return;
   }
   const file = captionFiles(doc).find((candidate) => candidate.name.endsWith(ext));
   if (!file) return;
   downloadText(file.name, file.text, file.mime);
-  log(`export: saved ${file.name} (${(file.text.length / 1024).toFixed(1)} KB)`);
+  const kb = (file.text.length / 1024).toFixed(1);
+  log(`export: saved ${file.name} (${kb} KB)`);
   setExportNote(`saved ${file.name}`);
+  stateOf(
+    'export',
+    'ok',
+    'saved',
+    `Saved ${file.name} — ${kb} KB, ${doc.blocks.length} captions.\nYour browser put it in its downloads folder.`,
+  );
 }
 
 /**
@@ -500,11 +669,16 @@ function onDownloadFile(ext) {
 function openExportDialog() {
   const doc = preview?.document;
   if (!doc) {
-    log('export: there are no captions yet — run the correction or open the demo first');
+    const message = 'There are no captions to burn in yet — run the correction, transcribe a recording, or open the demo first.';
+    log(`export: ${message}`);
+    stateOf('export', 'warn', 'nothing to export', message);
     return;
   }
   if (!store.getState().video) {
-    log('export video: load a video under Sources first — the caption files can be saved without one');
+    const message =
+      'A video export needs a picture to burn the captions into. Load one under Sources — the caption files can be saved without one.';
+    log(`export video: ${message}`);
+    stateOf('export', 'warn', 'no picture', message);
     return;
   }
   const ctx = exportContext();
@@ -566,9 +740,9 @@ async function runExport(settings) {
   refreshExportButtons();
   $('#export-bar').classList.remove('failed');
   $('#export-bar').classList.add('busy');
-  $('#export-status').textContent = 'encoding\u2026';
   setExportProgress(0);
   setStatus('encoding\u2026');
+  stateOf('export', 'busy', 'encoding\u2026', `Encoding at ${size.width}\u00d7${size.height}\u2026`);
   log(
     `export: rendering the captions into a .${format} at ${size.width}\u00d7${size.height}, ${fps}fps, ${quality} quality, ` +
       `${(encoder.videoBitsPerSecond / 1e6).toFixed(1)} Mbps video — frames are drawn and encoded, not recorded`,
@@ -605,7 +779,6 @@ async function runExport(settings) {
     const name = `${exportStem(doc)}.${result.format}`;
     downloadBlob(name, result.blob);
     setExportProgress(1);
-    $('#export-status').textContent = 'done';
     if (result.audioSkipped) log(`  ⚠ ${result.audioSkipped}`);
     else if (result.audioNote) log(`  note: ${result.audioNote}`);
     const mb = (result.blob.size / 1e6).toFixed(1);
@@ -616,6 +789,18 @@ async function runExport(settings) {
     );
     setExportNote(
       `saved ${name} — ${mb} MB, ${result.frames} frames at ${mbps} Mbps${result.audio ? '' : ' (no audio track)'}`,
+    );
+    // The one place a finished export is reported. `warn` only when the encoder had to *drop*
+    // something: a note about the track being shorter than the picture is the normal case for a
+    // master track, and colouring every export amber is how a real warning stops being read.
+    const caveat = result.audioSkipped || result.audioNote || '';
+    stateOf(
+      'export',
+      result.audioSkipped ? 'warn' : 'ok',
+      'saved',
+      `Saved ${name} — ${mb} MB, ${result.seconds.toFixed(1)}s, ${result.width}×${result.height} @ ${result.fps}fps, ` +
+        `${result.frames} frames${result.audio ? ' with sound' : ' with no audio track'}.` +
+        (caveat ? `\n${caveat}` : '\nYour browser put it in its downloads folder.'),
     );
     return {
       name,
@@ -630,15 +815,15 @@ async function runExport(settings) {
     // A cancel is not a failure. Nothing was written and nobody asked for a file, so it is reported as
     // what it is rather than as an error to go and read the log about.
     if (err?.name === 'AbortError') {
-      $('#export-status').textContent = 'stopped';
       log('export: stopped before it finished — no file was written');
       setExportNote('the export was stopped — no file was written');
+      stateOf('export', 'warn', 'stopped', 'The export was stopped, so no file was written.');
       throw err;
     }
     $('#export-bar').classList.add('failed');
-    $('#export-status').textContent = 'failed';
     log(`ERROR export: ${err.message}`);
     setExportNote(err.message);
+    stateOf('export', 'failed', 'failed', `The export did not finish.\n${err.message}`);
     // Re-thrown on purpose: the caller opening the window is the one that has to say so on screen.
     throw err;
   } finally {
@@ -711,7 +896,7 @@ async function showDocument(doc, label = 'document') {
   // The cut belongs to the document, so a document that never had one starts as the whole recording.
   // An existing cut is left exactly as it is — that is what makes a saved project reopen with its
   // edits instead of with everything put back.
-  ensureTimeline(doc, { video: sourceDuration(), audio: sourceDuration() });
+  ensureTimeline(doc, { video: trackSpan('video'), audio: trackSpan('audio') });
   selectedClip = null;
   // A new document invalidates any selection from the previous one.
   selectedBlockId = doc.blocks[0]?.id ?? null;
@@ -817,24 +1002,39 @@ function syncTimeline() {
   updateTimelineStatus();
 }
 
-/** The source length the cut is measured against — the whole recording, cuts and all. */
+/**
+ * The source length the cut is measured against — the whole recording, cuts and all.
+ *
+ * This is the **programme**: the longest part that was loaded, so a full-length master under a
+ * shorter picture still gets a programme as long as the master.
+ */
 function sourceDuration() {
   return preview?.duration() ?? 0;
+}
+
+/**
+ * The length one *track* is measured against: its own media, not the programme's.
+ *
+ * A 161 s picture and a 182 s master are two recordings of different lengths. Measuring both cuts
+ * against one number is what let the audio lane be cut at the picture's length and the captions be
+ * drawn past the end of the strip; the video track's range is about the video.
+ */
+function trackSpan(track) {
+  return preview?.trackDuration?.(track) || sourceDuration();
 }
 
 /** Republish just the cut (the kept ranges), without rebuilding the caption row. */
 function refreshTimelineRanges() {
   const doc = preview?.document;
   if (!timeline) return;
-  const duration = sourceDuration();
   if (!doc) {
     timeline.setRanges({ video: [], audio: [] });
     timeline.setDropped([]);
     return;
   }
   timeline.setRanges({
-    video: trackRanges(doc, 'video', duration),
-    audio: trackRanges(doc, 'audio', duration),
+    video: trackRanges(doc, 'video', trackSpan('video')),
+    audio: trackRanges(doc, 'audio', trackSpan('audio')),
   });
   timeline.setDropped(droppedCaptionIds(doc));
 }
@@ -876,9 +1076,9 @@ function sameRanges(a, b) {
 function commitCut(track, next) {
   const doc = preview?.document;
   if (!doc) return false;
-  const duration = sourceDuration();
-  ensureTimeline(doc, { video: duration, audio: duration });
-  if (sameRanges(trackRanges(doc, track, duration), next)) return false;
+  const span = trackSpan(track);
+  ensureTimeline(doc, { video: trackSpan('video'), audio: trackSpan('audio') });
+  if (sameRanges(trackRanges(doc, track, span), next)) return false;
   setTrackRanges(doc, track, next);
   return true;
 }
@@ -893,15 +1093,15 @@ function commitCut(track, next) {
 function onTimelineCommand(command) {
   const doc = preview?.document;
   if (!doc) return;
-  const duration = sourceDuration();
-  ensureTimeline(doc, { video: duration, audio: duration });
+  ensureTimeline(doc, { video: trackSpan('video'), audio: trackSpan('audio') });
   const time = Math.max(0, preview?.currentTime() ?? 0);
 
   if (command === 'reset') {
     let changed = false;
     for (const track of TIMELINE_TRACKS) {
-      if (!sameRanges(trackRanges(doc, track, duration), fullRanges(duration))) {
-        resetTrack(doc, track, duration);
+      const span = trackSpan(track);
+      if (!sameRanges(trackRanges(doc, track, span), fullRanges(span))) {
+        resetTrack(doc, track, span);
         changed = true;
       }
     }
@@ -925,7 +1125,7 @@ function onTimelineCommand(command) {
     if (!edit) return;
     let changed = 0;
     for (const track of tracks) {
-      if (commitCut(track, edit(trackRanges(doc, track, duration)))) changed += 1;
+      if (commitCut(track, edit(trackRanges(doc, track, trackSpan(track))))) changed += 1;
     }
     const where = selectedClip ? `the ${selectedClip.track} track` : 'the video and audio tracks';
     if (!changed) {
@@ -939,7 +1139,9 @@ function onTimelineCommand(command) {
     log(`timeline: ${command.replace('-', ' ')} at ${time.toFixed(2)}s on ${where}`);
     // The selected clip may be the one that just went away.
     if (command === 'delete' && selectedClip) {
-      const stillThere = (trackRanges(doc, selectedClip.track, duration) ?? []).some((r) => r.id === selectedClip.id);
+      const stillThere = (trackRanges(doc, selectedClip.track, trackSpan(selectedClip.track)) ?? []).some(
+        (r) => r.id === selectedClip.id,
+      );
       if (!stillThere) {
         selectedClip = null;
         timeline?.setSelectedClip(null);
@@ -954,12 +1156,12 @@ function onTimelineCommand(command) {
 function onTimelineTrim(track, id, edge, seconds) {
   const doc = preview?.document;
   if (!doc) return;
-  const duration = sourceDuration();
-  ensureTimeline(doc, { video: duration, audio: duration });
-  const ranges = trackRanges(doc, track, duration);
+  const span = trackSpan(track);
+  ensureTimeline(doc, { video: trackSpan('video'), audio: trackSpan('audio') });
+  const ranges = trackRanges(doc, track, span);
   const index = ranges.findIndex((range) => range.id === id);
   if (index < 0) return;
-  commitCut(track, trimEdge(ranges, index, edge, seconds, duration));
+  commitCut(track, trimEdge(ranges, index, edge, seconds, span));
   refreshTimelineRanges();
   updateTimelineStatus();
   refreshExportButtons();
@@ -969,7 +1171,7 @@ function onTimelineTrim(track, id, edge, seconds) {
 function onTimelineSelectClip(track, id) {
   selectedClip = track && id ? { track, id } : null;
   timeline?.setSelectedClip(selectedClip);
-  const range = (trackRanges(preview?.document, track, sourceDuration()) ?? []).find((r) => r.id === id);
+  const range = (trackRanges(preview?.document, track, trackSpan(track)) ?? []).find((r) => r.id === id);
   if (range) {
     log(
       `timeline: selected the ${track} clip ${formatSeconds(range.srcIn)}–${formatSeconds(range.srcOut)} ` +
@@ -2234,6 +2436,19 @@ wireTabs();
 
 $('#video-in').addEventListener('change', (e) => onVideo(e.target.files?.[0]));
 $('#audio-in').addEventListener('change', (e) => onAudio(e.target.files?.[0]));
+
+// A file that the browser cannot play used to fail in complete silence: the element simply never
+// fired `loadedmetadata`, so the stage stayed black, no caption appeared and nothing said why. These
+// two listeners are the whole difference between that and a sentence naming the file.
+for (const [id, label] of [['#preview-video', 'video'], ['#preview-audio', 'audio']]) {
+  $(id).addEventListener('error', () => {
+    const element = $(id);
+    const detail = describeMediaError(element.error);
+    log(`ERROR ${label}: ${detail}`);
+    stateOf('sources', 'failed', `${label} failed`, `The ${label} could not be loaded — ${detail}`);
+    $(label === 'video' ? '#video-note' : '#audio-note').textContent = `failed: ${detail}`;
+  });
+}
 $('#ai-in').addEventListener('change', (e) => onAi(e.target.files?.[0]));
 $('#truth-in').addEventListener('change', (e) => onTruth(e.target.files?.[0]));
 $('#align-btn').addEventListener('click', runAlignment);
@@ -2247,6 +2462,16 @@ $('#lyrics-in').addEventListener('change', () => {
       ? `the original lyrics come from "${file.name}" — the text is the file's, the timing is the audio's`
       : "no lyrics file: the transcript's own text is used as-is",
   );
+});
+// Pasted words and a chosen file are two ways to say the same thing, so saying one withdraws the
+// other rather than leaving the studio to guess which was meant.
+$('#lyrics-text').addEventListener('input', () => {
+  const typed = $('#lyrics-text').value.trim();
+  if (typed && $('#lyrics-in').files?.length) {
+    $('#lyrics-in').value = '';
+    log('lyrics: the pasted words replace the chosen file');
+  }
+  setTranscribeNote(typed ? 'using the pasted lyrics — the text is theirs, the timing is the audio\'s' : 'no reference lyrics: the transcript\'s own text is used as-is');
 });
 $('#transcribe-btn').addEventListener('click', onTranscribe);
 $('#transcribe-probe').addEventListener('click', onTranscribeProbe);

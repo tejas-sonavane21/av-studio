@@ -28,6 +28,11 @@ for (let i = 2; i < process.argv.length; i++) {
 }
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The badge text a finished panel carries — the mark is part of the message, so it is asserted. */
+const DONE_TAG = '\u2713 done';
+/** The export panel's own word for the same thing: a file was written. */
+const SAVED_TAG = '\u2713 saved';
 const children = [];
 let stubState = { polls: 0, uploadBytes: 0, uploads: [] };
 
@@ -539,6 +544,70 @@ async function main() {
     'the zoom button widens the strip',
     '(()=>{const inner=document.querySelector("#timeline .timeline-inner");const before=parseFloat(inner.style.width)||0;[...document.querySelectorAll("#timeline .timeline-toolbar button")].find(b=>b.textContent==="+").click();return parseFloat(inner.style.width)>before})()',
     (v) => v === true,
+  );
+  await check(
+    cdp,
+    'and says what zoom level it is at, rather than leaving it to be guessed',
+    'document.querySelector("#timeline .timeline-zoom").textContent',
+    (v) => /^\d+%$/.test(String(v)) && String(v) !== '100%',
+  );
+  // The strip has to be *scrollable* when it is zoomed — that is the whole point of zooming — and the
+  // scroll position has to be the user's. Both were broken by a relayout that reset it.
+  const scrolled = await evaluate(
+    cdp,
+    `(()=>{
+      const scroll = document.querySelector('#timeline .timeline-scroll');
+      const inner = document.querySelector('#timeline .timeline-inner');
+      const overflow = parseFloat(inner.style.width) - scroll.clientWidth;
+      scroll.scrollLeft = 40;
+      const afterScroll = scroll.scrollLeft;
+      document.querySelector('#timeline .timeline-scroll').dispatchEvent(
+        new WheelEvent('wheel', { deltaY: 60, bubbles: true, cancelable: true }),
+      );
+      return { overflow, afterScroll, afterWheel: scroll.scrollLeft };
+    })()`,
+  );
+  assert(
+    'a zoomed strip is wider than its window, so there is something to scroll',
+    scrolled.overflow > 20,
+    `the inner strip overflows by ${scrolled.overflow}px`,
+  );
+  assert(
+    'setting the scroll position sticks',
+    scrolled.afterScroll === 40,
+    `scrollLeft came back as ${scrolled.afterScroll}`,
+  );
+  assert(
+    'and a wheel notch scrolls the strip along it',
+    scrolled.afterWheel > scrolled.afterScroll,
+    `a 60px wheel notch moved the strip from ${scrolled.afterScroll} to ${scrolled.afterWheel}`,
+  );
+  await check(
+    cdp,
+    'the end of the recording is drawn on the strip',
+    '(()=>{const m=document.querySelector("#timeline .timeline-end");return Boolean(m)&&!m.hidden&&parseFloat(m.style.left)>0})()',
+    (v) => v === true,
+  );
+  // A caption cannot outlive the recording it was timed against. If one does, the strip clips it at
+  // the end and flags it rather than drawing it past the material — and the count is asserted so the
+  // check cannot pass by the situation never arising.
+  const beyond = await evaluate(
+    cdp,
+    `(()=>{
+      const inner = document.querySelector('#timeline .timeline-inner');
+      const limit = parseFloat(inner.style.width);
+      const clips = [...document.querySelectorAll('#timeline .timeline-clip')];
+      const worst = Math.max(...clips.map((c) => parseFloat(c.style.left) + parseFloat(c.style.width)));
+      return { worst, limit, clipped: document.querySelectorAll('#timeline .timeline-clip.beyond').length };
+    })()`,
+  );
+  assert(
+    'no caption clip is drawn past the end of the recording',
+    beyond.worst <= beyond.limit + 1,
+    `the furthest clip reaches ${beyond.worst}px of a ${beyond.limit}px strip`,
+  );
+  console.log(
+    `  • ${beyond.clipped} caption(s) flagged as outliving the recording`,
   );
   await evaluate(cdp, '[...document.querySelectorAll("#timeline .timeline-toolbar button")].find(b=>b.textContent==="Fit").click()');
 
@@ -1547,7 +1616,9 @@ async function main() {
   );
   // The stand-in answers the first poll with "running" and the second with "done", so waiting on
   // the page's own status exercises the real polling loop rather than a fixed sleep.
-  await waitFor(cdp, 'document.querySelector("#transcribe-status").textContent', (v) => v === 'done', {
+  // The badge carries a state mark as well as the word, so "done" is asserted as it is actually
+  // written rather than loosened to a substring — the mark is part of what a person reads.
+  await waitFor(cdp, 'document.querySelector("#transcribe-status").textContent', (v) => v === DONE_TAG, {
     attempts: 80,
     describe: 'the transcribe job to finish polling',
   });
@@ -1589,7 +1660,23 @@ async function main() {
     cdp,
     'the app says it is done',
     'document.querySelector("#transcribe-status").textContent',
-    (v) => v === 'done',
+    (v) => v === DONE_TAG,
+  );
+  // ...and says *what* finished, in the panel's own state line. "done" on its own is a claim about
+  // nothing: the number of captions is the part a person can check against what they expected.
+  await check(
+    cdp,
+    'and says what it produced',
+    'document.querySelector("#transcribe-message").textContent',
+    (v) => /\b\d+\s+captions\b/.test(String(v)) && /recording\.wav/.test(String(v)),
+  );
+  // The stage has to show the result of its own run: the captions the server sent were mounted as
+  // the document, not merely remembered in `aiDoc`.
+  await check(
+    cdp,
+    'the transcribed captions were mounted on the timeline',
+    'document.querySelectorAll("#timeline .timeline-clip").length',
+    (v) => Number(v) > 0,
   );
   await check(
     cdp,
@@ -2073,7 +2160,7 @@ async function main() {
       try {
         await waitFor(
           cdp,
-          `window.__blobSizes.length > ${before} && document.querySelector("#export-status").textContent !== "encoding\u2026"`,
+          `window.__blobSizes.length > ${before} && !document.querySelector("#export-status").textContent.includes("encoding")`,
           (v) => v === true,
           { attempts: 900, intervalMs: 100, describe: `the ${quality} export to finish` },
         );
@@ -2126,7 +2213,13 @@ async function main() {
       cdp,
       'and it reported success rather than failure',
       'document.querySelector("#export-status").textContent',
-      (v) => v === 'done',
+      (v) => v === SAVED_TAG,
+    );
+    await check(
+      cdp,
+      'and named the file it wrote, in the export panel',
+      'document.querySelector("#export-message").textContent',
+      (v) => /Saved .+\.mp4/.test(String(v)),
     );
     assert('the portrait export is a real file, not an empty blob', portraitBytes > 2000, `${portraitBytes} bytes`);
     await check(
