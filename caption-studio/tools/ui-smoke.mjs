@@ -1295,6 +1295,18 @@ async function main() {
   await delay(600);
   await check(
     cdp,
+    'the sources panel reports a track on its own, and what it means for the programme',
+    'document.querySelector("#sources-message").textContent',
+    (v) => /Track loaded: .*carries the clock/.test(v),
+  );
+  await check(
+    cdp,
+    'and its badge carries the state in colour and in words, not an empty line',
+    'document.querySelector("#sources-status").textContent',
+    (v) => /^\u2713 track [\d.]+s$/.test(v),
+  );
+  await check(
+    cdp,
     'the track actually decodes, so the element is playable',
     '(()=>{const a=document.querySelector("#preview-audio");return a.readyState>=1&&a.duration>0})()',
     (v) => v === true,
@@ -2111,6 +2123,22 @@ async function main() {
       'and a picture loaded afterwards does not undo it',
       '(()=>{const c=document.querySelector("#preview-canvas");return c.height>c.width})()',
       (v) => v === true,
+    );
+    // The one case that used to look like a bug: a picture shorter than the track is the normal shape
+    // here (a cut-down video against a full-length master), and the transport has to keep playing over
+    // the blank frame instead of stopping or snapping to the picture's end. Whatever it decides, the
+    // sources panel is where a person is told which of the two is carrying the programme.
+    await check(
+      cdp,
+      'the sources panel compares the two lengths instead of leaving it to be discovered',
+      'document.querySelector("#sources-message").textContent',
+      (v) => /The picture is [\d.]+s and the track is [\d.]+s, so the programme is/.test(v),
+    );
+    await check(
+      cdp,
+      'and the badge says the result is a compromise, not a clean load',
+      'document.querySelector("#sources-status").textContent',
+      (v) => /^\u26a0 /.test(v),
     );
     await evaluate(cdp, setAspect('source'));
     await check(
