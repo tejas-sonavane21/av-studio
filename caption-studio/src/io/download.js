@@ -26,12 +26,26 @@ import { serializeVeedJSON } from './veed-json.js';
 import { serializeSRT } from './srt.js';
 import { serializeVTT } from './vtt.js';
 
-/** A file-name stem that cannot escape its folder or confuse a shell. */
+/**
+ * A file-name stem that cannot escape its folder or confuse a shell.
+ *
+ * The rule is `audio-studio`'s (`emit/__init__.py::safe_stem`), deliberately: the two
+ * studios write files a person then moves around by hand, and a name one of them would
+ * never produce is a name nobody expects from either. A path is not a name, so only the
+ * last segment survives — a document called `../../notes/attack` exports as `attack.*`,
+ * beside the video, rather than one folder up.
+ */
 function safeStem(name, fallback = 'captions') {
   const base = String(name ?? '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()
     .replace(/\.[a-z0-9]+$/i, '')
     .replace(/[^\w.\- ]+/g, '_')
-    .trim();
+    .replace(/\s+/g, ' ')
+    .replace(/^[ .-]+|[ .-]+$/g, '')
+    .slice(0, 80)
+    .replace(/[ .-]+$/g, '');
   return base || fallback;
 }
 

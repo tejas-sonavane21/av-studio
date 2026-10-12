@@ -37,10 +37,22 @@ function makeDoc() {
 
 test('exportStem strips the extension and anything a file name cannot carry', () => {
   assert.equal(exportStem({ name: 'The Crimson Burden.mp3' }), 'The Crimson Burden');
-  assert.equal(exportStem({ name: 'a/b:c*d' }), 'a_b_c_d');
+  // The last path segment is what is left, and a name a shell would treat specially is
+  // not: `a/b:c*d` is `b_c_d`, not `a_b_c_d`.
+  assert.equal(exportStem({ name: 'a/b:c*d' }), 'b_c_d');
   assert.equal(exportStem({ name: '' }), 'captions');
   assert.equal(exportStem(null), 'captions');
   assert.equal(exportStem({}, 'song'), 'song');
+});
+
+test('exportStem keeps a path out of the name, exactly as audio-studio does', () => {
+  // A downloaded file lands wherever the browser puts downloads; the name is not a path
+  // and must not read like one after it has been through here.
+  assert.equal(exportStem({ name: '../../notes/attack' }), 'attack');
+  assert.equal(exportStem({ name: 'C:\\songs\\Take 2: final?.mp3' }), 'Take 2_ final_');
+  assert.equal(exportStem({ name: '  spaced  out  ' }), 'spaced out');
+  assert.equal(exportStem({ name: '...' }), 'captions');
+  assert.equal(exportStem({ name: `${'x'.repeat(400)}.mp4` }).length, 80);
 });
 
 test('captionFiles writes the four shapes a document can take', () => {
