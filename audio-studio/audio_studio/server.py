@@ -62,9 +62,10 @@ from .config import (
     ValidateOptions,
     options_from_preset,
 )
-from .emit import DEFAULT_KINDS, filename, kinds, write_bundle
+from .emit import DEFAULT_KINDS, filename, kinds, safe_stem, write_bundle
 from .engines import available_engines, engine_names, get_engine
 from .media import AUDIO_EXTENSIONS, MediaError, load_audio
+from . import pins
 from .pipeline import PipelineOptions, post_process
 from .reference import Reference, ReferenceParseError
 from .validate import available_validators, validator_names
@@ -315,7 +316,10 @@ class Jobs:
             reference_text=reference_text,
             reference_name=reference_name,
             reference_min_match=reference_min_match,
-            stem=Path(source).stem,
+            # Sanitised here, once: every file this job writes is named from it, and a
+            # recording called `take 2: final.mp3` has to produce a run rather than an
+            # `OSError` halfway through one.
+            stem=safe_stem(Path(source).stem, "source"),
         )
         job.outdir = self.root / job.id
 
@@ -484,6 +488,12 @@ def build_health_report() -> dict:
     plus ``import transformers`` measured **6.3 s** on this machine. That is why
     this is computed once, off the request path, instead of per request.
     """
+    rows = pins.check()
+    differing = [
+        {"name": row["name"], "pinned": row["pinned"], "installed": row["installed"]}
+        for row in rows
+        if row["status"] == "differs"
+    ]
     return {
         "ok": True,
         "version": __version__,
@@ -493,6 +503,18 @@ def build_health_report() -> dict:
         "presets": sorted(PRESETS),
         "defaultPreset": DEFAULT_PRESET,
         "emitKinds": kinds(),
+        # The pinned set this checkout was verified against, against what this
+        # interpreter actually has. Cheap (metadata only) and reported *here* because
+        # this is the endpoint the browser calls before it queues minutes of CPU: a
+        # machine whose dependencies have drifted should say so before the job runs,
+        # not in a decode error afterwards that names neither the package nor the
+        # version. `pins.py` has the whole story.
+        "pins": {
+            "path": str(pins.requirements_path() or ""),
+            "checked": len(rows),
+            "ok": not differing,
+            "differs": differing,
+        },
     }
 
 
