@@ -27,7 +27,7 @@ import { toHexColor } from './util/color.js';
 import { parseSRT } from './io/srt.js';
 import { parseVTT } from './io/vtt.js';
 import { importJSON } from './io/project-file.js';
-import { describeStudioAudit, health, optionsFor, transcribeFile } from './io/audio-studio-client.js';
+import { describeStudioAudit, health, listRuns, openRun, optionsFor, transcribeFile } from './io/audio-studio-client.js';
 import { captionFiles, downloadBlob, downloadText, exportStem } from './io/download.js';
 import { exportDocumentToVideo } from './io/webcodecs-export.js';
 import { defaultExportSettings, encoderSettings, outputSize } from './io/export-settings.js';
@@ -198,6 +198,33 @@ function describeMediaError(error) {
 }
 
 /**
+ * Name the one thing that actually limits a preview, when it applies: a picture far larger than the
+ * frame it is being shown in.
+ *
+ * This is measured rather than guessed. `tools/preview-perf.mjs` plays a real 3840x2160 AV1 capture in
+ * a bare `<video>` and in the editor, and reports both: the editor's own render loop holds a full
+ * 60 fps while the *decoder* presents ~26 of the 30 frames a second the file contains. The captions,
+ * the timeline and the transport cost about 1% — the decode is the rest, and a picture resampled down
+ * to a 900 px stage has no decoder to spare on a machine without AV1 in hardware. So the useful thing
+ * an editor can do here is say so, and say what helps: a proxy for the edit, the original for the
+ * export.
+ */
+function reportPictureCost() {
+  const video = $('#preview-video');
+  const width = Number(video?.videoWidth) || 0;
+  const stage = $('#stage');
+  const shown = Number(stage?.clientWidth) || 0;
+  if (!width || !shown || width < shown * 2) return '';
+  return (
+    `\nNote: the picture is ${width}\u00d7${video.videoHeight} and the preview shows it about ` +
+    `${Math.round(shown)}px wide, so it is being decoded at roughly ` +
+    `${(width / shown).toFixed(1)}\u00d7 the size it is displayed at. That decode — not the captions — ` +
+    `is what can make a preview stutter; a smaller copy of the same picture is smoother to edit ` +
+    `against, and the export still uses the file you choose here.`
+  );
+}
+
+/**
  * Say how the two recordings compare, because the answer changes what the programme *is*.
  *
  * A picture shorter than the track is the normal case here (a cut-down music video against the
@@ -214,9 +241,10 @@ function reportMediaLengths() {
       'sources',
       'ok',
       picture ? `picture ${picture.toFixed(2)}s` : `track ${track.toFixed(2)}s`,
-      picture
+      (picture
         ? `Picture loaded: ${picture.toFixed(2)}s. No track, so the picture's own sound is what you hear.`
-        : `Track loaded: ${track.toFixed(2)}s. It carries the clock and the programme's length.`,
+        : `Track loaded: ${track.toFixed(2)}s. It carries the clock and the programme's length.`) +
+        (picture ? reportPictureCost() : ''),
     );
     return;
   }
@@ -226,7 +254,8 @@ function reportMediaLengths() {
       'sources',
       'ok',
       `${picture.toFixed(2)}s`,
-      `Picture and track are both ${picture.toFixed(2)}s — the programme is exactly the recording, with no blank stretch.`,
+      `Picture and track are both ${picture.toFixed(2)}s — the programme is exactly the recording, with no blank stretch.` +
+        reportPictureCost(),
     );
     return;
   }
@@ -240,7 +269,8 @@ function reportMediaLengths() {
     'warn',
     `${programme.toFixed(2)}s programme`,
     `The picture is ${picture.toFixed(2)}s and the track is ${track.toFixed(2)}s, so the programme is ` +
-      `${programme.toFixed(2)}s long.\n${tail}`,
+      `${programme.toFixed(2)}s long.\n${tail}` +
+      reportPictureCost(),
   );
 }
 
@@ -436,6 +466,27 @@ function refreshTranscribeButton() {
   $('#transcribe-btn').disabled = transcribing || !$('#transcribe-in').files?.length;
 }
 
+/**
+ * The dependencies this server has, against the ones it was verified with.
+ *
+ * Empty when there is nothing to say — an older server that does not report its pins, or
+ * one where every pin matches. `pins.differs` is the list worth reading: each entry is a
+ * package whose installed version is not the pinned one, which on this project has already
+ * meant "decodes on one machine and not on the other, from the same commit".
+ */
+function describePinMismatch(report) {
+  const differs = report?.differs ?? [];
+  if (!differs.length) return '';
+  const lines = differs
+    .map((row) => `${row.name} ${row.installed} (pinned ${row.pinned})`)
+    .join(', ');
+  return (
+    `${differs.length} package(s) differ from audio-studio's requirements.txt: ${lines}. ` +
+    'A transcription may fail for a reason that has nothing to do with your audio — run ' +
+    '`pip install -r requirements.txt` in the audio-studio folder, then `python -m audio_studio doctor`.'
+  );
+}
+
 /** Ask the server what it can actually do here, before trusting it with a job. */
 async function onTranscribeProbe() {
   const badge = $('#transcribe-status');
@@ -446,19 +497,113 @@ async function onTranscribeProbe() {
     const engines = available(info.engines);
     const aligners = available(info.aligners);
     const validators = available(info.validators);
+
+    // A machine whose dependencies have drifted from the set the studio was verified
+    // against is reported *before* a job is queued rather than after it fails: the same
+    // code on two machines behaves differently for exactly one reason, and the error it
+    // produces (`cannot decode audio: … install ffmpeg`) names neither the package nor
+    // the version. This is the one place the browser can say so up front.
+    const pins = describePinMismatch(info.pins);
+
     badge.textContent = `audio-studio ${info.version}`;
     log(`audio-studio ${info.version} — engines: ${engines.join(', ') || 'none'}`);
     log(`  aligners: ${aligners.join(', ') || 'none'} · validators: ${validators.join(', ') || 'none'}`);
+    if (pins) log(`  ⚠ ${pins}`);
     setTranscribeNote(
       `audio-studio ${info.version} is up.\npresets: ${(info.presets ?? []).join(', ')} (default ${info.defaultPreset})\n` +
-        `aligners: ${aligners.join(', ') || 'none'}   validators: ${validators.join(', ') || 'none'}`,
+        `aligners: ${aligners.join(', ') || 'none'}   validators: ${validators.join(', ') || 'none'}` +
+        (pins ? `\n\n⚠ ${pins}` : ''),
     );
+    // A server that answered has runs, and its runs are the reason to prefer opening one to
+    // transcribing again — so the list is filled the moment the server proves it is there.
+    await refreshRuns({ announce: false });
   } catch (err) {
     // "Busy" and "absent" are different problems with different fixes, so the badge must not
     // flatten them: the first click after the server starts can genuinely be a slow one.
     badge.textContent = err.timedOut ? 'server busy — retry' : 'server unreachable';
     log(`ERROR ${err.toString()}`);
     setTranscribeNote(err.toString());
+  }
+}
+
+/**
+ * Ask the server which runs it has finished, and offer them.
+ *
+ * The counterpart to the transcribe button: a run already exists on the Python side, so the useful
+ * thing is to *open* it rather than to do the same minutes of work again. The list is fetched, never
+ * cached — the server is the register of its own runs, and a stale menu here would offer a job whose
+ * folder has since been deleted.
+ */
+async function refreshRuns({ announce = true } = {}) {
+  const select = $('#runs-select');
+  const openBtn = $('#runs-open');
+  if (!select) return [];
+  const base = $('#transcribe-url').value;
+  if (announce) log('runs: asking the server what it has finished…');
+  let runs = [];
+  try {
+    runs = await listRuns(base);
+  } catch (err) {
+    select.replaceChildren(el('option', null, '— the server is not reachable —'));
+    select.value = '';
+    openBtn.disabled = true;
+    $('#runs-note').textContent =
+      `Could not list runs: ${err.toString()}${err.hint ? ` — ${err.hint}` : ''}`;
+    if (announce) log(`ERROR runs: ${err.toString()}`);
+    return [];
+  }
+
+  select.replaceChildren();
+  if (!runs.length) {
+    select.append(el('option', null, '— no finished runs on that server yet —'));
+    select.value = '';
+    openBtn.disabled = true;
+    $('#runs-note').textContent = 'That server has no finished run with captions to open.';
+    if (announce) log('runs: none yet');
+    return [];
+  }
+  for (const run of runs) {
+    const option = el('option', null);
+    option.value = run.id;
+    option.textContent = `${run.name} — ${run.captions} captions, ${run.words} words`;
+    select.append(option);
+  }
+  select.value = runs[0].id;
+  openBtn.disabled = false;
+  $('#runs-note').textContent =
+    `${runs.length} finished run${runs.length === 1 ? '' : 's'} on the server, newest first. ` +
+    'Opening one loads its captions exactly as it wrote them. The media is not sent back, so load ' +
+    'the same recording under Sources to hear it against them.';
+  if (announce) log(`runs: ${runs.length} finished run(s) on the server`);
+  return runs;
+}
+
+/** Open a finished run's captions, without transcribing anything again. */
+async function onOpenRun() {
+  const select = $('#runs-select');
+  const jobId = select?.value;
+  if (!jobId) return;
+  const label = select.options[select.selectedIndex]?.textContent ?? jobId;
+  try {
+    stateOf('transcribe', 'busy', 'opening…', `Fetching "${label}"...`);
+    log(`runs: opening ${label}`);
+    const { text, job } = await openRun($('#transcribe-url').value, jobId);
+    const { document: doc, kind } = importJSON(text);
+    store.setState({ aiDoc: doc });
+    const words = doc.blocks.reduce((n, b) => n + b.words.length, 0);
+    await showDocument(doc, `an existing run's captions → ${doc.blocks.length} blocks`);
+    const audit = describeStudioAudit(job);
+    for (const line of audit) log(`  ${line}`);
+    stateOf(
+      'transcribe',
+      'ok',
+      'opened',
+      `Opened ${label} — ${doc.blocks.length} captions, ${words} words (${kind}), read from the ` +
+        "server's own output. Nothing was transcribed again.",
+    );
+  } catch (err) {
+    log(`ERROR runs: ${err.toString()}`);
+    stateOf('transcribe', 'failed', 'failed', `That run could not be opened.\n${err.toString()}`);
   }
 }
 
@@ -571,6 +716,8 @@ async function onTranscribe() {
       'done',
       `Done — ${doc.blocks.length} captions, ${words} words from "${file.name}". They are on the stage and on the timeline now.`,
     );
+    // The run that just finished is now the newest entry in the list.
+    await refreshRuns({ announce: false });
   } catch (err) {
     $('#transcribe-bar').classList.add('failed');
     log(`ERROR transcribe: ${err.toString()}`);
@@ -866,9 +1013,30 @@ async function runAlignment() {
     // and show it
     const doc = documentFromAlignment(result, aiDoc);
     await showDocument(doc, `corrected captions → ${doc.blocks.length} blocks`);
+
+    // The other half of the Sources panel's work, reported the same way its inputs are:
+    // this ran from this panel's own two files, and it used to finish in the log alone, so
+    // the panel a person was looking at said nothing about the step it had just run.
+    stateOf(
+      'sources',
+      errors.length ? 'warn' : 'ok',
+      errors.length ? `${errors.length} problem(s)` : 'aligned',
+      `Corrected ${report.aligned}/${report.sourceWords} words against ${report.anchors} anchors, ` +
+        `${corrections.length} correction(s); ${doc.blocks.length} captions are on the stage now.` +
+        (warnings.length ? `\n${warnings.length} validation warning(s) — read the log.` : ''),
+    );
   } catch (err) {
     log(`ERROR during alignment: ${err.message}`);
     console.error(err);
+    // A failure here is the one that leaves the stage showing the *uncorrected* captions, so
+    // silence is the worst answer: the panel says the alignment did not finish, and says it
+    // in the same three places a failed transcription or export does.
+    stateOf(
+      'sources',
+      'failed',
+      'alignment failed',
+      `The AI captions could not be corrected against the TRUTH file.\n${err.message}`,
+    );
   } finally {
     setStatus('idle');
   }
@@ -1263,13 +1431,43 @@ function refreshSeekRange() {
   syncTimeline();
 }
 
+/**
+ * What the transport reads back, once per drawn frame.
+ *
+ * Every write here is guarded by "has it changed?" for one reason: this runs at the display's frame
+ * rate, next to a video decoder that needs the CPU more than the DOM does. An unguarded
+ * `textContent =` on a node that already holds that string still invalidates style for that subtree,
+ * and there are four of them plus a range input — per frame, whether or not the tenth of a second
+ * they display has actually advanced.
+ */
+const transportReadout = { time: '', position: '', button: '' };
+
 function onFrame(t, doc) {
   timeline?.setTime(t);
-  $('#preview-time').textContent = `${t.toFixed(2)}s`;
+  const time = `${t.toFixed(2)}s`;
+  if (transportReadout.time !== time) {
+    transportReadout.time = time;
+    $('#preview-time').textContent = time;
+  }
   const seek = $('#seek');
-  if (document.activeElement !== seek) seek.value = String(t);
-  $('#seek-label').textContent = `${t.toFixed(2)} / ${(preview?.duration() ?? 0).toFixed(2)}`;
-  if (doc) $('#play-btn').textContent = preview.playing ? '⏸ Pause' : '▶ Play';
+  // The input is left alone while it has focus: that is the user dragging the scrub bar, and writing
+  // a value into it mid-drag is what makes a scrub fight the pointer.
+  if (document.activeElement !== seek) {
+    const value = t.toFixed(2);
+    if (seek.value !== value) seek.value = value;
+  }
+  const position = `${t.toFixed(2)} / ${(preview?.duration() ?? 0).toFixed(2)}`;
+  if (transportReadout.position !== position) {
+    transportReadout.position = position;
+    $('#seek-label').textContent = position;
+  }
+  if (doc) {
+    const button = preview.playing ? '⏸ Pause' : '▶ Play';
+    if (transportReadout.button !== button) {
+      transportReadout.button = button;
+      $('#play-btn').textContent = button;
+    }
+  }
 }
 
 function buildFontControls(defaults) {
@@ -2475,6 +2673,11 @@ $('#lyrics-text').addEventListener('input', () => {
 });
 $('#transcribe-btn').addEventListener('click', onTranscribe);
 $('#transcribe-probe').addEventListener('click', onTranscribeProbe);
+$('#runs-refresh').addEventListener('click', () => refreshRuns());
+$('#runs-open').addEventListener('click', onOpenRun);
+$('#runs-select').addEventListener('change', (e) => {
+  $('#runs-open').disabled = !e.target.value;
+});
 refreshTranscribeButton();
 
 $('#download-video').addEventListener('click', openExportDialog);

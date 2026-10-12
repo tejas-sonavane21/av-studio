@@ -195,7 +195,32 @@ export function createTimeline({
   // is still running and the strip loses its scroll position (or loops).
   let layingOut = false;
 
-  const viewWidth = () => Math.max(120, scroll.clientWidth || 640);
+  // The viewport width is *measured*, never read per frame.
+  //
+  // `scroll.clientWidth` is a layout read: it forces the browser to settle any pending style and
+  // layout work before it can answer. Reading it from `setTime` meant one forced synchronous layout
+  // per animation frame for the whole time the transport was playing — on top of the video decode,
+  // which is where the CPU was actually needed. It changes when the element is resized, and that is
+  // the only time it is re-read.
+  let viewportWidth = 640;
+  const measureViewport = () => {
+    viewportWidth = Math.max(120, scroll.clientWidth || 640);
+    return viewportWidth;
+  };
+  const viewWidth = () => viewportWidth;
+
+  // ...and the scroll position is tracked rather than asked for, for the same reason: `scrollLeft` is
+  // a layout-dependent read in a browser that has work queued. It is kept up to date from the scroll
+  // event (the user dragging the bar or using the wheel) and from the one place this module scrolls.
+  let scrolledTo = 0;
+  const setScrollLeft = (value) => {
+    const next = Math.max(0, value);
+    scrolledTo = next;
+    if (scroll.scrollLeft !== next) scroll.scrollLeft = next;
+  };
+  scroll.addEventListener('scroll', () => {
+    scrolledTo = scroll.scrollLeft;
+  }, { passive: true });
   /** Pixels per second at a given zoom level, with the fit and the clamps applied. */
   const pxPerSecondFor = (level) => {
     if (duration <= 0) return MIN_PPS;
@@ -296,7 +321,8 @@ export function createTimeline({
     try {
       // The scroll position is the user's, not this function's: a relayout (a zoom, a new clip, a
       // resize) must not silently throw the strip back to the start.
-      const keepLeft = scroll.scrollLeft;
+      const keepLeft = scrolledTo;
+      measureViewport();
       const pps = pxPerSecond();
       const innerWidth = Math.max(viewWidth(), duration * pps);
       inner.style.width = `${innerWidth}px`;
@@ -309,7 +335,7 @@ export function createTimeline({
       empty.hidden = Boolean(doc?.blocks?.length);
       updateZoomReadout();
       updateButtons();
-      if (scroll.scrollLeft !== keepLeft) scroll.scrollLeft = keepLeft;
+      setScrollLeft(keepLeft);
     } finally {
       layingOut = false;
     }
@@ -334,14 +360,24 @@ export function createTimeline({
     if (Math.abs(zoom - previous) < 1e-9) return;
     const ppsBefore = pxPerSecondFor(previous);
     const pointer = anchorX == null ? viewWidth() / 2 : anchorX;
-    const secondUnderPointer = (scroll.scrollLeft + pointer) / ppsBefore;
+    const secondUnderPointer = (scrolledTo + pointer) / ppsBefore;
     layout();
-    scroll.scrollLeft = Math.max(0, secondUnderPointer * pxPerSecond() - pointer);
+    setScrollLeft(secondUnderPointer * pxPerSecond() - pointer);
   }
 
+  /**
+   * Move the playhead's line and its clock.
+   *
+   * Both writes are skipped when the value has not changed: this runs once per animation frame while
+   * the transport plays, and setting a style property or writing a text node that already holds that
+   * value invalidates style for the subtree — for a strip with a ruler and three lanes of clips, that
+   * is real work per frame spent on nothing.
+   */
   function positionPlayhead() {
-    playhead.style.left = `${Math.max(0, time) * pxPerSecond()}px`;
-    clock.textContent = `${formatClock(time)} / ${formatClock(duration)}`;
+    const left = `${Math.max(0, time) * pxPerSecond()}px`;
+    if (playhead.style.left !== left) playhead.style.left = left;
+    const text = `${formatClock(time)} / ${formatClock(duration)}`;
+    if (clock.textContent !== text) clock.textContent = text;
   }
 
   function updateButtons() {
@@ -353,11 +389,17 @@ export function createTimeline({
       const list = ranges[track] ?? [];
       return list.length !== 1 || Math.abs(list[0].srcIn) > 1e-6 || Math.abs(list[0].srcOut - duration) > 1e-6;
     });
-    splitBtn.disabled = !inside;
-    cutLeftBtn.disabled = !TRACKS.some((track) => (ranges[track] ?? []).some((r) => r.srcIn < time - 0.05));
-    cutRightBtn.disabled = !TRACKS.some((track) => (ranges[track] ?? []).some((r) => r.srcOut > time + 0.05));
-    deleteBtn.disabled = !selectedClip && !TRACKS.some((track) => hitSegment(track, time));
-    resetBtn.disabled = !anyCut;
+    // `disabled = false` on a button that is already enabled is not free on a strip this size.
+    set(splitBtn, !inside);
+    set(cutLeftBtn, !TRACKS.some((track) => (ranges[track] ?? []).some((r) => r.srcIn < time - 0.05)));
+    set(cutRightBtn, !TRACKS.some((track) => (ranges[track] ?? []).some((r) => r.srcOut > time + 0.05)));
+    set(deleteBtn, !selectedClip && !TRACKS.some((track) => hitSegment(track, time)));
+    set(resetBtn, !anyCut);
+  }
+
+  /** Assign `disabled` only when it differs. */
+  function set(button, disabled) {
+    if (button.disabled !== disabled) button.disabled = disabled;
   }
 
   /**
@@ -370,12 +412,13 @@ export function createTimeline({
    */
   function follow() {
     if (scrubbing || trimming || layingOut) return;
+    if (duration <= 0) return;
     const pps = pxPerSecond();
     const x = time * pps;
-    const left = scroll.scrollLeft;
+    const left = scrolledTo;
     const right = left + viewWidth();
-    if (x < left + 12) scroll.scrollLeft = Math.max(0, x - 12);
-    else if (x > right - 24) scroll.scrollLeft = x - viewWidth() + 24;
+    if (x < left + 12) setScrollLeft(x - 12);
+    else if (x > right - 24) setScrollLeft(x - viewWidth() + 24);
   }
 
   /** A pointer's x, in seconds on the source clock. */
@@ -439,11 +482,12 @@ export function createTimeline({
 
   zoomIn.addEventListener('click', () => zoomBy(ZOOM_STEP));
   zoomOut.addEventListener('click', () => zoomBy(1 / ZOOM_STEP));
-  zoomFit.addEventListener('click', () => {
+  const resetZoom = () => {
     zoom = 1;
     layout();
-    scroll.scrollLeft = 0;
-  });
+    setScrollLeft(0);
+  };
+  zoomFit.addEventListener('click', resetZoom);
 
   /**
    * The wheel, which is how a timeline is actually moved around.
@@ -469,7 +513,7 @@ export function createTimeline({
         return;
       }
       const dx = event.shiftKey ? event.deltaY : event.deltaX || event.deltaY;
-      scroll.scrollLeft = Math.max(0, scroll.scrollLeft + dx);
+      setScrollLeft(scrolledTo + dx);
     },
     { passive: false },
   );
@@ -479,11 +523,8 @@ export function createTimeline({
     if (event.target !== scroll && !container.contains(event.target)) return;
     if (event.key === '+' || event.key === '=') zoomBy(ZOOM_STEP);
     else if (event.key === '-' || event.key === '_') zoomBy(1 / ZOOM_STEP);
-    else if (event.key.toLowerCase() === 'f') {
-      zoom = 1;
-      layout();
-      scroll.scrollLeft = 0;
-    } else return;
+    else if (event.key.toLowerCase() === 'f') resetZoom();
+    else return;
     event.preventDefault();
   };
   scroll.tabIndex = 0;
@@ -498,6 +539,7 @@ export function createTimeline({
           const width = scroll.clientWidth;
           if (width === lastWidth) return;
           lastWidth = width;
+          viewportWidth = Math.max(120, width || 640);
           layout();
         })
       : null;

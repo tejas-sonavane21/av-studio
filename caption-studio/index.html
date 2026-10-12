@@ -320,6 +320,27 @@
             <input type="file" id="transcribe-in" accept="audio/*,video/*" />
           </div>
 
+          <!--
+            The runs the server already finished. This is the half of the two studios that makes
+            them a suite: transcription is minutes of CPU, and its output already exists next door,
+            so re-opening a finished run has to be a click rather than a search through a job
+            folder for the right JSON. Nothing here transcribes anything.
+          -->
+          <div class="field">
+            <label for="runs-select">Runs the server has finished</label>
+            <div class="runs-row">
+              <select id="runs-select">
+                <option value="">— press Refresh to ask the server —</option>
+              </select>
+              <button class="ghost" id="runs-refresh" type="button">Refresh</button>
+              <button class="primary" id="runs-open" type="button" disabled>Open</button>
+            </div>
+            <div class="hint" id="runs-note">
+              Opens a run's captions in the editor as they were written — no second transcription.
+              Load the recording itself under Sources to hear it against them.
+            </div>
+          </div>
+
           <div class="field">
             <label for="lyrics-in">Original lyrics — optional, SRT / VTT / TXT, or paste below</label>
             <input type="file" id="lyrics-in" accept=".srt,.vtt,.txt,text/plain" />

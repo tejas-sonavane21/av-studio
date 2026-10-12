@@ -281,6 +281,15 @@ function startStubStudio() {
         presets: ['fast', 'balanced', 'accurate'],
         defaultPreset: 'balanced',
         emitKinds: ['json', 'veed', 'srt', 'vtt'],
+        // Deliberately drifted, so the page's own warning is exercised: a server whose
+        // dependencies are not the pinned ones is the failure this project has actually
+        // had, and it is reported before a job is queued rather than after it dies.
+        pins: {
+          path: 'requirements.txt',
+          checked: 8,
+          ok: false,
+          differs: [{ name: 'av', pinned: '18.1.0', installed: '19.0.1' }],
+        },
       });
     }
 
@@ -293,6 +302,25 @@ function startStubStudio() {
         send(202, { jobId: 'stub-job', status: 'queued', progress: 0, align: url.searchParams.get('align') });
       });
       return undefined;
+    }
+
+    if (url.pathname === '/jobs') {
+      // The register of finished runs. `source` is a *path* on the Python side, exactly as the real
+      // server sends it, so the panel has to reduce it to a name rather than showing a path.
+      return send(200, {
+        jobs: [
+          {
+            jobId: 'stub-job',
+            status: 'done',
+            source: 'C:/music/songs/Just an Ordinary Boy.mp3',
+            files: { veed: 'stub.veed.json' },
+            urls: { veed: '/jobs/stub-job/veed' },
+            created: 1700000000.0,
+            summary: { segments: 2, words: 8, seconds: 1.25 },
+          },
+          { jobId: 'stub-running', status: 'running', source: 'halfway.mp3', files: {}, urls: {} },
+        ],
+      });
     }
 
     if (url.pathname === '/jobs/stub-job') {
@@ -1557,6 +1585,18 @@ async function main() {
     'document.querySelector("#log").textContent.includes("audio-studio 9.9.9")',
     (v) => v === true,
   );
+  await check(
+    cdp,
+    'a server whose packages drifted from the pinned set says so before a job is queued',
+    'document.querySelector("#transcribe-note").textContent.includes("av 19.0.1 (pinned 18.1.0)")',
+    (v) => v === true,
+  );
+  await check(
+    cdp,
+    'and it names the command that repairs it rather than only the symptom',
+    'document.querySelector("#transcribe-note").textContent.includes("pip install -r requirements.txt")',
+    (v) => v === true,
+  );
 
   // A synthetic WAV again: the smoke test must not depend on the (gitignored) reference workspace.
   const pickRecording = `(() => {
@@ -1717,6 +1757,55 @@ async function main() {
     'the track is loaded into the preview, so the captions can be checked against what was sung',
     'document.querySelector("#audio-tag").textContent',
     (v) => v === 'recording.wav',
+  );
+
+  // ------------------------------------------------------------------------- //
+  // the runs the server already finished
+  // -------------------------------------------------------------------------
+  //
+  // The other half of the two studios being a suite: a run's output already exists on the Python
+  // side, so opening it has to be a click rather than a hunt through a job folder. Nothing in this
+  // section transcribes anything, and the check below proves it — the job is opened from the list.
+  console.log('\n■ opening a run the server already finished');
+  await evaluate(cdp, 'document.querySelector("#runs-refresh").click()');
+  await delay(400);
+  await check(
+    cdp,
+    'the finished runs are listed',
+    'document.querySelectorAll("#runs-select option").length',
+    (v) => v === 1,
+  );
+  await check(
+    cdp,
+    'a run is named by its recording, not by the path the server keeps it at',
+    'document.querySelector("#runs-select option").textContent',
+    (v) => String(v).includes('Just an Ordinary Boy.mp3') && !String(v).includes('/'),
+  );
+  await check(
+    cdp,
+    'a run that has not finished is not offered, because it has nothing to open',
+    'document.querySelector("#transcribe-url").value.includes("127.0.0.1") && !document.querySelector("#runs-select").textContent.includes("halfway")',
+    (v) => v === true,
+  );
+
+  await evaluate(cdp, 'document.querySelector("#runs-open").click()');
+  await delay(600);
+  await check(
+    cdp,
+    'opening one says what it opened',
+    'document.querySelector("#transcribe-status").textContent',
+    (v) => v === '\u2713 opened',
+  );
+  await check(
+    cdp,
+    'and its captions are on the timeline',
+    'document.querySelectorAll("#timeline .timeline-clip").length',
+    (v) => Number(v) > 0,
+  );
+  assert(
+    'no second transcription was run to open it',
+    stubState.uploads.length === 1,
+    `${stubState.uploads.length} upload(s) — opening a finished run must not upload anything`,
   );
 
   console.log('\n■ and the timings survive the rest of the pipeline');

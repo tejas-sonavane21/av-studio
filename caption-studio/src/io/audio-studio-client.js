@@ -219,6 +219,53 @@ export async function getJob(baseUrl, jobId, { fetchImpl = fetch } = {}) {
 }
 
 /**
+ * Every run the server still knows about, newest first.
+ *
+ * This is what makes the two studios a *suite* rather than two programs that happen to be next to
+ * each other. Transcription is the one long, deliberate step here, and it already leaves its output
+ * on the Python side: without this list, using that output means knowing it exists, finding the job
+ * folder and picking a file out of it by hand — so in practice a run was redone instead, or skipped.
+ *
+ * The shape is normalised rather than passed through, because the panel should not have to know how
+ * the server names its fields. A job that produced no Veed artifact is *dropped* instead of listed:
+ * an entry that cannot be opened is worse than no entry.
+ */
+/** The last segment of a path from either platform. Kept here so the panel shows a name, not a path. */
+export function baseName(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const parts = text.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || text;
+}
+
+export async function listRuns(baseUrl = DEFAULT_BASE_URL, { fetchImpl = fetch, limit = 12 } = {}) {
+  const base = normalizeBaseUrl(baseUrl);
+  let response;
+  try {
+    response = await fetchImpl(`${base}/jobs`, { method: 'GET' });
+  } catch (cause) {
+    throw unreachable(base, cause);
+  }
+  if (!response.ok) throw await readError(response);
+  const body = await response.json();
+  const jobs = Array.isArray(body) ? body : (body.jobs ?? []);
+  return jobs
+    .filter((job) => job?.urls?.veed || (job?.files && job.files.veed))
+    .map((job) => ({
+      id: job.jobId ?? job.id,
+      status: job.status ?? 'unknown',
+      // `source` is the *path* on the Python side, which is not something to show a
+      // browser user: the file's own name is the part they recognise.
+      name: baseName(job.source?.file ?? job.source ?? job.sourceName) || job.name || 'a run',
+      seconds: job.summary?.seconds ?? job.seconds ?? 0,
+      captions: job.summary?.segments ?? 0,
+      words: job.summary?.words ?? 0,
+      createdAt: job.createdAt ?? job.created ?? job.finished ?? null,
+    }))
+    .slice(0, limit);
+}
+
+/**
  * Poll until the job finishes.
  *
  * A Python transcription is minutes, not milliseconds, so this is a poll and not a long request:
@@ -261,6 +308,25 @@ export async function fetchArtifact(baseUrl, jobId, kind = 'veed', { fetchImpl =
   }
   if (!response.ok) throw await readError(response);
   return response.text();
+}
+
+/**
+ * Open a run the server already finished, without transcribing anything again.
+ *
+ * The same two steps `transcribeFile` ends with — fetch the Veed master, hand it back as text — so
+ * the document a re-opened run produces is *identical* to the one the run produced, because it is
+ * the same bytes. Transcription is minutes on a CPU; re-opening a finished run should be a click.
+ */
+export async function openRun(baseUrl, jobId, { fetchImpl = fetch } = {}) {
+  const job = await getJob(baseUrl, jobId, { fetchImpl });
+  if (job.status !== 'done') {
+    throw new AudioStudioError(`that run is ${job.status}, not finished`, {
+      hint: 'only a finished run has an artifact to open',
+      detail: job,
+    });
+  }
+  const text = await fetchArtifact(baseUrl, jobId, 'veed', { fetchImpl });
+  return { job, veed: JSON.parse(text), text };
 }
 
 /**
