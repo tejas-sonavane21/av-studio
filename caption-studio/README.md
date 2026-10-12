@@ -228,7 +228,13 @@ at the top of the page is where the two meet:
    its confidence, how far the words moved, the validation ledger, and every warning the other studio
    attached. None of that is needed to *render* a caption; it is needed to *trust* one.
 
-4. **The original lyrics, if you have them** — the optional file under *Recording to transcribe*.
+4. **Runs the server has finished** — transcription is minutes of CPU, and its output already exists
+   on the Python side, so the list under the transcribe button offers those runs to *open* instead
+   of doing the same work again. It is fetched, never cached: the server is the register of its own
+   runs, and a menu entry whose folder has since been deleted is worse than no entry. Opening one
+   reads the same `GET /jobs/{id}/veed` a finished job would, and nothing is transcribed.
+
+5. **The original lyrics, if you have them** — the optional file under *Recording to transcribe*.
    The words then come from that file and only the timing comes from the audio, so the transcript
    stops being a guess about *what* was sung: on the real song it takes the word error rate from
    **11.8 % to 0.0 %**. The page reads the file and posts its text (a browser cannot read a path off
