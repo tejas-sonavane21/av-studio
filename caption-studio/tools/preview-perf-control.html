@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>preview-perf control page</title>
+  <!--
+    The control arm of `tools/preview-perf.mjs`, and nothing else.
+
+    It exists as a file rather than as a `data:` URL because a `data:` page has an opaque origin and
+    Chrome gave the video in one no `requestVideoFrameCallback` presentation at all — so the control
+    measured zero frames and the comparison had no floor to stand on. This is served by
+    `tools/serve.mjs`, so it is same-origin with the media and the decoder behaves as it does in the
+    editor.
+
+    The picture is named in the query string: `?src=referece_material/...`
+  -->
+</head>
+<body style="margin:0;display:grid;place-items:center;height:100vh;background:#000">
+  <video id="control" muted playsinline style="max-width:100%;max-height:100%"></video>
+  <script>
+    const src = new URLSearchParams(location.search).get('src');
+    const video = document.querySelector('#control');
+    // Resolved through `new URL` rather than concatenated: the query string arrives *decoded*, so a
+    // filename with spaces or a curly quote in it has to be re-encoded here, and a path that already
+    // begins with `/` must not be given a second one (a leading `//` is a protocol-relative URL, and
+    // the request goes to a host called `referece_material` — which is how this control page came to
+    // report MediaError 4 and measure nothing at all).
+    video.src = new URL(src.startsWith('/') ? src : `/${src}`, location.origin).href;
+    video.play().catch((err) => console.warn('control page: play() refused —', err.message));
+  </script>
+</body>
+</html>

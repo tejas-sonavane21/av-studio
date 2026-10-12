@@ -658,3 +658,9 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
   border: 1px solid var(--border); border-radius: var(--radius-sm);
 }
 #lyrics-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* The finished-runs row: a picker, the two buttons that act on it, and nothing that needs reading
+   twice. It wraps rather than shrinking the select to nothing on a narrow column. */
+.runs-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.runs-row select { flex: 1 1 12rem; min-width: 0; }
+.runs-row button { padding: 4px 10px; font-size: 12px; flex: none; }
