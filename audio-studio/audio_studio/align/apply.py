@@ -46,7 +46,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..config import AlignOptions
-from ..model import Segment, Transcript, Word, normalize_transcript
+from ..model import MIN_WORD_DURATION, Segment, Transcript, Word, normalize_transcript
 from .base import AlignmentResult, WordSpan
 
 
@@ -62,6 +62,11 @@ def limits_for(transcript: Transcript, index: int, options: AlignOptions) -> tup
     contiguous segments have nothing between them, so the first may not reach into
     the second at all — which is what stops alignment from cascading into a
     cumulative, and entirely fictitious, lag.
+
+    The recording's own end is a hard edge as well, and it is the last one: the
+    aligner hears the music, and the tail of a song is where a choir, a reverb or an
+    outro gives it something plausible to latch onto. Moving the last words past the
+    audio is how a caption ends up being displayed after the song has stopped.
     """
     segment = transcript.segments[index]
     previous_end = transcript.segments[index - 1].end if index else 0.0
@@ -69,6 +74,8 @@ def limits_for(transcript: Transcript, index: int, options: AlignOptions) -> tup
     right = segment.end + options.window_pad
     if index + 1 < len(transcript.segments):
         right = min(right, transcript.segments[index + 1].start)
+    if transcript.duration > 0:
+        right = min(right, transcript.duration)
     if right < left:
         return segment.start, segment.end
     return left, right
@@ -148,15 +155,23 @@ def _retime(
         start = max(0.0, min(span.start, span.end))
         end = max(start, span.end)
         if start < left or end > right:
-            start, end = max(start, left), min(end, right)
-            if end < start:
-                end = start
+            # Both ends are clamped *into* the window rather than each being clamped
+            # on its own. Clamping them independently looks equivalent and is not: a
+            # span lying wholly outside the window collapses to a zero-length word
+            # sitting at its own, out-of-window start — a word no editor can show and
+            # the rules validator rejects — which is a worse outcome than the drift
+            # the clamp was there to remove.
+            start = min(max(start, left), right)
+            end = min(max(end, start), right)
+            if end - start < MIN_WORD_DURATION:
+                start = max(left, min(start, end - MIN_WORD_DURATION))
             clamped += 1
         # The path is non-decreasing by construction, so this only ever bites on
         # an interpolated span or a genuinely bad backend — either way, never
         # silently: the segment reports how many words it had to nudge.
         if retimed and start < cursor:
-            start, end = cursor, max(end, cursor)
+            limit = min(cursor, right)
+            start, end = limit, max(end, limit)
         cursor = end
         retimed.append(Word(text=word.text, start=start, end=end, probability=word.probability, id=word.id))
 
@@ -222,8 +237,9 @@ def apply_alignment(
 
     if clamped_total:
         warnings.append(
-            f"{clamped_total} word(s) were pulled back inside their own segment: an alignment "
-            "may not reach into the next segment, or the error would compound down the file"
+            f"{clamped_total} word(s) were pulled back inside the space their segment owns: an "
+            "alignment may not reach into the next segment — the error would compound down the "
+            "file — and may not reach past the end of the recording"
         )
 
     kept_segments = sum(count for status, count in statuses.items() if status != "aligned")
@@ -257,6 +273,15 @@ def apply_alignment(
         engine=dict(transcript.engine),
         alignment=provenance,
         validation=transcript.validation,
+        # The reference pass ran before this one, so its record describes the word list
+        # these timings now belong to. Carried through, not rebuilt: this pass re-times a
+        # transcript and has nothing to say about where its words came from, and dropping
+        # the entry does not merely lose a note — an emitted artifact with no `reference`
+        # block is indistinguishable from one transcribed without the lyrics, so the
+        # caption editor's audit panel reports the run as if no lyrics were ever given.
+        # That is exactly what the pipeline's own order (reconcile → align) would do here,
+        # because alignment is the pass that runs last of the two.
+        reference=dict(transcript.reference) if transcript.reference else None,
         corrections=list(transcript.corrections),
         meta=dict(transcript.meta),
     )

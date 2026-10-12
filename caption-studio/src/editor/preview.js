@@ -50,18 +50,36 @@ export function createPreview({ canvas, video = null, audio = null, container = 
   let volume = 1; // master volume
   let videoAudioEnabled = true; // the picture's own soundtrack
   let playbackAudioEnabled = true; // the uploaded audio file
+  // The picture has run out and the programme has not. Latched rather than derived per frame, so
+  // that the last frames of a track are not drawn under a picture that flickers back in when the
+  // transport is paused, and cleared by seeking back inside the picture ('show video' is still the
+  // user's switch; this only says there is nothing left to show).
+  let pictureDone = false;
 
   /** Has this element a source and enough metadata loaded that it can be read or seeked? */
   const isReady = (m) => Boolean(m) && Number.isFinite(m.currentTime) && m.readyState > 0;
 
   /**
-   * Which element the clock follows: the video when it is loaded, else the audio.
+   * Which element the clock follows: the video while it still has material, else the audio.
    *
-   * Video wins on purpose. When both are loaded the video is the picture and normally the
-   * full-length stream; the audio element is the track, and `resyncAudio()` keeps it glued to the
-   * video so two independent decoders cannot drift apart over a long preview.
+   * The picture is preferred *while it is running* — when both are loaded the video is normally the
+   * full-length stream, and `resyncAudio()` keeps the track glued to it so two independent decoders
+   * cannot drift apart.
+   *
+   * A picture that has **run out** is not a clock any more, and this is the half that used to be
+   * missed: a video element that reaches its end holds its last frame and freezes `currentTime` at
+   * its duration. With a picture shorter than the track — a cut-down music video against the
+   * full-length master, which is the normal case here — the clock stopped at the picture's end, the
+   * track kept playing underneath, and `resyncAudio()` pulled it back to the frozen time on every
+   * frame. That is what "the audio collapses when the video is shorter" was. The programme's length
+   * is its longest part (see `duration()`), so the track takes the clock over and the picture simply
+   * stops showing anything.
    */
   function activeMedia() {
+    if (isReady(video) && !video.ended) return video;
+    if (isReady(audio) && !audio.ended) return audio;
+    // Both run out, or neither is loaded: keep whichever of the two there is, so a paused-at-the-end
+    // transport still reports the time it is parked on rather than falling back to the wall clock.
     if (isReady(video)) return video;
     if (isReady(audio)) return audio;
     return null;
@@ -154,6 +172,10 @@ export function createPreview({ canvas, video = null, audio = null, container = 
    */
   function resyncAudio() {
     if (!isReady(video) || !isReady(audio)) return;
+    // A picture that has run out is not a clock — see `activeMedia()`. Gluing the track to a frozen
+    // picture is worse than letting the two loose for a moment: it would seek the audio backwards on
+    // every frame, which is heard as the track stuttering to a halt.
+    if (video.ended) return;
     let target = video.currentTime;
     const map = mediaMap();
     if (map) {
@@ -236,6 +258,7 @@ export function createPreview({ canvas, video = null, audio = null, container = 
       skipCuts();
       resyncAudio();
     }
+    syncPictureCoverage();
 
     renderFrame(currentTime());
     raf = requestAnimationFrame(loop);
@@ -246,17 +269,61 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     return media ? media.currentTime : clock;
   }
 
-  /** Duration used by the transport: the media if there is any, else the document's end. */
+  /**
+   * Decide whether there is still a picture to show, and only touch the DOM when that changes.
+   *
+   * This is the "blank screen" half of a shorter picture: the track carries the programme on, and the
+   * layer goes away rather than freezing on its last frame, which would read as the video being stuck
+   * rather than finished. Seeking back inside the picture brings it straight back.
+   */
+  function syncPictureCoverage() {
+    if (!video) return;
+    const videoLength = trackDuration('video');
+    const next = Boolean(
+      videoLength > 0 &&
+        (video.ended || currentTime() >= videoLength - 1e-3) &&
+        trackDuration('audio') > videoLength + 1e-3,
+    );
+    if (next === pictureDone) return;
+    pictureDone = next;
+    applyVideoVisibility();
+    if (pictureDone) log.info('the picture has run out; the track carries on over a blank frame');
+  }
+
+  /**
+   * The length of one track's own recording — 0 when it is not loaded.
+   *
+   * A cut is measured against *its own* media, not against the programme: a 161 s picture and a
+   * 182 s master are two recordings of different lengths, and using one number for both is what let
+   * a caption be drawn past the end of the track it was timed to.
+   */
+  function trackDuration(track) {
+    const media = track === 'audio' ? audio : video;
+    const value = Number(media?.duration);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+
+  /**
+   * Duration used by the transport: **the longest part that was loaded**, else the document's end.
+   *
+   * The longest, not the first: a programme is as long as its longest element. Taking the video's
+   * length whenever a video was present made the transport stop early on the very common project
+   * this editor exists for — a full-length master track under a shorter picture — and the captions
+   * past that point then had nowhere to be drawn.
+   */
   function duration() {
-    for (const m of [video, audio]) {
-      if (m && Number.isFinite(m.duration) && m.duration > 0) return m.duration;
-    }
+    const longest = Math.max(trackDuration('video'), trackDuration('audio'));
+    if (longest > 0) return longest;
     if (!doc?.blocks?.length) return 0;
     return doc.blocks[doc.blocks.length - 1].end;
   }
 
   function start() {
     if (playing) return;
+    if (currentTime() < trackDuration('video') - 1e-3) {
+      pictureDone = false;
+      applyVideoVisibility();
+    }
     playing = true;
     lastTick = performance.now();
     cancelAnimationFrame(raf);
@@ -288,6 +355,12 @@ export function createPreview({ canvas, video = null, audio = null, container = 
    */
   function seek(t) {
     const clamped = Math.max(0, t);
+    // Seeking is the one thing that can put the picture back: the latching above is a statement about
+    // where the playhead *is*, and the playhead is about to move.
+    if (clamped < trackDuration('video') - 1e-3) {
+      pictureDone = false;
+      applyVideoVisibility();
+    }
     const map = mediaMap();
     const target = map?.video?.length ? playbackTarget(map.video, clamped) : null;
     const videoTime = target ? target.time : clamped;
@@ -350,7 +423,7 @@ export function createPreview({ canvas, video = null, audio = null, container = 
   }
 
   function applyVideoVisibility() {
-    if (video?.style) video.style.visibility = videoVisible ? 'visible' : 'hidden';
+    if (video?.style) video.style.visibility = videoVisible && !pictureDone ? 'visible' : 'hidden';
   }
 
   function setVideoVisible(next) {
@@ -362,6 +435,8 @@ export function createPreview({ canvas, video = null, audio = null, container = 
 
   function setVideo(element) {
     video = element;
+    // A different picture has not run out yet, whatever the last one did.
+    pictureDone = false;
     applyVideoVisibility();
     applyAudioRouting();
     syncVideoBox();
@@ -430,6 +505,8 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     setOptions,
     setVideo,
     setVideoVisible,
+    /** The length of one track's own media, for the cut to be measured against. */
+    trackDuration,
     setAudio,
     setMuted,
     setVolume,

@@ -32,11 +32,12 @@ after(() => {
 });
 
 /** A stand-in `<video>` with just the surface `preview.js` touches. */
-function fakeVideo({ duration = 0, readyState = 1, currentTime = 0 } = {}) {
+function fakeVideo({ duration = 0, readyState = 1, currentTime = 0, ended = false } = {}) {
   return {
     duration,
     readyState,
     currentTime,
+    ended,
     paused: true,
     style: {},
     playCalls: 0,
@@ -433,6 +434,84 @@ test('a seek into removed material lands on a frame that still exists', async ()
     tail.currentTime < 2 && tail.currentTime > 1.9,
     `a seek past the cut parks on the last kept frame, got ${tail.currentTime}`,
   );
+});
+
+// --------------------------------------------------------------------------- //
+// a picture shorter than the track
+// --------------------------------------------------------------------------- //
+
+/** A picture that has run out, and a track that has not. */
+function exhaustedPicture({ picture = 5, track = 30, trackTime = 12.5 } = {}) {
+  const video = fakeVideo({ duration: picture, currentTime: picture, ended: true });
+  const audio = fakeAudio({ duration: track, currentTime: trackTime });
+  return { video, audio, mounted: mount({ video, audio }) };
+}
+
+// The bug this exists for: a 161 s music video under a 182 s master. The picture reached its end,
+// froze its `currentTime` at its own duration, and the preview followed *it* — so the transport
+// stopped and the track was dragged back to the picture's last frame on every single frame, which is
+// heard as the audio collapsing. The programme is its longest part; the track takes the clock over.
+test('the track carries the clock once the picture has run out', async () => {
+  const { video, audio, mounted } = exhaustedPicture();
+  await mounted.preview.setDocument(createDemoDocument());
+
+  assert.equal(mounted.preview.currentTime(), 12.5, 'the clock is the track');
+  assert.equal(mounted.preview.duration(), 30, 'and the programme is as long as the track');
+
+  runLoop(mounted.preview);
+  assert.equal(audio.currentTime, 12.5, 'the track was not seeked back to the frozen picture');
+  assert.notEqual(video.currentTime, 5 + 0.5, 'nothing moved the picture either');
+  assert.equal(audio.pauseCalls, 0);
+  assert.equal(mounted.preview.playing, true, 'and the programme is still running');
+});
+
+// "Continue with a blank screen" — the alternative is a still frame, which reads as a stuck video
+// rather than a finished one.
+test('the picture layer goes blank rather than freezing on its last frame', async () => {
+  const { video, mounted } = exhaustedPicture();
+  await mounted.preview.setDocument(createDemoDocument());
+  // Unset is "visible" for an element nothing has styled; only the blanking writes the property.
+  assert.notEqual(video.style.visibility, 'hidden', 'shown before the transport runs');
+
+  runLoop(mounted.preview);
+  assert.equal(video.style.visibility, 'hidden', 'the picture has nothing left to show');
+});
+
+// ...and seeking back inside the picture brings it straight back, because "there is nothing to show
+// here" is a statement about where the playhead is.
+test('seeking back inside the picture brings it back', async () => {
+  const { video, audio, mounted } = exhaustedPicture();
+  await mounted.preview.setDocument(createDemoDocument());
+  runLoop(mounted.preview);
+  assert.equal(video.style.visibility, 'hidden');
+
+  video.ended = false;
+  video.currentTime = 3;
+  audio.currentTime = 3;
+  mounted.preview.seek(3);
+  await mounted.preview.setDocument(mounted.preview.document);
+  assert.equal(video.style.visibility, 'visible');
+});
+
+// A picture that is still the longest thing has nothing to blank: it is the programme.
+test('a picture at least as long as the track is never blanked', async () => {
+  const video = fakeVideo({ duration: 30, currentTime: 30, ended: true });
+  const audio = fakeAudio({ duration: 30, currentTime: 30, ended: true });
+  const mounted = mount({ video, audio });
+  await mounted.preview.setDocument(createDemoDocument());
+
+  runLoop(mounted.preview);
+
+  assert.equal(mounted.preview.duration(), 30);
+  assert.notEqual(video.style.visibility, 'hidden', 'the picture is still the programme, so it stays');
+});
+
+// The cut is measured against each track's *own* recording, so the lengths have to be readable.
+test('each track reports its own length', async () => {
+  const { mounted } = exhaustedPicture({ picture: 5, track: 30 });
+  assert.equal(mounted.preview.trackDuration('video'), 5);
+  assert.equal(mounted.preview.trackDuration('audio'), 30);
+  assert.equal(mount().preview.trackDuration('audio'), 0, 'nothing loaded is 0, not NaN');
 });
 
 test('an empty document does not throw', async () => {

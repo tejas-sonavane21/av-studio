@@ -25,12 +25,9 @@ from __future__ import annotations
 from typing import Optional
 
 from ..config import ValidateOptions
-from ..model import Transcript
+from ..model import MIN_WORD_DURATION, Transcript
 from .base import ProgressHook, Validator
 from .ledger import Correction
-
-#: A word shorter than this is not a word; it is debris from a collapse.
-MIN_WORD_DURATION = 0.02
 
 #: How close two identical neighbours have to be before the repeat looks like a
 #: transcriber loop rather than a deliberate stutter.

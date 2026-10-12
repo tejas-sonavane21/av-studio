@@ -29,6 +29,16 @@ const TICK_STEPS = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
 const MIN_PPS = 3;
 const MAX_PPS = 600;
 
+/** One press of `+` / `−`, and how far in it is allowed to go. */
+const ZOOM_STEP = 1.7;
+const MAX_ZOOM = 50;
+
+/** A clip is never drawn thinner than this, however short it is. */
+const MIN_CLIP_PX = 3;
+
+/** How much one wheel notch zooms, when the wheel is used to zoom. */
+const WHEEL_ZOOM = 1.16;
+
 /** Row geometry, in one place so the CSS and the hit-testing cannot disagree. */
 const RULER_H = 22;
 const ROW_TOP = { captions: RULER_H + 2, video: RULER_H + 38, audio: RULER_H + 74 };
@@ -57,6 +67,34 @@ export function tickStep(pxPerSecond, minPx = 72) {
     if (step * pxPerSecond >= minPx) return step;
   }
   return TICK_STEPS[TICK_STEPS.length - 1];
+}
+
+/**
+ * A caption's span, clipped to the recording it belongs to. **Pure.**
+ *
+ * A caption cannot outlive the audio it was timed against, so one that claims to is not drawn over
+ * the end of the strip: it is drawn up to the limit, and flagged. The flag is the point — silently
+ * shortening the clip would hide a real timing fault (a transcript aligned against the wrong file,
+ * or a document from a longer cut of the same song), and hiding it is how it survives to the export.
+ *
+ * `outside` is the harder case: a caption that begins *after* the recording ends has no honest
+ * position at all, so it is pinned to the limit as a marker rather than being placed where there is
+ * no material.
+ *
+ * @returns {{start:number, end:number, beyond:boolean, outside:boolean}}
+ */
+export function captionSpan(block, sourceEnd) {
+  const rawStart = Math.max(0, Number(block?.start) || 0);
+  const rawEnd = Math.max(rawStart, Number(block?.end) || 0);
+  const limit = Number(sourceEnd) > 0 ? Number(sourceEnd) : Infinity;
+  const start = Math.min(rawStart, limit);
+  const end = Math.min(Math.max(rawEnd, start), limit);
+  return {
+    start,
+    end,
+    beyond: rawEnd > limit + 1e-3,
+    outside: rawStart >= limit - 1e-3,
+  };
 }
 
 function el(tag, cls, text) {
@@ -108,12 +146,14 @@ export function createTimeline({
   editGroup.append(splitBtn, cutLeftBtn, cutRightBtn, deleteBtn, resetBtn);
   const spacer = el('span', 'spacer');
   const zoomOut = el('button', 'ghost', '−');
-  zoomOut.title = 'Zoom out';
+  zoomOut.title = 'Zoom out (−) · wheel over the strip, or ctrl+wheel';
   const zoomIn = el('button', 'ghost', '+');
-  zoomIn.title = 'Zoom in';
+  zoomIn.title = 'Zoom in (+) · wheel over the strip, or ctrl+wheel';
   const zoomFit = el('button', 'ghost', 'Fit');
-  zoomFit.title = 'Fit the whole timeline in view';
-  toolbar.append(clock, editGroup, spacer, zoomOut, zoomFit, zoomIn);
+  zoomFit.title = 'Fit the whole recording in view (F)';
+  const zoomReadout = el('span', 'timeline-zoom mono', '100%');
+  zoomReadout.title = 'How much of the recording is in view';
+  toolbar.append(clock, editGroup, spacer, zoomOut, zoomReadout, zoomIn, zoomFit);
 
   const scroll = el('div', 'timeline-scroll');
   const inner = el('div', 'timeline-inner');
@@ -132,8 +172,12 @@ export function createTimeline({
     row.append(label);
   }
   const playhead = el('div', 'timeline-playhead');
+  // Where the recording stops. Without it the strip runs to its own right-hand edge and the two are
+  // only the same thing at zoom 1, so "the captions go past the end" was impossible to see.
+  const endMark = el('div', 'timeline-end');
+  endMark.title = 'End of the recording';
   const empty = el('div', 'timeline-empty', 'No captions yet — load a source or open the demo.');
-  inner.append(ruler, rows.captions, rows.video, rows.audio, playhead);
+  inner.append(ruler, rows.captions, rows.video, rows.audio, endMark, playhead);
   inner.style.height = `${INNER_H}px`;
   scroll.append(inner, empty);
   container.append(toolbar, scroll);
@@ -146,13 +190,19 @@ export function createTimeline({
   let ranges = { video: [], audio: [] };
   let dropped = new Set();
   let zoom = 1;
+  // Re-entrancy guard for `layout()`: it writes the strip's width, and a width change is itself a
+  // resize event on some browsers, so without this the observer can call back into the layout that
+  // is still running and the strip loses its scroll position (or loops).
+  let layingOut = false;
 
   const viewWidth = () => Math.max(120, scroll.clientWidth || 640);
-  const pxPerSecond = () => {
+  /** Pixels per second at a given zoom level, with the fit and the clamps applied. */
+  const pxPerSecondFor = (level) => {
     if (duration <= 0) return MIN_PPS;
     const base = Math.min(MAX_PPS, Math.max(MIN_PPS, viewWidth() / duration));
-    return Math.min(MAX_PPS, Math.max(MIN_PPS, base * zoom));
+    return Math.min(MAX_PPS, Math.max(MIN_PPS, base * level));
   };
+  const pxPerSecond = () => pxPerSecondFor(zoom);
 
   /** Nearest range to a time, and which edge a point is closest to. */
   function hitSegment(track, t) {
@@ -181,25 +231,33 @@ export function createTimeline({
   function renderCaptions(pps) {
     rows.captions.replaceChildren();
     for (const block of doc?.blocks ?? []) {
-      const width = Math.max(3, (Number(block.end) - Number(block.start)) * pps);
+      const span = captionSpan(block, duration);
+      const width = Math.max(MIN_CLIP_PX, (span.end - span.start) * pps);
       const clip = el('button', 'timeline-clip');
-      clip.style.left = `${Math.max(0, Number(block.start) || 0) * pps}px`;
+      clip.style.left = `${span.start * pps}px`;
       clip.style.width = `${width}px`;
       clip.style.height = `${ROW_H.captions}px`;
       clip.dataset.blockId = block.id;
-      clip.title = `${formatClock(block.start)} – ${formatClock(block.end)}  ${block.text ?? ''}`;
+      clip.title =
+        `${formatClock(block.start)} – ${formatClock(block.end)}  ${block.text ?? ''}` +
+        (span.beyond
+          ? `\n⚠ this caption ends ${(Number(block.end) - duration).toFixed(2)}s after the recording does`
+          : '');
       clip.append(el('span', 'timeline-clip-text', block.text ?? ''));
       if (block.id === selectedId) clip.classList.add('active');
       // A caption the cut removed is still shown — it is how you see what you cut away — but it is
       // dimmed, and the export will not draw it.
       if (dropped.has(block.id)) clip.classList.add('dropped');
+      // A caption that outlives the recording is drawn up to the end and marked, never past it: the
+      // strip's own length is the truth about the material, so the clip has to be too.
+      if (span.beyond) clip.classList.add('beyond');
+      if (span.outside) clip.classList.add('outside');
       clip.addEventListener('click', (event) => {
         event.stopPropagation();
         onSelectBlock?.(block.id);
       });
       rows.captions.append(clip);
     }
-    rows.captions.style.width = `${rows.captions.closest('.timeline-inner')?.clientWidth || 0}px`;
   }
 
   function renderTrackSegments(track, pps) {
@@ -233,15 +291,52 @@ export function createTimeline({
   }
 
   function layout() {
-    const pps = pxPerSecond();
-    const innerWidth = Math.max(viewWidth(), duration * pps);
-    inner.style.width = `${innerWidth}px`;
-    renderRuler(pps, innerWidth);
-    renderCaptions(pps);
-    for (const track of TRACKS) renderTrackSegments(track, pps);
-    positionPlayhead();
-    empty.hidden = Boolean(doc?.blocks?.length);
-    updateButtons();
+    if (layingOut) return;
+    layingOut = true;
+    try {
+      // The scroll position is the user's, not this function's: a relayout (a zoom, a new clip, a
+      // resize) must not silently throw the strip back to the start.
+      const keepLeft = scroll.scrollLeft;
+      const pps = pxPerSecond();
+      const innerWidth = Math.max(viewWidth(), duration * pps);
+      inner.style.width = `${innerWidth}px`;
+      renderRuler(pps, innerWidth);
+      renderCaptions(pps);
+      for (const track of TRACKS) renderTrackSegments(track, pps);
+      endMark.style.left = `${duration * pps}px`;
+      endMark.hidden = !(duration > 0);
+      positionPlayhead();
+      empty.hidden = Boolean(doc?.blocks?.length);
+      updateZoomReadout();
+      updateButtons();
+      if (scroll.scrollLeft !== keepLeft) scroll.scrollLeft = keepLeft;
+    } finally {
+      layingOut = false;
+    }
+  }
+
+  /** The zoom level, as the percentage of the recording that is on screen. */
+  function updateZoomReadout() {
+    zoomReadout.textContent = `${Math.round(zoom * 100)}%`;
+    zoomOut.disabled = zoom <= 1 + 1e-6;
+    zoomFit.classList.toggle('active', zoom <= 1 + 1e-6);
+  }
+
+  /**
+   * Zoom about a point, so the frame under the pointer stays under the pointer.
+   *
+   * Zooming about the *centre* is the version that feels broken: the material you were looking at
+   * slides off to one side at every notch, and finding it again is a hunt. This keeps it still.
+   */
+  function zoomBy(factor, anchorX = null) {
+    const previous = zoom;
+    zoom = Math.min(MAX_ZOOM, Math.max(1, zoom * factor));
+    if (Math.abs(zoom - previous) < 1e-9) return;
+    const ppsBefore = pxPerSecondFor(previous);
+    const pointer = anchorX == null ? viewWidth() / 2 : anchorX;
+    const secondUnderPointer = (scroll.scrollLeft + pointer) / ppsBefore;
+    layout();
+    scroll.scrollLeft = Math.max(0, secondUnderPointer * pxPerSecond() - pointer);
   }
 
   function positionPlayhead() {
@@ -265,8 +360,16 @@ export function createTimeline({
     resetBtn.disabled = !anyCut;
   }
 
-  /** Keep the playhead on screen while the transport runs; do nothing while the user is scrubbing. */
+  /**
+   * Keep the playhead on screen while the transport runs.
+   *
+   * Two rules, both about not fighting the hand that is dragging: nothing moves while a scrub or a
+   * trim is in flight (the pointer is the authority on where the view should be then), and the strip
+   * only scrolls when the playhead has actually left the visible window — a playhead in view is not a
+   * reason to move anything.
+   */
   function follow() {
+    if (scrubbing || trimming || layingOut) return;
     const pps = pxPerSecond();
     const x = time * pps;
     const left = scroll.scrollLeft;
@@ -334,22 +437,70 @@ export function createTimeline({
   scroll.addEventListener('pointerup', endDrag);
   scroll.addEventListener('pointercancel', endDrag);
 
-  zoomIn.addEventListener('click', () => {
-    zoom = Math.min(50, zoom * 1.7);
-    layout();
-  });
-  zoomOut.addEventListener('click', () => {
-    zoom = Math.max(1, zoom / 1.7);
-    layout();
-  });
+  zoomIn.addEventListener('click', () => zoomBy(ZOOM_STEP));
+  zoomOut.addEventListener('click', () => zoomBy(1 / ZOOM_STEP));
   zoomFit.addEventListener('click', () => {
     zoom = 1;
-    scroll.scrollLeft = 0;
     layout();
+    scroll.scrollLeft = 0;
   });
 
+  /**
+   * The wheel, which is how a timeline is actually moved around.
+   *
+   * Three gestures, all of them the ones a video editor uses: the wheel pans along the strip (a
+   * timeline has no vertical content, so a vertical wheel notch is a horizontal scroll), a
+   * horizontal wheel or shift+wheel pans too — that is the trackpad — and ctrl+wheel (which a
+   * trackpad sends for a pinch) zooms about the pointer.
+   *
+   * Without this the only way to scroll was to drag the scrollbar, and `touch-action: none` on the
+   * strip — which is there so scrubbing and trimming work on a touch screen — ruled out the pan
+   * gestures that would otherwise have covered for it.
+   */
+  scroll.addEventListener(
+    'wheel',
+    (event) => {
+      if (duration <= 0) return;
+      event.preventDefault();
+      const rect = scroll.getBoundingClientRect();
+      const anchor = event.clientX - rect.left;
+      if (event.ctrlKey || event.metaKey) {
+        zoomBy(event.deltaY < 0 ? WHEEL_ZOOM : 1 / WHEEL_ZOOM, anchor);
+        return;
+      }
+      const dx = event.shiftKey ? event.deltaY : event.deltaX || event.deltaY;
+      scroll.scrollLeft = Math.max(0, scroll.scrollLeft + dx);
+    },
+    { passive: false },
+  );
+
+  /** Keyboard, for the two things a keyboard is genuinely faster at: stepping and zooming. */
+  const onKeyDown = (event) => {
+    if (event.target !== scroll && !container.contains(event.target)) return;
+    if (event.key === '+' || event.key === '=') zoomBy(ZOOM_STEP);
+    else if (event.key === '-' || event.key === '_') zoomBy(1 / ZOOM_STEP);
+    else if (event.key.toLowerCase() === 'f') {
+      zoom = 1;
+      layout();
+      scroll.scrollLeft = 0;
+    } else return;
+    event.preventDefault();
+  };
+  scroll.tabIndex = 0;
+  scroll.addEventListener('keydown', onKeyDown);
+
   // Re-fit when the strip changes width (the window, or the panel being shown for the first time).
-  const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => layout()) : null;
+  // The guard inside `layout()` is what stops a width change from re-entering it.
+  let lastWidth = 0;
+  const observer =
+    typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(() => {
+          const width = scroll.clientWidth;
+          if (width === lastWidth) return;
+          lastWidth = width;
+          layout();
+        })
+      : null;
   observer?.observe(scroll);
 
   return {
@@ -404,6 +555,15 @@ export function createTimeline({
       follow();
       updateButtons();
     },
+    /** The zoom level, as a number where 1 fits the recording on screen. For tests and callers. */
+    get zoom() {
+      return zoom;
+    },
+    /** Zoom to an absolute level (`1` fits). */
+    setZoom(level) {
+      zoomBy(Math.max(1, Number(level) || 1) / zoom);
+      return zoom;
+    },
     get time() {
       return time;
     },
@@ -416,6 +576,7 @@ export function createTimeline({
     },
     destroy() {
       observer?.disconnect();
+      scroll.removeEventListener('keydown', onKeyDown);
       container.replaceChildren();
     },
   };

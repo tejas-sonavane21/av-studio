@@ -47,16 +47,16 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
 from .config import ReconcileOptions
-from .model import Segment, Transcript, Word, normalize_transcript, round_time
+from .model import MIN_WORD_DURATION, Segment, Transcript, Word, normalize_transcript, round_time
 from .reference import Reference, match_key
 from .validate.ledger import classify
 
 ProgressHook = Callable[[float, str], None]
 
-#: No reconciled word is left with a window shorter than this. Interpolation across
-#: a boundary can otherwise hand two words the same instant, and a zero-length word
-#: is a word no caption editor can show — the offline rules validator reports it.
-MIN_WORD_DURATION = 0.02
+#: ``MIN_WORD_DURATION`` is imported rather than redefined: interpolation across a
+#: boundary can hand two words the same instant, and that floor is the same number
+#: here, in the alignment clamp and in the rules validator. It was written down three
+#: times before, which is how the three drift apart.
 
 #: An inserted run placed across a window wider than this is worth saying out loud.
 #: It is not an error (alignment will re-time it), but it is usually a sign that the

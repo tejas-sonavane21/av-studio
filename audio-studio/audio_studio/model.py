@@ -379,6 +379,58 @@ def assign_ids(transcript: Transcript) -> Transcript:
     return transcript
 
 
+#: The shortest window a word may be left with, anywhere in the suite. Below this a
+#: word is not a word but debris from a collapse: no caption editor can show it, and
+#: the offline rules validator rejects it. Every pass that rewrites a word's window
+#: — a trim, an interpolation, an alignment clamp — widens to this rather than
+#: leaving the zero behind, and this is the one place the number is written down.
+MIN_WORD_DURATION = 0.02
+
+
+def _trim_to_recording(segment: Segment, ceiling: float) -> Segment:
+    """
+    ``segment`` with everything past ``ceiling`` cut away, its words included.
+
+    A trim and not a slide, deliberately. Sliding is what resolves an overlap — a
+    caption that belongs a moment later than it was placed — but the end of the
+    recording is not a neighbour to be avoided, it is the edge of the material: a
+    caption running past it was **measured** to start where it starts, and only its
+    tail is fiction. So the start is kept and the tail is cut.
+
+    Words are pulled in with their window, monotonically, so the word list still
+    joins back to the caption's text and the last word cannot outlive the caption.
+    """
+    words: list[Word] = []
+    cursor = 0.0
+    for raw in segment.words:
+        end = min(raw.end, ceiling)
+        start = min(raw.start, end)
+        if end - start < MIN_WORD_DURATION:
+            start = max(0.0, end - MIN_WORD_DURATION)
+        start = max(start, cursor)
+        end = max(end, start)
+        words.append(
+            Word(
+                text=raw.text,
+                start=round_time(start),
+                end=round_time(end),
+                probability=raw.probability,
+                id=raw.id,
+            )
+        )
+        cursor = end
+
+    fresh = Segment(
+        start=min(segment.start, ceiling),
+        end=min(segment.end, ceiling),
+        words=words,
+        text=segment.text,
+        id=segment.id,
+        no_speech_probability=segment.no_speech_probability,
+    )
+    return fresh.normalized()
+
+
 def normalize_segment(segment: Segment) -> Segment:
     """In-place normalisation of one segment. Prefer :func:`normalize_transcript`."""
     fresh = segment.normalized()
@@ -457,9 +509,46 @@ def normalize_transcript(transcript: Transcript, min_gap: float = 1.0) -> Transc
             slid.append((index, delta))
         cursor = max(cursor, seg.end)
 
+    # The recording's length is the authority on where the programme ends.
+    #
+    # This used to be the other way round: the reported duration was raised to
+    # whatever the last caption happened to reach, so a transcriber's last word
+    # placed a second past the end of the audio *rewrote the length of the song*
+    # and the caption was shipped sitting outside it. Nothing downstream could see
+    # the mistake, because the number it would have been measured against had just
+    # moved to hide it. A known duration is now left exactly as it is, and anything
+    # past it is trimmed and reported.
+    # Rounded to the same millisecond every segment and word is, and for the same
+    # reason: the duration is a timing, and a timing this module stores at a finer
+    # precision than it serialises is a number that disagrees with the file it writes.
+    # It was visible: a decoder's 181.733875 s against a segment rounded to 181.734 s
+    # is a caption reported as "past the reported duration" by 0.000125 s.
+    known = round_time(_num(transcript.duration))
+    trimmed: list[dict] = []
+    if known > 0:
+        transcript.duration = known
+        for index, seg in enumerate(segments):
+            if seg.end <= known + 1e-6:
+                continue
+            before_end = seg.end
+            # A caption whose whole window sat past the end had no place in this
+            # recording at all; it is pulled back inside it and says so, rather than
+            # being dropped or left hanging off the end of the programme.
+            placed = seg.start >= known - 1e-6 or before_end - known >= seg.duration - 1e-6
+            fresh = _trim_to_recording(seg, known)
+            seg.start, seg.end, seg.words, seg.text = fresh.start, fresh.end, fresh.words, fresh.text
+            trimmed.append(
+                {
+                    "segment": seg.id or f"segment #{index + 1}",
+                    "to": round_time(known),
+                    "overrun": round_time(before_end - known),
+                    "placed": bool(placed),
+                }
+            )
+    elif segments:
+        transcript.duration = max(known, segments[-1].end)
+
     transcript.segments = segments
-    if segments:
-        transcript.duration = max(round_time(_num(transcript.duration)), segments[-1].end)
 
     assign_ids(transcript)
     transcript.gaps = find_gaps(transcript, min_duration=min_gap)
@@ -490,6 +579,27 @@ def normalize_transcript(transcript: Transcript, min_gap: float = 1.0) -> Transc
                 f"{entry['segment']}: slid forward {entry['delta']:.3f}s to resolve an overlap "
                 "with the segment before it"
             )
+
+    # Same rule for the trims as for the slides: a caption that was moved has to say so,
+    # and the report has to survive a second pass, or the output is not byte-identical
+    # and the artifact stops being reproducible.
+    known_trims = [dict(entry) for entry in (transcript.meta.get("trims") or [])]
+    for entry in trimmed:
+        if entry not in known_trims:
+            known_trims.append(entry)
+    if known_trims:
+        transcript.meta["trims"] = known_trims
+        for entry in known_trims:
+            if entry["placed"]:
+                transcript.warnings.append(
+                    f"{entry['segment']}: was timed to start after the recording's own end "
+                    f"({entry['to']:.3f}s) and was pulled back to it"
+                )
+            else:
+                transcript.warnings.append(
+                    f"{entry['segment']}: ran {entry['overrun']:.3f}s past the end of the "
+                    f"recording ({entry['to']:.3f}s) and was trimmed to it"
+                )
     return transcript
 
 

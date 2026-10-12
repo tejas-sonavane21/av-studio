@@ -247,31 +247,46 @@
 
         <!-- ============ SOURCES ============ -->
         <section class="panel sources-panel tab-panel" id="tab-sources" role="tabpanel" aria-labelledby="tab-sources-btn">
-          <h2>Sources</h2>
+          <h2>
+            Sources
+            <span class="tag" id="sources-status">nothing loaded</span>
+          </h2>
+
+          <div class="notice" id="sources-message">
+            Load a picture, a track, or both. A caption file needs neither; the video export needs a
+            picture.
+          </div>
 
           <div class="field">
             <label for="video-in">Video (optional)</label>
             <input type="file" id="video-in" accept="video/*" />
+            <div class="hint" id="video-note">No picture loaded.</div>
           </div>
 
           <div class="field">
             <label for="audio-in">Audio (optional)</label>
             <input type="file" id="audio-in" accept="audio/*" />
-            <div class="hint">
-              The original track — plays with the transport and drives the clock when no video is loaded.
+            <div class="hint" id="audio-note">
+              The original track — plays with the transport, and carries the programme when the
+              picture is shorter than it.
             </div>
           </div>
 
           <div class="field">
             <label for="ai-in">AI source — Veed master JSON</label>
             <input type="file" id="ai-in" accept=".json,application/json" />
-            <div class="hint">Word-level timing + AI keyword emphasis (authoritative timing).</div>
+            <div class="hint" id="ai-note">
+              Word-level timing + AI keyword emphasis (authoritative timing). No AI source loaded.
+            </div>
           </div>
 
           <div class="field">
             <label for="truth-in">TRUTH source — SRT / VTT</label>
             <input type="file" id="truth-in" accept=".srt,.vtt" />
-            <div class="hint">Spelling authority. Rolling cues are de-duplicated automatically.</div>
+            <div class="hint" id="truth-note">
+              Spelling authority. Rolling cues are de-duplicated automatically. No TRUTH source
+              loaded.
+            </div>
           </div>
 
           <button class="primary" id="align-btn" disabled>Run quality correction</button>
@@ -306,14 +321,22 @@
           </div>
 
           <div class="field">
-            <label for="lyrics-in">Original lyrics — optional, SRT / VTT / TXT</label>
+            <label for="lyrics-in">Original lyrics — optional, SRT / VTT / TXT, or paste below</label>
             <input type="file" id="lyrics-in" accept=".srt,.vtt,.txt,text/plain" />
+            <textarea
+              id="lyrics-text"
+              rows="4"
+              spellcheck="false"
+              placeholder="…or paste the lyrics here — one line per sung line is enough"
+            ></textarea>
             <div class="hint" id="lyrics-note">
               The words the song actually has. Give them to the studio and the text comes from this file
               while the timing still comes from the audio, so nothing is guessed — added lines are timed
               by interpolation and then re-timed by the aligner. A file that is not this recording is
               refused rather than applied. (The TRUTH source further down is a different pass: it fixes
-              spelling locally. The same file can be used in both.)
+              spelling locally. The same file can be used in both.) <b>This is the field that keeps a
+              sung transcript from drifting</b>: without it the transcriber decides both the words and
+              the timing, and on a song it can be a beat out by the second chorus.
             </div>
           </div>
 
@@ -358,6 +381,7 @@
           </div>
 
           <div class="progress"><div class="progress-bar" id="transcribe-bar"></div></div>
+          <div class="notice" id="transcribe-message"></div>
           <div class="hint" id="transcribe-note">
             Choose a recording and press Transcribe. A three-minute song takes about a minute to
             transcribe and two more to align, on CPU.
@@ -380,6 +404,7 @@
           </div>
 
           <div class="progress"><div class="progress-bar" id="export-bar"></div></div>
+          <div class="notice" id="export-message"></div>
           <div class="hint" id="export-note">
             <b>Export video…</b> opens the export window, where the container, resolution, frame rate,
             quality and bitrates are all set — and where choosing a resolution tunes the rest for you.

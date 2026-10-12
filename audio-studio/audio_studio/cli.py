@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import platform
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -36,17 +37,32 @@ from .config import (
     ValidateOptions,
     options_from_preset,
 )
-from .emit import DEFAULT_KINDS, kinds, write_bundle
+from .emit import DEFAULT_KINDS, kinds, safe_stem, write_bundle
 from .engines import available_engines, engine_names, get_engine
 from .media import MediaError, describe, load_audio
 from .model import validate
+from . import pins
 from .pipeline import PassUnavailable, PipelineOptions, post_process, summarise_passes
 from .reference import Reference, ReferenceParseError
+from .runlog import build_manifest, write_manifest
 from .validate import DEFAULT_VALIDATOR, available_validators, validator_names
 
 
 def _err(message: str) -> None:
     print(f"audio-studio: {message}", file=sys.stderr)
+
+
+#: The invocation this process is running, as `main()` received it. `sys.argv` is not
+#: used directly because `main([...])` can also be called *programmatically* (the tests,
+#: and any script driving the studio) — and a manifest naming the caller's own argv
+#: rather than the run it describes, which is the one thing a provenance record must
+#: never do, is what reading `sys.argv` here produced.
+_INVOCATION: list[str] = []
+
+
+def _command_line() -> str:
+    """This run, as a line someone can paste back. Quoted, so a path with spaces survives."""
+    return shlex.join(["audio-studio", *_INVOCATION])
 
 
 def _progress_factory(quiet: bool):
@@ -153,7 +169,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             _err(f"post-processing failed: {exc}")
             return 1
 
-    stem = args.stem or Path(args.audio).stem
+    stem = safe_stem(args.stem or Path(args.audio).stem)
     written = write_bundle(
         transcript,
         args.out,
@@ -161,6 +177,20 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         kinds_selected=args.emit,
         word_level=args.word_level,
         emphasis=args.emphasis,
+    )
+    # The record of the run, beside the files it produced. Without it the flat output
+    # folder is a pile of files with no way to tell which run wrote which, or which
+    # recording they are about — see `runlog.py`.
+    manifest_file = write_manifest(
+        args.out,
+        stem,
+        build_manifest(
+            transcript,
+            stem=stem,
+            outputs=written,
+            source=audio,
+            command=_command_line(),
+        ),
     )
 
     if args.json:
@@ -173,6 +203,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     "duration": transcript.duration,
                     "warnings": transcript.warnings,
                     "files": [str(p) for p in written],
+                    "manifest": str(manifest_file),
                 },
                 indent=2,
             )
@@ -183,6 +214,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         print("  wrote")
         for path in written:
             print(f"    - {path}")
+        # The manifest is the entry point for anything that wants to find this run again,
+        # so it is printed last and labelled rather than listed among the artifacts.
+        print(f"  manifest  {manifest_file}")
     return 0
 
 
@@ -198,7 +232,7 @@ def cmd_emit(args: argparse.Namespace) -> int:
         _err(str(exc))
         return 1
 
-    stem = args.stem or Path(args.artifact).name.split(".")[0]
+    stem = safe_stem(args.stem or Path(args.artifact).name.split(".")[0])
     written = write_bundle(
         transcript,
         args.out,
@@ -207,11 +241,19 @@ def cmd_emit(args: argparse.Namespace) -> int:
         word_level=args.word_level,
         emphasis=args.emphasis,
     )
+    # A re-emit never saw the recording, so the manifest records that honestly (`source:
+    # null`) rather than copying a source out of the transcript's provenance.
+    manifest_file = write_manifest(
+        args.out,
+        stem,
+        build_manifest(transcript, stem=stem, outputs=written, command=_command_line()),
+    )
     if args.json:
-        print(json.dumps({"files": [str(p) for p in written]}, indent=2))
+        print(json.dumps({"files": [str(p) for p in written], "manifest": str(manifest_file)}, indent=2))
     else:
         for path in written:
             print(f"wrote {path}")
+        print(f"manifest  {manifest_file}")
     return 0
 
 
@@ -257,6 +299,11 @@ def build_doctor_report() -> dict:
         "cpuCount": os.cpu_count(),
         "ffmpeg": shutil.which("ffmpeg"),
         "packages": packages,
+        # What `requirements.txt` pins against what is installed. Reported by `doctor`
+        # because this is the one difference that makes the same commit behave differently
+        # on two machines, and the symptom (`cannot decode audio`) names neither the
+        # package nor the version — see `pins.py`.
+        "pins": pins.check(),
         "engines": available_engines(),
         "aligners": available_aligners(),
         "validators": available_validators(),
@@ -281,6 +328,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("  packages")
     for name, version in report["packages"].items():
         print(f"    {name:<14} {version or '-'}")
+    if report["pins"]:
+        mark = {"ok": "ok ", "differs": "!! ", "missing": "-- "}
+        print(f"  pins          {pins.requirements_path()}")
+        for row in report["pins"]:
+            installed = row["installed"] or "not installed"
+            note = ""
+            if row["status"] == "differs":
+                note = f"  <- requirements.txt pins {row['pinned']}"
+            print(f"    [{mark[row['status']]}] {row['name']:<16} {installed}{note}")
+        if any(row["status"] == "differs" for row in report["pins"]):
+            print("    ! a pinned package differs from the verified set: pip install -r requirements.txt")
     print("  engines")
     for engine in report["engines"]:
         mark = "ok " if engine["available"] else "no "
@@ -317,22 +375,26 @@ def _pipeline_options(args: argparse.Namespace) -> PipelineOptions:
     than treating an unreadable file as "no reference": the two look identical in
     the output and only one of them is what the user asked for.
     """
+    align_defaults = AlignOptions()
+    validate_defaults = ValidateOptions()
     return PipelineOptions(
         reference=_reference_from_args(args),
-        reference_options=ReconcileOptions(min_match=getattr(args, "reference_min_match", 0.5)),
+        reference_options=ReconcileOptions(
+            min_match=getattr(args, "reference_min_match", ReconcileOptions().min_match)
+        ),
         align=getattr(args, "align", None),
         align_options=AlignOptions(
             model=getattr(args, "align_model", None) or DEFAULT_ALIGN_MODEL,
-            min_confidence=getattr(args, "align_min_confidence", 0.35),
-            window_pad=getattr(args, "align_pad", 0.30),
-            max_shift=getattr(args, "align_max_shift", 2.0),
+            min_confidence=getattr(args, "align_min_confidence", align_defaults.min_confidence),
+            window_pad=getattr(args, "align_pad", align_defaults.window_pad),
+            max_shift=getattr(args, "align_max_shift", align_defaults.max_shift),
         ),
         validate=getattr(args, "validate", None),
         validate_options=ValidateOptions(
             provider=getattr(args, "llm_provider", "auto"),
             model=getattr(args, "llm_model", None),
             api_key=getattr(args, "api_key", None),
-            min_confidence=getattr(args, "llm_min_confidence", 0.6),
+            min_confidence=getattr(args, "llm_min_confidence", validate_defaults.min_confidence),
         ),
     )
 
@@ -355,12 +417,21 @@ def _add_reference_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--reference-min-match",
         type=float,
-        default=0.5,
-        help="share of words that must agree before the file is trusted (default: 0.5)",
+        default=ReconcileOptions().min_match,
+        help=f"share of words that must agree before the file is trusted (default: {ReconcileOptions().min_match})",
     )
 
 
 def _add_align_arguments(parser: argparse.ArgumentParser, default: str | None = None) -> None:
+    """
+    The alignment flags, defaulted from :class:`AlignOptions` and nowhere else.
+
+    Every one of these used to repeat its value from `config.py`, and the two copies
+    had already drifted: the parser advertised a pad of 0.30 s while `AlignOptions`
+    is the thing the pass actually reads, so the number in `--help` was a number the
+    studio did not use. Reading the class means the help text cannot be wrong.
+    """
+    defaults = AlignOptions()
     parser.add_argument(
         "--align",
         default=default,
@@ -371,14 +442,19 @@ def _add_align_arguments(parser: argparse.ArgumentParser, default: str | None = 
     parser.add_argument(
         "--align-min-confidence",
         type=float,
-        default=0.35,
+        default=defaults.min_confidence,
         help="below this mean posterior a segment keeps its original timings",
     )
-    parser.add_argument("--align-pad", type=float, default=0.30, help="seconds of context either side of a segment")
+    parser.add_argument(
+        "--align-pad",
+        type=float,
+        default=defaults.window_pad,
+        help="seconds of context either side of a segment",
+    )
     parser.add_argument(
         "--align-max-shift",
         type=float,
-        default=2.0,
+        default=defaults.max_shift,
         help="a word may not move further than this from the transcriber's timing",
     )
 
@@ -395,7 +471,7 @@ def _add_validate_arguments(parser: argparse.ArgumentParser, default: str | None
     parser.add_argument(
         "--llm-min-confidence",
         type=float,
-        default=0.6,
+        default=ValidateOptions().min_confidence,
         help="a correction below this confidence is recorded but not applied",
     )
     parser.add_argument("--api-key", default=None, help="override the environment / key file")
@@ -540,7 +616,7 @@ def _reprocess(args: argparse.Namespace, needs_audio: bool) -> int:
         _err(f"the pass failed: {exc}")
         return 1
 
-    stem = args.stem or Path(args.artifact).name.split(".")[0]
+    stem = safe_stem(args.stem or Path(args.artifact).name.split(".")[0])
     written = write_bundle(
         transcript,
         args.out,
@@ -589,6 +665,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _INVOCATION
+    _INVOCATION = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

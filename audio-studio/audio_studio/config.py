@@ -144,13 +144,32 @@ class AlignOptions:
     #: between them, so neither may reach into the other: that is what stops a
     #: small per-segment error from compounding into a lag down the whole file.
     #: Where there is a gap, a word that really does start early can use it.
-    window_pad: float = 0.30
+    #:
+    #: **One second, not 0.3.** The window is not a safety margin, it is the reach
+    #: available to a model that is *measuring* — and on a sung line a transcriber's
+    #: boundary is routinely a second out, because a phrase starts on the beat while
+    #: the voice arrives on the vowel. With 0.3 s the aligner simply could not see the
+    #: onset it was asked to find, so it agreed with the drift it was meant to fix:
+    #: on this project's own 182 s fixture the mean shift was 0.06 s — the aligner
+    #: confirming Whisper, not correcting it. The window is still bounded by the
+    #: neighbouring segments, so a wider pad costs nothing where there is no silence
+    #: to spend and cannot make one caption reach into the next.
+    window_pad: float = 1.0
     #: No word's **onset** may move further than this from where the transcriber
-    #: put it. A word that has to travel half a second to fit the audio was not
-    #: heard there. Starts only: a transcriber's word *ends* are the softest thing
-    #: it reports, and rejecting a segment because the aligner stretched one would
-    #: throw away good onsets to protect a number nobody trusts.
-    max_shift: float = 2.0
+    #: put it. A word that has to travel seconds to fit the audio was not heard there.
+    #: Starts only: a transcriber's word *ends* are the softest thing it reports, and
+    #: rejecting a segment because the aligner stretched one would throw away good
+    #: onsets to protect a number nobody trusts.
+    #:
+    #: **3.5 s, not 2.0.** A guard that rejects a segment does not fall back to the
+    #: audio, it falls back to the *transcriber* — so a limit that is too tight keeps
+    #: exactly the timings the pass was run to replace. At 2.0 s this project's own
+    #: fixture refused the one segment that needed a 2.08 s correction, and that
+    #: refusal is the segment a person hears as "the caption is a beat late":
+    #: measured against the same fixture, 3.5 s aligned 31 of 31 segments where 2.0 s
+    #: aligned 30, with the line inside the refused segment arriving a full second
+    #: closer to where it is actually sung.
+    max_shift: float = 3.5
     extra: dict = field(default_factory=dict)
 
 

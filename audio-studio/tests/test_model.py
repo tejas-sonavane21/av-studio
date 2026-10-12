@@ -209,9 +209,86 @@ def test_short_gaps_are_not_reported():
     assert out.gaps == []
 
 
-def test_duration_never_shrinks_below_the_last_segment():
+def test_the_recording_length_wins_over_the_last_caption():
+    """
+    A known duration is the authority on where the programme ends, and a caption
+    that runs past it is trimmed to it.
+
+    This is the fix for a real report: the reported duration used to be *raised* to
+    whatever the last caption reached, so a final word placed past the end of the
+    audio rewrote the length of the song and the caption shipped sitting outside the
+    recording. Nothing could catch it afterwards, because the number it would have
+    been measured against had just moved out of the way.
+    """
     out = normalize_transcript(Transcript(segments=[line(0.0, 9.0, [("a", 0.0, 9.0)])], duration=2.0))
+    assert out.duration == 2.0
+    assert out.segments[0].end == 2.0
+    assert out.segments[0].words[0].end == 2.0
+    assert any("trimmed to it" in warning for warning in out.warnings)
+
+
+def test_a_caption_placed_after_the_recording_is_pulled_back_into_it():
+    out = normalize_transcript(
+        Transcript(segments=[line(5.0, 9.0, [("late", 5.0, 7.0), ("line", 7.0, 9.0)])], duration=2.0)
+    )
+    segment = out.segments[0]
+    assert segment.end <= 2.0
+    assert segment.words[-1].end <= 2.0
+    assert any("after the recording's own end" in warning for warning in out.warnings)
+
+
+def test_a_trim_keeps_the_words_monotonic_and_the_text_intact():
+    out = normalize_transcript(
+        Transcript(
+            segments=[line(0.0, 3.0, [("hold", 0.0, 1.0), ("on", 1.0, 2.0), ("tight", 2.0, 3.0)])],
+            duration=2.4,
+        )
+    )
+    segment = out.segments[0]
+    windows = [(w.start, w.end) for w in segment.words]
+    assert windows == sorted(windows)
+    assert all(0.0 <= start <= end <= 2.4 for start, end in windows)
+    # A zero-length word cannot be shown by an editor and is rejected by the rules
+    # validator, so a trim may never leave one behind.
+    assert all(end - start >= 0.02 for start, end in windows)
+    assert segment.text == "hold on tight"
+    assert segment.words[-1].end == 2.4
+
+
+def test_a_trim_is_idempotent_and_reported_once():
+    once = normalize_transcript(Transcript(segments=[line(0.0, 3.0, [("a", 0.0, 3.0)])], duration=2.0))
+    twice = normalize_transcript(Transcript.from_dict(once.to_dict()))
+    assert twice.to_dict() == once.to_dict()
+    assert sum("trimmed to it" in w for w in twice.warnings) == 1
+
+
+def test_a_sub_millisecond_overrun_is_not_reported_as_one():
+    """
+    A decoder reports a duration like 181.733875 s; every segment is rounded to the
+    millisecond. Comparing the two directly made the last caption -- rounded *up* to
+    181.734 -- "past the reported duration" by 0.000125 s, which is a warning about
+    nothing, printed next to the real warnings where it dilutes them.
+    """
+    out = normalize_transcript(
+        Transcript(segments=[line(0.0, 181.734, [("a", 0.0, 181.734)])], duration=181.733875)
+    )
+    assert out.duration == 181.734
+    assert not any("past the reported duration" in w for w in out.warnings)
+    assert out.meta.get("trims") is None
+
+
+def test_the_duration_is_stored_at_the_precision_it_is_serialised_at():
+    out = normalize_transcript(
+        Transcript(segments=[line(0.0, 4.0, [("a", 0.0, 4.0)])], duration=9.9999999)
+    )
+    assert out.duration == 10.0
+
+
+def test_an_unmeasured_duration_is_still_inferred_from_the_last_segment():
+    """With nothing to measure against, the transcript is the only answer there is."""
+    out = normalize_transcript(Transcript(segments=[line(0.0, 9.0, [("a", 0.0, 9.0)])], duration=0.0))
     assert out.duration == 9.0
+    assert out.meta.get("trims") is None
 
 
 def test_stats_are_derived_not_stored():
