@@ -100,6 +100,22 @@ def test_word_probabilities_survive_and_ids_stay_positional():
     assert [word.id for word in aligned.iter_words()] == ["w-0001-001", "w-0001-002"]
 
 
+def test_alignment_keeps_the_record_of_where_the_words_came_from():
+    """
+    The pipeline runs reconcile *then* align, so alignment is the pass that emits the
+    artifact — and it used to rebuild the transcript without the reference pass's record.
+    The words were still the lyric sheet's, but the artifact said nothing about it: an
+    emitted file was indistinguishable from one transcribed with no lyrics at all, and
+    the caption editor's audit panel reported the run as if none had been given.
+    """
+    original = build([["one", "two"]])
+    original.reference = {"pass": "reconcile", "name": "lyrics.srt", "outcome": "applied"}
+    aligned = apply_alignment(original, AlignmentResult(spans=per_segment(original, spans_for(original, 0.1, 0.4))))
+
+    assert aligned.reference == original.reference
+    assert aligned.reference is not original.reference, "a copy, so a caller cannot edit ours"
+
+
 def test_the_aligned_output_is_a_valid_document():
     original = build([["one", "two", "three"], ["four", "five"]])
     aligned = apply_alignment(original, AlignmentResult(spans=per_segment(original, spans_for(original, 0.7, 0.45))))
@@ -141,12 +157,78 @@ def test_a_span_reaching_past_the_next_segment_is_clamped_and_counted():
     assert aligned.alignment["segmentsKept"] == 0
     assert aligned.alignment["wordsClamped"] == 1
     assert aligned.segments[0].words[-1].end == 0.8
-    assert any("pulled back inside their own segment" in warning for warning in aligned.warnings)
+    assert any("pulled back inside the space their segment owns" in warning for warning in aligned.warnings)
     # and therefore no segment was pushed later than the transcriber put it —
     # which is the difference between refining a timing and inventing a drift
     assert [segment.start for segment in aligned.segments] == [
         segment.start for segment in original.segments
     ]
+
+
+def test_alignment_may_not_reach_past_the_end_of_the_recording():
+    """
+    The tail of a song is where a reverb, a choir or an outro gives a CTC path
+    something plausible to latch onto, and a word placed past the last sample is a
+    caption displayed after the music has stopped. The recording's own end is the
+    one boundary the aligner may not cross.
+    """
+    original = build([["one", "two"]], word=0.4, gap=0.0)
+    original.duration = 0.9
+    flat = [WordSpan(0.0, 0.4, 0.9), WordSpan(0.5, 1.4, 0.9)]
+    aligned = apply_alignment(original, AlignmentResult(spans=per_segment(original, flat)))
+
+    assert aligned.segments[-1].words[-1].end <= original.duration
+    assert any("may not reach past the end of the recording" in warning for warning in aligned.warnings)
+    assert validate(aligned)["errors"] == []
+
+
+def test_a_span_outside_the_window_lands_inside_it_and_keeps_a_window():
+    """
+    The two ends of the window used to be clamped independently, and that is not the
+    same thing: a span lying wholly past the window's edge collapsed to a word of no
+    length sitting at its own, out-of-window start — a word no editor can show, and one
+    that in this fixture lands *after the recording has ended*, which is the report this
+    whole change came from. The clamp has to move the word inside the window instead.
+
+    Fixture: a one-word caption over the whole of a one-second recording, with the
+    aligner hearing that word at 2.0 s — past the end of the audio.
+    """
+    original = build([["one"]], word=1.0, gap=0.0)
+    original.duration = 1.0
+    aligned = apply_alignment(original, AlignmentResult(spans=[[WordSpan(2.0, 2.4, 0.9)]]))
+    word = aligned.segments[0].words[0]
+
+    assert aligned.alignment["segmentsAligned"] == 1
+    assert aligned.alignment["wordsClamped"] == 1
+    assert word.end <= original.duration
+    assert word.duration >= 0.02, f"collapsed to {word.duration}s"
+    assert validate(aligned)["errors"] == []
+
+
+def test_a_shift_the_transcriber_is_several_beats_out_by_still_aligns():
+    """
+    The max-shift guard has to admit a real correction, or it keeps the drift it was
+    run to remove: a refused segment falls back to the *transcriber's* timing, not to
+    the audio. Measured on this project's own 182 s fixture, the shipped 2.0 s limit
+    refused the one segment that needed a 2.08 s correction; the default now lets it
+    through.
+    """
+    original = build([["one", "two"]], word=0.5, gap=0.0)
+    original.duration = 10.0
+    # The aligner hears the first word 2.5 s later than the transcriber put it.
+    spans = AlignmentResult(spans=per_segment(original, [WordSpan(2.5, 2.9, 0.9), WordSpan(3.0, 3.4, 0.9)]))
+
+    strict = apply_alignment(original, spans, AlignOptions(window_pad=1.0, max_shift=2.0))
+    shipped = apply_alignment(original, spans)
+
+    # The 2.0 s limit refused the segment outright, and a refusal is not a fallback
+    # to the audio — it is a fallback to the timings the pass was run to replace.
+    assert strict.alignment["segmentsKept"] == 1
+    assert shipped.alignment["segmentsKept"] == 0
+    assert shipped.alignment["segmentsAligned"] == 1
+    # ...and the correction stays inside the window the segment owns, so a wide
+    # max-shift can never let one caption invade the next.
+    assert all(0.0 <= start <= end <= 2.0 for start, end in timings(shipped))
 
 
 def test_the_pad_is_only_available_where_there_is_a_gap():

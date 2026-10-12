@@ -52,7 +52,8 @@ def test_transcribe_writes_every_default_format(wav_file, tmp_path, capsys):
     assert main(["transcribe", str(wav_file), "--engine", "fake", "--no-decode", "--out", str(out)]) == 0
 
     names = sorted(p.name for p in out.iterdir())
-    assert names == ["clip.speech.json", "clip.srt", "clip.veed.json", "clip.vtt"]
+    # ...and the record of the run, which is the only file here that can be *found* again.
+    assert names == ["clip.run.json", "clip.speech.json", "clip.srt", "clip.veed.json", "clip.vtt"]
     assert "transcribed" in capsys.readouterr().out
 
 
@@ -107,7 +108,7 @@ def test_transcribe_stem_can_be_overridden(wav_file, tmp_path):
 def test_transcribe_respects_an_emit_subset(wav_file, tmp_path):
     out = tmp_path / "out"
     main(["transcribe", str(wav_file), "--engine", "fake", "--no-decode", "--out", str(out), "--emit", "srt", "-q"])
-    assert [p.name for p in out.iterdir()] == ["clip.srt"]
+    assert sorted(p.name for p in out.iterdir()) == ["clip.run.json", "clip.srt"]
 
 
 def test_transcribe_word_level_and_emphasis(wav_file, tmp_path):
@@ -151,7 +152,7 @@ def test_emit_regenerates_formats_from_a_saved_artifact(wav_file, tmp_path):
     second = tmp_path / "second"
     artifact_path = first / "clip.speech.json"
     assert main(["emit", str(artifact_path), "--out", str(second), "--emit", "srt,vtt", "--stem", "clip"]) == 0
-    assert sorted(p.name for p in second.iterdir()) == ["clip.srt", "clip.vtt"]
+    assert sorted(p.name for p in second.iterdir()) == ["clip.run.json", "clip.srt", "clip.vtt"]
 
 
 def test_emit_of_a_broken_artifact_fails_cleanly(tmp_path, capsys):
