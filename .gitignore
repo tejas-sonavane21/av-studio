@@ -24,8 +24,17 @@ Gemini-Local HTML5 Subtitle Renderer-20260926-1210.md
 VEED-Subtitle-Replication-Complete-Understanding.md
 
 # ---- Local secrets ----
-# Never commit an API key. audio-studio's optional [llm] validation extra reads
-# one from here (or from GEMINI_API_KEY / OPENROUTER_API_KEY in the env).
+# Never commit an API key. audio-studio's optional [llm] validation extra reads its
+# key from the process environment, with `.env` loaded underneath it — so `.env` is
+# the file to ignore, and `.env.example` is the template that is committed in its
+# place (its placeholders are not secrets).
+.env
+.env.local
+.env.*.local
+!*.env.example
+
+# The older bare-key file. No longer read by anything (see audio-studio/audio_studio/env.py),
+# kept ignored so a machine that still has one cannot publish it by accident.
 gemini_api_key.txt
 *.api_key
 
