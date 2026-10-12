@@ -1,0 +1,161 @@
+# ---------------------------------------------------------------------------
+# audio-studio — the exact dependency set this studio was built and verified on
+# ---------------------------------------------------------------------------
+#
+# Why this file exists: `pyproject.toml` splits the dependencies into extras
+# (`.[asr]`, `.[align]`, `.[llm]`, `.[dev]`) and only sets *lower* bounds on
+# them. That is fine for a project that is already installed, and it is what
+# broke on a fresh machine — `faster-whisper>=1.0.3` happily pulls a `PyAV`
+# release newer than the one `faster-whisper`'s own code supports. The pins
+# below are the versions actually installed in this studio's `.venv`, read off
+# `pip freeze`, not chosen from a benchmark table.
+#
+# Use (from this directory — the same one `pyproject.toml` lives in):
+#
+#     python -m venv .venv
+#     source .venv/Scripts/activate          # Windows / Git Bash
+#     pip install -r requirements.txt        # everything below
+#     pip install -e .                       # the package + the `audio-studio` command
+#
+# The `-e .` step is separate on purpose: this file is run from `audio-studio/`,
+# but if someone runs `pip install -r` from the repository root it must still be
+# a pure dependency install and not try to build the repository root as a package.
+#
+# Python version: 3.11.0, the interpreter this set was resolved against. Every
+# binary pin below was checked to install on 3.11 **and** 3.12 **and** 3.13 too
+# (the wheels are `abi3`, or ship per-version builds), so a machine on a newer
+# Python is fine. See the note on `av` — that is the one that is not obvious.
+#
+# The API key for the optional `[llm]` validation pass comes from the process
+# environment, with `audio-studio/../.env` (or the working directory's `.env`, or
+# any of its four nearest ancestors) loaded underneath it — see `../.env.example`
+# for the shape, and `audio_studio/env.py` for the exact rules. Nothing else is
+# needed to install, and no key is needed at all unless you ask for `--validate llm`.
+# `python -m audio_studio doctor` prints the packages and passes it can actually see.
+
+# --- asr: real transcription (faster-whisper / CTranslate2 backend) ---------
+faster-whisper==1.2.1
+numpy==2.4.6
+# `av` is pulled in transitively by `faster-whisper`, which declares only
+# `av>=11` — no upper bound. It is pinned here on purpose, because it is the one
+# dependency whose *major* version silently breaks this studio:
+#
+#   faster_whisper/audio.py calls av.open(..., metadata_errors="ignore").
+#   PyAV removed that keyword argument in 19.0.0, so on av>=19 that call raises
+#   TypeError, every decoder fallback after it fails, and the user is shown
+#
+#       cannot decode audio: install the 'asr' extra ... or put ffmpeg on PATH
+#
+#   which blames a missing `ffmpeg` binary for what is actually an incompatible
+#   library version. Nothing in the message points at `av`.
+#
+#   The installed version therefore decides whether decoding works at all, and
+#   it is selected by accident: av 18.x requires Python >=3.11, av 19.x requires
+#   Python >=3.12. This environment is Python 3.11, so pip picked 18.1.0 and the
+#   studio never showed the problem; a machine on Python 3.12+ gets av 19 and
+#   cannot decode anything, from a clean `pip install -e ".[asr]"`.
+#
+#   `av==18.1.0` ships an `abi3` wheel, which was verified to resolve to
+#   av-18.1.0-cp311-abi3 specifically for target Pythons 3.11, 3.12 and 3.13 —
+#   so this pin is correct on all of them, not just on the 3.11 box it came from.
+av==18.1.0
+
+# --- align: forced alignment (wav2vec2 CTC, re-times each word) -------------
+# The CPU wheel index is required for the `+cpu` build, which is ~10x smaller
+# than the default build that drags in ~2.5 GB of CUDA libraries for a machine
+# that has no GPU. On a CUDA machine, drop the line below and the `+cpu` suffix
+# (use `torch==2.14.1`) and every other pin stays valid.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+transformers==5.18.0
+
+# --- llm: optional transcript validation through a hosted model -------------
+google-genai==2.26.0
+httpx==0.28.1
+
+# --- dev: the test suite ---------------------------------------------------
+pytest==9.1.1
+
+
+# ---------------------------------------------------------------------------
+# Model weights — downloaded lazily on first use, NOT installed by pip
+# ---------------------------------------------------------------------------
+# These live in the Hugging Face cache outside this repository and are pinned by
+# revision there, so there is no version to declare above. Recorded here because
+# "which model" is otherwise unrecoverable from the environment. The revisions
+# are the ones in this machine's cache:
+#
+#   Systran/faster-whisper-small              536b0662742c02347bc0e980a01041f333bce120    464 MB
+#   Systran/faster-whisper-base               ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66    142 MB
+#   Systran/faster-whisper-medium             08e178d48790749d25932bbc082711ddcfdfbc4f    1.7 GB
+#   Systran/faster-distil-whisper-large-v3    c3058b475261292e64a0412df1d2681c06260fab    1.5 GB
+#   facebook/wav2vec2-base-960h               22aad52d435eb6dbaf354bdad9b0da84ce7d6156    361 MB
+#
+# `small` is the default preset (`balanced`), `medium` is `accurate`, `base` is
+# `fast`, `distil-large-v3` is opt-in, and `facebook/wav2vec2-base-960h` is the
+# aligner. The `[llm]` validator is hosted and downloads nothing; its model is
+# `gemini-3.5-flash-lite` by default.
+
+
+# ---------------------------------------------------------------------------
+# The full resolved set, for the record
+# ---------------------------------------------------------------------------
+# `pip freeze` output from the verified environment, minus the `-e .` line for
+# this package itself. Uncomment all of it — and remove the two `--extra-index-url`
+# comments above it if you keep them — for a byte-for-byte reproduction of that
+# environment. Left commented because pinning transitives this tightly is what
+# makes an environment un-installable on a Python version nobody tested.
+#
+# annotated-doc==0.0.5
+# annotated-types==0.8.0
+# anyio==4.15.1
+# certifi==2026.7.22
+# cffi==2.1.1
+# charset-normalizer==3.5.2
+# click==8.5.0
+# colorama==0.4.6
+# cryptography==50.0.2
+# ctranslate2==4.8.2
+# distro==1.9.0
+# filelock==4.0.7
+# flatbuffers==25.12.19
+# fsspec==2026.9.0
+# google-auth==2.59.1
+# h11==0.16.0
+# hf-xet==1.6.0
+# httpcore==1.0.9
+# huggingface_hub==1.33.0
+# idna==3.20
+# iniconfig==2.3.0
+# Jinja2==3.1.6
+# markdown-it-py==4.2.0
+# MarkupSafe==3.0.3
+# mdurl==0.1.2
+# mpmath==1.3.0
+# networkx==3.6.1
+# onnxruntime==1.30.0
+# packaging==26.3
+# pluggy==1.6.0
+# protobuf==7.36.2
+# pyasn1==0.6.4
+# pyasn1_modules==0.4.2
+# pycparser==3.0
+# pydantic==2.13.5
+# pydantic_core==2.46.5
+# Pygments==2.21.0
+# PyYAML==6.0.3
+# regex==2026.9.29
+# requests==2.34.2
+# rich==15.0.0
+# safetensors==0.8.0
+# shellingham==1.5.4
+# sniffio==1.3.1
+# sympy==1.14.0
+# tenacity==9.1.4
+# tokenizers==0.23.2
+# tqdm==4.70.1
+# typer==0.27.2
+# typing-inspection==0.4.4
+# typing_extensions==4.16.0
+# urllib3==2.8.0
+# websockets==16.1.1

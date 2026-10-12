@@ -230,9 +230,23 @@ def _module_version(name: str) -> str | None:
 
 def build_doctor_report() -> dict:
     in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+    # `av` is in this list for a reason: it is the ffmpeg binding that actually decodes
+    # the input, it is *not* covered by the `import faster_whisper` check the engine
+    # report above is built on, and a version of it newer than the faster-whisper
+    # release knows silently removes the ability to open any file at all. A doctor that
+    # cannot show that version cannot diagnose the failure it causes.
     packages = {
         name: _module_version(name)
-        for name in ("numpy", "faster_whisper", "torch", "torchaudio", "transformers", "google.genai", "httpx")
+        for name in (
+            "numpy",
+            "faster_whisper",
+            "av",
+            "torch",
+            "torchaudio",
+            "transformers",
+            "google.genai",
+            "httpx",
+        )
     }
     return {
         "audioStudio": __version__,

@@ -159,6 +159,10 @@ def load_audio(
         return info
 
     samples = None
+    #: Why PyAV failed, when it was installed and failed rather than being absent. Kept
+    #: apart from `warnings` because the two need different advice: a missing extra is
+    #: fixed by installing it, and a broken one is not fixed by installing it again.
+    pyav_error: Optional[str] = None
     try:
         import numpy as np  # noqa: F401  (imported for the dtype below)
 
@@ -169,7 +173,8 @@ def load_audio(
     except ImportError:
         pass
     except Exception as exc:  # pragma: no cover - depends on codec availability
-        info.warnings.append(f"PyAV could not decode the file ({exc}); trying ffmpeg")
+        pyav_error = f"{type(exc).__name__}: {exc}"
+        info.warnings.append(f"PyAV could not decode the file ({pyav_error}); trying ffmpeg")
 
     if samples is None and has_ffmpeg():
         import numpy as np
@@ -197,6 +202,17 @@ def load_audio(
         info.decoded_by = "wave"
 
     if samples is None:
+        # The old message here said "install the 'asr' extra" whatever had happened, which
+        # sent anyone with the extra already installed — and broken — after a dependency
+        # they did not need, for hours. Say what actually failed instead.
+        if pyav_error:
+            raise MediaError(
+                f"cannot decode {file.name}: PyAV is installed but failed ({pyav_error}). "
+                "That is a fault in the decoder, not a missing one: run "
+                "`python -m audio_studio doctor` and check the `av` line. An `av` newer "
+                "than the faster-whisper release knows is the usual cause "
+                "(`pip install \"av<19\"`)."
+            )
         raise MissingDependency(
             "cannot decode audio: install the 'asr' extra (pip install -e '.[asr]') "
             "or put ffmpeg on PATH"
