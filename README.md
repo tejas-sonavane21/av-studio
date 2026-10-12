@@ -78,25 +78,48 @@ A server is required: ES modules, Web Workers and `captureStream` do not work fr
 cd audio-studio
 python -m venv .venv
 source .venv/Scripts/activate        # Windows/Git Bash
-pip install -e ".[dev]"              # base + test tooling: instant, no heavy deps
-
-pip install -e ".[asr]"              # faster-whisper + numpy — needed for real transcription
-pip install -e ".[align]"            # optional: torch + torchaudio, precise forced alignment
-pip install -e ".[llm]"              # optional: google-genai + httpx, hosted validation
+pip install -r requirements.txt      # the pinned set — install this first
+pip install -e .                     # the package + the `audio-studio` command
 ```
 
-`[dev]` alone runs the whole test suite; the heavier extras are only for real audio. Model weights
-download lazily on first use and are cached outside the repo.
+**Install from `requirements.txt`, not from the extras.** `pyproject.toml` is the flexible view:
+its extras (`.[asr]`, `.[align]`, `.[llm]`, `.[dev]`) set only *lower* bounds, which is fine on the
+machine that already has the packages and is how a fresh machine ends up subtly broken — the
+`av`/`faster-whisper` pair is the one that bites (a new `av` removed a keyword `faster-whisper`
+still passes, and the run dies with a message that blames a missing `ffmpeg`). `requirements.txt`
+holds the exact versions this project was built and verified on, and the pin that matters is
+explained in a comment beside it. Everything in it is needed for real transcription; `[dev]` on its
+own is enough to run the test suite.
+
+Model weights download lazily on first use and are cached outside the repo.
 
 ```bash
-python -m audio_studio doctor                       # what can actually run on this machine
-python -m audio_studio transcribe song.mp3          # → out/song.{speech,veed}.json, .srt, .vtt
+python -m audio_studio doctor                        # what can actually run on this machine
+python -m audio_studio transcribe song.mp3           # → out/song.{speech,veed}.json, .srt, .vtt
 python -m audio_studio transcribe song.mp3 --align wav2vec --validate rules
-python -m audio_studio serve --port 8756            # the job server the browser talks to
+python -m audio_studio transcribe song.mp3 --reference lyrics.srt --align wav2vec
+python -m audio_studio serve --port 8756             # the job server the browser talks to
 ```
 
 `--align` and `--validate` are off unless asked for: one downloads a large acoustic model, the other
-can spend money, and neither is a sane default.
+can spend money, and neither is a sane default. `--reference` is worth asking for whenever you have
+the real lyrics — the words come from the file and the timing from the audio, which is the difference
+between a caption that is merely plausible and one that is correct.
+
+#### The API key, for the optional `--validate llm` pass only
+
+Transcription, alignment and every emitted file need no key at all. The hosted proofreading pass is
+the one that does, and it reads it from the environment with a `.env` file loaded underneath — there
+is no `export` step to remember and no key file to point at:
+
+```bash
+cp .env.example .env          # from the repository root
+# then edit .env and set:  GEMINI_API_KEY=...
+```
+
+`.env` is gitignored; `.env.example` is committed and holds placeholders, so the shape of what a key
+must be is version-controlled and the key itself never is. A real environment variable always wins
+over the file, and `python -m audio_studio doctor` prints whether a key was found and where from.
 
 ### 3. Both, together
 
@@ -109,6 +132,22 @@ cd caption-studio && npm run serve
 
 Then, in the browser: **Transcribe** tab → pick the audio → upload → the returned caption document
 lands in the editor, ready to edit, cut, style and export.
+
+## Where the files go
+
+Nothing is written outside the folder you ran the command in, and every run leaves a record of
+itself beside what it wrote:
+
+| Written by | Lands in | Named |
+|---|---|---|
+| `audio-studio transcribe` | `--out` (default `./out`) | `<stem>.speech.json`, `<stem>.veed.json`, `<stem>.srt`, `<stem>.vtt` |
+| the same run's manifest | beside those four | `<stem>.run.json` — what produced it, the source's SHA-256, and every file it wrote |
+| `audio-studio serve` | `--out` (default `./jobs`), one folder per job | `jobs/<id>/source.*` |
+| `caption-studio` | your browser's download folder | `<stem>.caproj`, `<stem>.veed.json`, `<stem>.srt`, `<stem>.vtt`, and the exported `.mp4`/`.webm` |
+
+The stem is sanitised the same way by both studios: a path is not a name, so only the last segment
+survives, and a character a filesystem refuses becomes `_`. `--stem ../../notes/attack` writes
+`out/attack.srt`, and a recording called `take 2: final?.mp3` produces `take 2_ final_.srt`.
 
 ## Tests
 
@@ -134,16 +173,19 @@ The preview needs no font files: it loads **Inter 900** and falls back to a syst
 (logged as `font fallback in use`). For exact offline parity, drop `Inter-900.woff2` into
 `caption-studio/src/fonts/packaged/` and it is picked up before any network request.
 
-Two display faces are wired up there, and only one of them can legally ship:
+Two display faces are wired up there, and both are committed, so a clone renders the intended look
+with no hunt through anybody's cache:
 
 | Face | Committed? | Licence |
 |---|---|---|
 | `HibernalSentry.ttf` — Iconian Fonts' "Hibernal Sentry" | **yes**, with `HibernalSentry.LICENSE.txt` | free for non-commercial use, and redistribution is explicitly permitted |
-| `ZyenaHibernal.ttf` — the face CapCut calls "Hibernal" | **no** | licensed to CapCut, not to this project |
+| `ZyenaHibernal.ttf` — the face CapCut calls "Hibernal" | **yes**, with the attribution in the directory's README | licensed to CapCut, not to this project — tracked deliberately, for personal use |
 
-`caption-studio/src/fonts/packaged/README.md` explains both, and gives the one-liner that copies
-CapCut's face out of CapCut's own cache for local rendering. If you are using this project
-commercially, check that file before shipping: the Iconian face needs a commercial licence.
+`caption-studio/src/fonts/packaged/README.md` explains both, including where the CapCut face came
+from. **If you are using this project commercially, read it and
+[`THIRD-PARTY.md`](THIRD-PARTY.md) first:** the Iconian face needs a commercial licence, and the
+CapCut face is not ours to redistribute at all — it is in the tree because this project is a
+personal one that has to render the same way on every machine its owner uses.
 
 ## Repository layout
 

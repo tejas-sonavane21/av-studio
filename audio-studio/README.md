@@ -455,24 +455,26 @@ on a stopwatch.
 cd audio-studio
 python -m venv .venv
 source .venv/Scripts/activate      # Windows/Git Bash
-pip install -e ".[dev]"            # base + test tooling: instant, no heavy deps
-
-# then, for real transcription:
-pip install -e ".[asr]"            # faster-whisper + numpy (no PyTorch)
-
-# optional, and heavier:
-pip install -e ".[align]"          # torch + torchaudio — precise forced alignment
-pip install -e ".[llm]"            # google-genai + httpx — transcript validation
+pip install -r requirements.txt    # the pinned set — this is the install
+pip install -e . --no-deps         # the package itself, which that list omits on purpose
 ```
 
-If you would rather install from a pinned list than from the extras — for example
-to reproduce the exact set this project was built and tested against —
-`requirements.txt` is that list, with the one non-obvious pin (`av`) explained in
-it:
+**This, and not the extras, is the install.** `pyproject.toml` is the flexible view:
+its extras set only *lower* bounds, so `pip install -e ".[asr]"` on a fresh machine
+resolves to whatever is newest that day — and the `av`/`faster-whisper` pair is the
+combination where that is fatal. `faster-whisper` calls `av.open(...)` with a keyword
+`av` 19 removed, so on a newer `av` every decoder fails and the error blames a missing
+`ffmpeg` binary that was never needed. `requirements.txt` pins the versions this project
+was built and verified against, and explains that pin beside the line that makes it.
+
+The extras still work, and still mean what they say — for a machine where you want the
+newest of everything and are willing to find out:
 
 ```bash
-pip install -r requirements.txt
-pip install -e . --no-deps         # the package itself, which the list above omits on purpose
+pip install -e ".[dev]"            # base + test tooling: instant, no heavy deps
+pip install -e ".[asr]"            # faster-whisper + numpy (no PyTorch)
+pip install -e ".[align]"          # torch + torchaudio — precise forced alignment
+pip install -e ".[llm]"            # google-genai + httpx — transcript validation
 ```
 
 Model weights download **lazily** on first use and are cached by
@@ -517,6 +519,35 @@ python -m audio_studio emit out/song.speech.json --emit srt,vtt   # re-emit, no 
 
 python -m audio_studio transcribe song.mp3 --align wav2vec            # re-time every word from the audio
 python -m audio_studio transcribe song.mp3 --align wav2vec --validate rules
+python -m audio_studio transcribe song.mp3 --reference lyrics.srt --align wav2vec
+```
+
+### What a run leaves behind
+
+Every emit writes beside its own outputs a `<stem>.run.json`: what produced it, the
+source file with its **SHA-256** (the same hash the transcript records, so a manifest and
+an artifact can be shown to be about the same bytes), and every file the run wrote, with
+sizes. Two runs over different recordings no longer overwrite each other silently — the
+second writes its own manifest, and `find_manifests()` is what `caption-studio`'s run
+list reads to offer them.
+
+Names are sanitised (`emit/safe_stem`), and identically on the browser side: a path is not
+a name, so only its last segment survives, and a character a filesystem refuses becomes
+`_`. `--stem ../../notes/attack` writes `out/attack.srt` and never leaves the output
+directory.
+
+```json
+{
+  "tool": "audio-studio", "stem": "song",
+  "source": { "file": "song.mp3", "sha256": "…", "durationSeconds": 181.734 },
+  "outputs": [ { "kind": "srt", "file": "song.srt", "bytes": 2578 } ],
+  "summary": { "segments": 31, "words": 248, "warnings": [] }
+}
+```
+
+And the rest of the commands:
+
+```bash
 python -m audio_studio align out/song.speech.json --audio song.mp3    # re-time a saved transcript
 python -m audio_studio validate out/song.speech.json --validate llm   # needs a key
 python -m audio_studio validate out/song.speech.json --validate llm --provider openrouter
