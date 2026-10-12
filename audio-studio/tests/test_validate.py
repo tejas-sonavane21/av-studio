@@ -22,9 +22,11 @@ from audio_studio.validate.ledger import Correction, OUTCOMES
 from audio_studio.validate.llm import (
     SYSTEM_PROMPT,
     LLMValidator,
+    # the key lookup is tested directly: "where does the key come from" is a decision
+    # this module makes, and one worth a test that fails when it changes.
+    _env_key,
     build_prompt,
     extract_json,
-    find_api_key,
     parse_highlights,
     parse_reply,
     resolve_provider,
@@ -513,33 +515,84 @@ def test_highlights_are_shifted_back_with_the_batch_that_produced_them(monkeypat
 # --------------------------------------------------------------------------- #
 
 
-def test_a_key_file_is_found_in_the_directory_that_holds_it(tmp_path):
-    (tmp_path / "gemini_api_key.txt").write_text("  secret-key  \n", encoding="utf-8")
+#: Every variable a key could arrive in, so a test can prove it found *its* key and
+#: not one that happened to be exported on the machine running the suite.
+KEY_VARIABLES = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_KEY")
+
+
+def no_keys(monkeypatch):
+    """Remove every key variable, and put the environment back afterwards."""
+    for name in KEY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+
+def sandbox_package(monkeypatch, tmp_path):
+    """
+    Move `env.py`'s idea of where it lives into the sandbox.
+
+    The repository root really does hold a `.env` on a configured machine, so the last
+    place the search looks has to be moved too — otherwise a test would pass here and
+    fail in a clean checkout, which is the worst way for a test to be wrong.
+    """
+    monkeypatch.setattr("audio_studio.env.__file__", str(tmp_path / "pkg" / "a" / "b" / "c" / "d.py"))
+
+
+def test_a_dotenv_in_an_ancestor_supplies_the_key(tmp_path, monkeypatch):
+    no_keys(monkeypatch)
+    sandbox_package(monkeypatch, tmp_path)
+    (tmp_path / ".env").write_text(
+        "# a comment, an export, and a trailing comment\nexport GEMINI_API_KEY='secret-key'  # the real one\n",
+        encoding="utf-8",
+    )
     nested = tmp_path / "a" / "b"
     nested.mkdir(parents=True)
-    assert find_api_key(nested) == "secret-key"
+    assert _env_key("google", nested) == "secret-key"
 
 
-def test_a_search_that_finds_nothing_says_nothing(tmp_path, monkeypatch):
+def test_the_process_environment_beats_the_dotenv(tmp_path, monkeypatch):
     """
-    The repository root really does hold a key file on this machine, so the last
-    place ``find_api_key`` looks has to be moved into the sandbox as well —
-    otherwise this test would pass here and fail in a clean checkout.
+    A key exported for this shell — or injected by CI — must not be replaced by a
+    file somebody left in the tree.
     """
-    monkeypatch.setattr("audio_studio.validate.llm.__file__", str(tmp_path / "pkg" / "a" / "b" / "c" / "d.py"))
-    assert find_api_key(tmp_path / "empty") is None
+    no_keys(monkeypatch)
+    sandbox_package(monkeypatch, tmp_path)
+    (tmp_path / ".env").write_text("GEMINI_API_KEY=from-the-file\n", encoding="utf-8")
+    monkeypatch.setenv("GEMINI_API_KEY", "from-the-environment")
+    assert _env_key("google", tmp_path) == "from-the-environment"
+
+
+def test_a_quoted_key_keeps_its_own_characters(tmp_path, monkeypatch):
+    """A key that contains `#`, `$` or a backslash must arrive whole."""
+    no_keys(monkeypatch)
+    sandbox_package(monkeypatch, tmp_path)
+    (tmp_path / ".env").write_text("GEMINI_API_KEY='a#b$c\\d'\n", encoding="utf-8")
+    assert _env_key("google", tmp_path) == "a#b$c\\d"
+
+
+def test_an_empty_value_is_not_a_key(tmp_path, monkeypatch):
+    no_keys(monkeypatch)
+    sandbox_package(monkeypatch, tmp_path)
+    (tmp_path / ".env").write_text("GEMINI_API_KEY=\nGOOGLE_API_KEY=   \n", encoding="utf-8")
+    assert _env_key("google", tmp_path) is None
+
+
+def test_a_search_that_finds_nothing_returns_no_key(tmp_path, monkeypatch):
+    no_keys(monkeypatch)
+    sandbox_package(monkeypatch, tmp_path)
+    assert _env_key("google", tmp_path / "empty") is None
 
 
 def test_the_search_does_not_wander_to_the_drive_root(tmp_path, monkeypatch):
-    """A key file from a wholly unrelated project must not be picked up."""
-    monkeypatch.setattr("audio_studio.validate.llm.__file__", str(tmp_path / "pkg" / "a" / "b" / "c" / "d.py"))
+    """A `.env` from a wholly unrelated project must not be picked up."""
+    no_keys(monkeypatch)
+    sandbox_package(monkeypatch, tmp_path)
     outside = tmp_path / "outside"
     (outside / "far" / "away").mkdir(parents=True)
-    (outside / "gemini_api_key.txt").write_text("not-ours", encoding="utf-8")
+    (outside / ".env").write_text("GEMINI_API_KEY=not-ours\n", encoding="utf-8")
     deep = outside / "far" / "away" / "deeper" / "still" / "more"
     deep.mkdir(parents=True)
-    # six levels below the key file: past the bounded walk, and past the repo root
-    assert find_api_key(deep) is None
+    # six levels below the file: past the bounded walk, and past the repo root
+    assert _env_key("google", deep) is None
 
 
 def test_an_explicit_provider_uses_that_provider_and_its_default_model():
@@ -559,8 +612,7 @@ def test_auto_prefers_the_first_provider_that_has_a_key():
 
 
 def test_without_any_key_the_error_says_how_to_supply_one(monkeypatch):
-    monkeypatch.setattr("audio_studio.validate.llm.find_api_key", lambda *a, **k: None)
-    monkeypatch.setattr("audio_studio.validate.llm._env_key", lambda provider: None)
+    monkeypatch.setattr("audio_studio.validate.llm._env_key", lambda *a, **k: None)
     with pytest.raises(RuntimeError, match="api-key|API key|GEMINI_API_KEY"):
         resolve_provider(ValidateOptions())
 
@@ -645,8 +697,7 @@ def test_every_model_being_unusable_says_which_ones_were_tried(monkeypatch):
 
 
 def test_availability_is_reported_rather_than_thrown(monkeypatch):
-    monkeypatch.setattr("audio_studio.validate.llm.find_api_key", lambda *a, **k: None)
-    monkeypatch.setattr("audio_studio.validate.llm._env_key", lambda provider: None)
+    monkeypatch.setattr("audio_studio.validate.llm._env_key", lambda *a, **k: None)
     usable, reason = LLMValidator().available()
     assert usable is False
     assert "key" in reason.lower()

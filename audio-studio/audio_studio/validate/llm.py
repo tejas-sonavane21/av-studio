@@ -22,10 +22,11 @@ Two providers, one prompt:
     plain HTTP via ``httpx``, for every other model. Same request shape, so
     reaching a different model is a model name and a key, not a new integration.
 
-The key is looked for in ``--api-key``, then the provider's environment
-variables, then ``gemini_api_key.txt`` in the working directory or an ancestor —
-that last one because the repository root is the natural place to keep it, and the
-file is gitignored so it can never be published by accident.
+The key is looked for in ``--api-key``, then the provider's environment variables —
+with ``.env`` loaded underneath them first (``env.py``), because exporting a variable
+in every shell is exactly the kind of setup step that gets skipped and then blamed on
+the wrong thing. A real environment variable always wins over the file, and the file
+is gitignored so it can never be published by accident.
 
 The free tier is a second, harder constraint on top of all that, and it does not
 fail the way a quota normally does: Gemini answers ``503 UNAVAILABLE`` in spikes
@@ -63,7 +64,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from ..config import API_KEY_FILENAME, DEFAULT_LLM_MODELS, LLM_MODEL_FALLBACKS, ValidateOptions
+from ..config import DEFAULT_LLM_MODELS, LLM_MODEL_FALLBACKS, ValidateOptions
+from ..env import ENV_EXAMPLE_FILENAME, ENV_FILENAME, load_env
 from ..model import Transcript
 from .base import ProgressHook, Validator
 from .ledger import Correction, classify
@@ -304,32 +306,31 @@ class Provider:
 # --------------------------------------------------------------------------- #
 
 
-def find_api_key(start: Optional[str | Path] = None, levels: int = 4) -> Optional[str]:
+def _env_key(provider: str, start: Optional[str | Path] = None) -> Optional[str]:
     """
-    Look for the key file in ``start`` (default: cwd) and a few ancestors, then at
-    the repository root beside this package.
+    The key for a provider: a real environment variable, with `.env` underneath it.
 
-    Bounded on purpose: an unbounded walk to the drive root would pick up a key
-    file from a wholly unrelated project.
+    ``load_env`` is called here, and not at import time, for two reasons: importing a
+    module should not have side effects on the process environment, and a `.env` that
+    is edited while the studio is running is then picked up by the next request
+    instead of needing a restart.
+
+    The first *non-empty* variable wins, in the order the provider lists them, so a
+    project that sets both ``GEMINI_API_KEY`` and a legacy ``GOOGLE_API_KEY`` gets the
+    explicit one.
     """
-    searched: list[Path] = []
-    origin = Path(start).resolve() if start else Path.cwd().resolve()
-    for base in [origin, *origin.parents[:levels]]:
-        searched.append(base / API_KEY_FILENAME)
-    # .../web_av_editor/audio-studio/audio_studio/validate/llm.py → web_av_editor
-    repo_root = Path(__file__).resolve().parents[3] if len(Path(__file__).resolve().parents) > 3 else None
-    if repo_root:
-        searched.append(repo_root / API_KEY_FILENAME)
-
-    for candidate in searched:
-        try:
-            if candidate.is_file():
-                text = candidate.read_text(encoding="utf-8").strip()
-                if text:
-                    return text
-        except OSError:
-            continue
+    load_env(start=start)
+    for name in ENV_KEYS[provider]:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
     return None
+
+
+def key_help(providers: Sequence[str]) -> str:
+    """The one sentence every "no key" error ends with, naming the variables to set."""
+    names = " or ".join(ENV_KEYS[providers[0]])
+    return f"set {names} (or put it in {ENV_FILENAME} — copy {ENV_EXAMPLE_FILENAME} to start)"
 
 
 def resolve_provider(options: ValidateOptions, key: Optional[str] = None) -> Provider:
@@ -345,7 +346,7 @@ def resolve_provider(options: ValidateOptions, key: Optional[str] = None) -> Pro
 
     candidates = list(PROVIDERS) if requested == "auto" else [requested]
     for name in candidates:
-        found = key or options.api_key or _env_key(name) or find_api_key()
+        found = key or options.api_key or _env_key(name)
         if found:
             return Provider(
                 name=name,
@@ -354,17 +355,8 @@ def resolve_provider(options: ValidateOptions, key: Optional[str] = None) -> Pro
                 base_url=(options.extra or {}).get("base_url") or None,
             )
     raise RuntimeError(
-        f"no API key found for {' or '.join(candidates)}; pass --api-key, set "
-        f"{' or '.join(ENV_KEYS[candidates[0]])}, or put the key in {API_KEY_FILENAME}"
+        f"no API key found for {' or '.join(candidates)}; pass --api-key, or {key_help(candidates)}"
     )
-
-
-def _env_key(provider: str) -> Optional[str]:
-    for name in ENV_KEYS[provider]:
-        value = os.environ.get(name)
-        if value and value.strip():
-            return value.strip()
-    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -770,17 +762,18 @@ class LLMValidator(Validator):
     def available(self) -> tuple[bool, str]:
         have_genai = _importable("google.genai")
         have_httpx = _importable("httpx")
-        key = find_api_key() or _env_key("google") or _env_key("openrouter")
+        key = _env_key("google") or _env_key("openrouter")
         if not have_genai and not have_httpx:
             return False, "neither google-genai nor httpx is installed (pip install -e '.[llm]')"
         if not key:
-            return False, f"no API key found (set GEMINI_API_KEY or put it in {API_KEY_FILENAME})"
+            return False, f"no API key found ({key_help(('google',))})"
         parts = []
         if have_genai:
             parts.append("google-genai")
         if have_httpx:
             parts.append("httpx/openrouter")
-        return True, f"ready via {' + '.join(parts)} (key from the environment or {API_KEY_FILENAME})"
+        source = f"the environment or {ENV_FILENAME}"
+        return True, f"ready via {' + '.join(parts)} (key from {source})"
 
     def review(
         self,
@@ -877,7 +870,7 @@ __all__ = [
     "HIGHLIGHT_TYPE",
     "build_prompt",
     "extract_json",
-    "find_api_key",
+    "key_help",
     "model_is_retired",
     "model_is_unusable",
     "parse_highlights",

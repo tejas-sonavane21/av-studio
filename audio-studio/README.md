@@ -465,9 +465,46 @@ pip install -e ".[align]"          # torch + torchaudio — precise forced align
 pip install -e ".[llm]"            # google-genai + httpx — transcript validation
 ```
 
+If you would rather install from a pinned list than from the extras — for example
+to reproduce the exact set this project was built and tested against —
+`requirements.txt` is that list, with the one non-obvious pin (`av`) explained in
+it:
+
+```bash
+pip install -r requirements.txt
+pip install -e . --no-deps         # the package itself, which the list above omits on purpose
+```
+
 Model weights download **lazily** on first use and are cached by
 `faster-whisper` outside the repo. `.venv/` and `models/` are gitignored, so the
 virtualenv and the weights never land in a commit.
+
+## Configure a key (only for `--validate llm`)
+
+Nothing else needs a key: transcription, alignment and every emitted caption file
+work with none. The hosted validation pass does, and it reads one from the process
+environment — with a `.env` file loaded underneath it, so there is no `export` step to
+remember:
+
+```bash
+cp .env.example .env      # from the repository root
+# then edit .env and set GEMINI_API_KEY=...
+```
+
+The rules are `audio_studio/env.py`'s, and there are three of them:
+
+* a **real environment variable always wins** — `.env` never overrides something you
+  exported deliberately, so CI and containers keep working unchanged;
+* the file is looked for in the working directory, its four nearest ancestors, then the
+  repository root — the walk is bounded so a `.env` from an unrelated project is never
+  picked up;
+* `GEMINI_API_KEY`, `GOOGLE_API_KEY` and `GOOGLE_GENAI_API_KEY` are all accepted, in
+  that order, plus `OPENROUTER_API_KEY` for the alternative provider.
+
+`.env` is gitignored. `.env.example` is committed and holds placeholders.
+`python -m audio_studio doctor` ends its `validators` section with which of the two it
+can actually see, and says `key from the environment or .env` when one was found —
+without ever printing the key itself.
 
 ## Use it
 
@@ -482,6 +519,7 @@ python -m audio_studio transcribe song.mp3 --align wav2vec            # re-time 
 python -m audio_studio transcribe song.mp3 --align wav2vec --validate rules
 python -m audio_studio align out/song.speech.json --audio song.mp3    # re-time a saved transcript
 python -m audio_studio validate out/song.speech.json --validate llm   # needs a key
+python -m audio_studio validate out/song.speech.json --validate llm --provider openrouter
 ```
 
 `--align` and `--validate` are both **off** unless asked for: one downloads a
@@ -515,7 +553,7 @@ many CPU cores; a 4-core machine will not finish it in a sitting. VAD is
 ```bash
 cd audio-studio
 source .venv/Scripts/activate
-python -m pytest          # 255 tests, no model, no network, no browser
+python -m pytest          # 353 tests, no model, no network, no browser
 ```
 
 The suite is deliberately dependency-free: it runs on `pip install -e ".[dev]"`

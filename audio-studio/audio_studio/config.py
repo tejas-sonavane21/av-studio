@@ -182,9 +182,9 @@ LLM_MODEL_FALLBACKS = {
     "openrouter": ("google/gemini-3.8-flash",),
 }
 
-#: A file holding the key, if the environment variable is not set. It lives at the
-#: repository root and is gitignored.
-API_KEY_FILENAME = "gemini_api_key.txt"
+# Where a key is read from is `env.py`'s business, not this module's: a real
+# environment variable, then `.env` (see `.env.example` for the shape). Nothing here
+# holds a path, so nothing here can go stale when a key moves.
 
 
 @dataclass
