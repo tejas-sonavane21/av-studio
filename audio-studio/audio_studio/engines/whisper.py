@@ -26,6 +26,14 @@ and a job queue will ask for the same model repeatedly. The *weights* are cached
 too, by the Hugging Face hub, and this module says so out loud — a run whose wait
 is a disk read reports that, rather than looking like an unexpected download. See
 ``load_plan()``.
+
+The weights are also **pinned**. A short name like ``small`` resolves to whatever its
+repository's ``main`` points at on the day it is fetched, so two machines installing a
+month apart can transcribe the same recording differently with nothing in the output to
+say why. ``models.py`` records the commit each model was verified at and this module
+passes it to the loader, so the revision is part of the run rather than a fact about
+the afternoon it happened. An unpinned model (a local path, a hub id we do not
+catalogue) is passed through untouched, because there is nothing verified to pin it to.
 """
 
 from __future__ import annotations
@@ -74,6 +82,10 @@ def load_plan(
       multi-hundred-megabyte wait people mistake for the model being rebuilt each time.
     * ``downloaded is None`` — a name we do not catalogue (a local path, or any hub id the
       library understands). Nothing is assumed about it and nothing is passed to it.
+
+    ``revision`` is the commit the weights are pinned to, or ``None`` for a model nothing
+    here has verified. It is returned rather than looked up again at load time so the plan
+    and the load cannot disagree about which weights this run is about.
     """
     info = models.describe(model_name, root=root, env=env)
     downloaded = info.get("downloaded")
@@ -99,6 +111,7 @@ def load_plan(
         "params": params,
         "downloaded": downloaded,
         "localOnly": downloaded is True,
+        "revision": info.get("revision"),
         "message": message,
     }
 
@@ -140,6 +153,11 @@ def _load_model(options: TranscribeOptions, on_progress: Optional[ProgressHook] 
     model_kwargs: dict = {"device": options.device, "compute_type": options.compute_type}
     if options.cpu_threads:
         model_kwargs["cpu_threads"] = options.cpu_threads
+    if plan["revision"]:
+        # The verified commit, not whatever the hub serves today. A short name is not a
+        # version, and a transcript that cannot be reproduced is a transcript nobody can
+        # check — see `models.py`.
+        model_kwargs["revision"] = plan["revision"]
 
     started = time.perf_counter()
     source = "download" if plan["downloaded"] is False else "disk"
@@ -166,6 +184,7 @@ def _load_model(options: TranscribeOptions, on_progress: Optional[ProgressHook] 
         "repo": plan["repo"],
         "device": options.device,
         "computeType": options.compute_type,
+        "revision": plan["revision"],
         "source": source,
         "seconds": round(seconds, 2),
     }
@@ -204,7 +223,11 @@ class WhisperEngine(Engine):
                 "download": "just fetched from the hub",
             }.get(load_note.get("source"), "")
             took = f" in {load_note['seconds']}s" if load_note.get("seconds") else ""
-            on_progress(0.05, f"loaded {model_name}{took} {where}".rstrip())
+            # The pin, shortened, on the line that says a model was loaded: "which weights"
+            # is the question a second machine's different transcript raises, and this is
+            # the one place it is answerable without reading the artifact.
+            pin = f" @{load_note['revision'][:8]}" if load_note.get("revision") else ""
+            on_progress(0.05, f"loaded {model_name}{pin}{took} {where}".rstrip())
 
         # Prefer the decoded buffer when we have one: it is already 16 kHz mono,
         # so decoding a video twice (once for the hash, once for the model) is
@@ -267,6 +290,10 @@ class WhisperEngine(Engine):
                 # them yet. A run that fetched 756 MB should say so in its own artifact.
                 "modelSource": load_note.get("source"),
                 "modelLoadSeconds": load_note.get("seconds"),
+                # The exact commit these words came out of, or `null` for a model nothing
+                # here has verified. Recorded in the artifact so two machines can be
+                # compared without guessing at the weights - see `models.py`.
+                "modelRevision": load_note.get("revision"),
             },
         )
 

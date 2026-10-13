@@ -354,6 +354,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for aligner in report["aligners"]:
         mark = "ok " if aligner["available"] else "no "
         print(f"    [{mark}] {aligner['name']:<16} {aligner['reason']}")
+    # The aligner is not a preset and has no row in the table below, but its weights are
+    # downloaded and pinned the same way - and a re-timing pass that differs between two
+    # machines is as unexplainable as a transcript that does. See `models.py`.
+    print(f"  aligner pin   {models.ALIGN_MODEL} @{models.ALIGN_REVISION[:8]}")
     print("  validators")
     for validator in report["validators"]:
         mark = "ok " if validator["available"] else "no "
@@ -362,7 +366,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for row in report.get("presetDetails", []):
         mark = "cached" if row["downloaded"] else ("will download" if row["downloaded"] is False else "unknown")
         size = f", {row['params']}" if row["params"] else ""
-        print(f"    {row['id']:<10} {row['modelName']} ({row['repo']}{size}) - {mark}")
+        # The pin is shortened to the commit's first eight characters: enough to compare
+        # two machines by eye, and the artifact records all forty. `unpinned` is printed
+        # rather than omitted, because "no revision was ever verified for this one" is a
+        # different answer from "it is pinned and here".
+        pin = f" @{row['revision'][:8]}" if row.get("revision") else " (unpinned)"
+        print(f"    {row['id']:<10} {row['modelName']} ({row['repo']}{size}) - {mark}{pin}")
     # The cache path is printed with the presets rather than only on a miss: the first thing
     # worth knowing about a machine that behaves differently is *where* it looks for a model.
     to_fetch = [row for row in report.get("presetDetails", []) if row["downloaded"] is False]

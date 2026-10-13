@@ -23,9 +23,23 @@ from audio_studio import models
 from audio_studio.config import PRESETS
 
 
-def _make_cache(root: Path, repo: str, *, files: tuple[str, ...] = ("model.bin",)) -> Path:
-    """Lay out a hub cache entry the way the hub does: ``snapshots/<rev>/<files>``."""
-    directory = root / models.repo_cache_name(repo) / "snapshots" / ("a" * 40)
+def _make_cache(
+    root: Path,
+    repo: str,
+    *,
+    files: tuple[str, ...] = ("model.bin",),
+    revision: "str | None" = None,
+) -> Path:
+    """
+    Lay out a hub cache entry the way the hub does: ``snapshots/<rev>/<files>``.
+
+    The commit defaults to the one the catalogue *pins* for that repository, because the
+    check asks for the verified weights: a fixture that invented its own commit would
+    describe a cache the studio is right to ignore. Pass ``revision=`` to lay out a
+    different one on purpose.
+    """
+    commit = revision or models.revision_for(repo) or ("a" * 40)
+    directory = root / models.repo_cache_name(repo) / "snapshots" / commit
     directory.mkdir(parents=True, exist_ok=True)
     for name in files:
         (directory / name).write_bytes(b"")
@@ -106,3 +120,76 @@ def test_describe_model_reads_like_a_sentence():
     assert models.describe_model("small") == "Whisper small (Systran/faster-whisper-small, 244 M)"
     assert models.describe_model("not-a-model") == "not-a-model"
     assert models.describe_preset("balanced", PRESETS).startswith("balanced → Whisper small")
+
+
+# --------------------------------------------------------------------------- #
+# the revision pin
+# --------------------------------------------------------------------------- #
+
+
+def test_a_revision_is_a_commit_or_nothing_at_all():
+    """
+    A pin is a fact read off a cache, so it is either a full commit or absent.
+
+    A short id, a tag or a guess would be worse than no pin: it looks verified, and the
+    loader would hand it to the hub as if somebody had checked it.
+    """
+    import re
+
+    commit = re.compile(r"\A[0-9a-f]{40}\Z")
+    for model_id, entry in models.MODELS.items():
+        revision = entry.get("revision")
+        assert revision is None or commit.match(revision), f"{model_id}: {revision!r} is not a commit"
+    assert commit.match(models.ALIGN_REVISION)
+
+
+def test_the_models_this_project_verified_are_the_pinned_ones():
+    """The four presets and the aligner were all fetched and measured here, so all are pinned."""
+    for preset in PRESETS.values():
+        assert models.revision_for(preset["model"]), f"{preset['model']} is a preset and must be pinned"
+    assert models.revision_for(models.ALIGN_MODEL) == models.ALIGN_REVISION
+
+
+def test_the_aligner_pin_names_the_checkpoint_the_config_uses():
+    """Two spellings of the aligner that drift apart would unpin it silently."""
+    from audio_studio.config import DEFAULT_ALIGN_MODEL
+
+    assert models.ALIGN_MODEL == DEFAULT_ALIGN_MODEL
+
+
+def test_a_pin_is_found_by_short_name_and_by_repository():
+    """The transcriber holds a model name; a cache check holding a directory only has the repo."""
+    assert models.revision_for("small") == models.MODELS["small"]["revision"]
+    assert models.revision_for("Systran/faster-whisper-small") == models.MODELS["small"]["revision"]
+    assert models.revision_for(models.ALIGN_MODEL) == models.ALIGN_REVISION
+
+
+def test_a_model_nothing_verified_has_nothing_pinned():
+    """``None`` is the honest answer, and it is what keeps an unknown id working."""
+    assert models.revision_for("large-v3") is None
+    assert models.revision_for("some-org/their-whisper") is None
+    assert models.revision_for("out/some/local/model") is None
+
+
+def test_a_cache_holding_a_different_commit_is_not_the_pinned_weights(tmp_path):
+    """
+    The check asks for the *verified* weights, not for a directory with the right name.
+
+    This is the machine the pin exists for: it has these models, from an earlier day, at a
+    commit the hub has since moved past. Reporting that as present is how two laptops end up
+    on different weights while both say the model is already here.
+    """
+    _make_cache(tmp_path, models.MODELS["small"]["repo"], revision="f" * 40)
+    assert models.is_downloaded("small", root=tmp_path) is False
+
+    _make_cache(tmp_path, models.MODELS["small"]["repo"])  # the verified commit as well
+    assert models.is_downloaded("small", root=tmp_path) is True
+
+
+def test_describe_and_preset_details_report_the_pin(tmp_path):
+    """A caller can say which weights a run used, and `doctor` reads it from here."""
+    assert models.describe("medium")["revision"] == models.MODELS["medium"]["revision"]
+    assert models.describe("some-org/their-whisper")["revision"] is None
+    rows = {row["id"]: row for row in models.preset_details(PRESETS)}
+    assert rows["balanced"]["revision"] == models.MODELS["small"]["revision"]
+    assert rows["accurate"]["revision"] == models.MODELS["medium"]["revision"]

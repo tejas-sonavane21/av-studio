@@ -80,21 +80,26 @@ pytest==9.1.1
 # ---------------------------------------------------------------------------
 # Model weights — downloaded lazily on first use, NOT installed by pip
 # ---------------------------------------------------------------------------
-# These live in the Hugging Face cache outside this repository and are pinned by
-# revision there, so there is no version to declare above. Recorded here because
-# "which model" is otherwise unrecoverable from the environment. The revisions
-# are the ones in this machine's cache:
+# These live in the Hugging Face cache outside this repository, so there is no
+# version to declare above - but they are version-locked all the same, and in the
+# one place that can enforce it: `audio_studio/models.py` records the commit each
+# model was verified at (`MODELS[...]["revision"]`, plus `ALIGN_REVISION` for the
+# aligner) and both the transcriber and the aligner pass it to the loader. Without
+# that pin, `small` means "whatever Systran/faster-whisper-small's `main` points at
+# on the day this machine first ran" - which is how two laptops install a month
+# apart and disagree about the same recording with nothing on screen to explain it.
 #
-#   Systran/faster-whisper-small              536b0662742c02347bc0e980a01041f333bce120    464 MB
-#   Systran/faster-whisper-base               ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66    142 MB
-#   Systran/faster-whisper-medium             08e178d48790749d25932bbc082711ddcfdfbc4f    1.7 GB
-#   Systran/faster-distil-whisper-large-v3    c3058b475261292e64a0412df1d2681c06260fab    1.5 GB
-#   facebook/wav2vec2-base-960h               22aad52d435eb6dbaf354bdad9b0da84ce7d6156    361 MB
+#   short name         repository                                weights  preset
+#   small              Systran/faster-whisper-small               464 MB   `balanced` (default)
+#   base               Systran/faster-whisper-base                142 MB   `fast`
+#   medium             Systran/faster-whisper-medium              1.7 GB   `accurate`
+#   distil-large-v3    Systran/faster-distil-whisper-large-v3     1.5 GB   `best` (opt-in)
+#   (aligner)          facebook/wav2vec2-base-960h                361 MB   forced alignment
 #
-# `small` is the default preset (`balanced`), `medium` is `accurate`, `base` is
-# `fast`, `distil-large-v3` is opt-in, and `facebook/wav2vec2-base-960h` is the
-# aligner. The `[llm]` validator is hosted and downloads nothing; its model is
-# `gemini-3.5-flash-lite` by default.
+# `python -m audio_studio doctor` prints the pin beside each preset, and every
+# transcript and alignment records it in its provenance block, so two machines can
+# be compared rather than guessed at. The `[llm]` validator is hosted and downloads
+# nothing; its model is `gemini-3.5-flash-lite` by default.
 
 
 # ---------------------------------------------------------------------------

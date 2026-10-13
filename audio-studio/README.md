@@ -115,18 +115,19 @@ rename upstream fails the suite rather than a run.
 
 The second half is the one that has already cost a day: **is that model downloaded here?** The check
 resolves the Hugging Face cache exactly as the hub does (`HUGGINGFACE_HUB_CACHE`, then `HF_HOME`,
-then the platform default) and counts only a snapshot with files in it, because an interrupted fetch
-leaves a directory behind. The same commit transcribed correctly on one laptop and failed on another,
+then the platform default) and counts only a snapshot with files in it *at the commit the weights are
+pinned to*, because an interrupted fetch leaves a directory behind and a directory from last month
+holds other weights. The same commit transcribed correctly on one laptop and failed on another,
 and the difference was an empty cache — a machine-level fact that used to surface as a hub error
 minutes into a job, and is now on screen before one starts:
 
 ```
 $ python -m audio_studio doctor
   presets       fast, balanced, accurate, best (default: balanced)
-    fast       Whisper base (Systran/faster-whisper-base, 74 M) - cached
-    balanced   Whisper small (Systran/faster-whisper-small, 244 M) - cached
-    accurate   Whisper medium (Systran/faster-whisper-medium, 769 M) - will download
-    best       distil-whisper large-v3 (Systran/faster-distil-whisper-large-v3, 756 M) - will download
+    fast       Whisper base (Systran/faster-whisper-base, 74 M) - cached @ebe41f70
+    balanced   Whisper small (Systran/faster-whisper-small, 244 M) - cached @536b0662
+    accurate   Whisper medium (Systran/faster-whisper-medium, 769 M) - will download @08e178d4
+    best       distil-whisper large-v3 (Systran/faster-distil-whisper-large-v3, 756 M) - will download @c3058b47
   model cache   /home/you/.cache/huggingface/hub
     ! not downloaded yet: accurate (Whisper medium), best (distil-whisper large-v3) - the first run fetches it from the hub
 ```
@@ -158,11 +159,28 @@ of repeating a number it did not spend. Both facts are written into the artifact
 finished file can answer the question later:
 
 ```json
-"engine": { "model": "small", "modelSource": "disk", "modelLoadSeconds": 4.61, … }
+"engine": { "model": "small", "modelRevision": "536b0662742c…", "modelSource": "disk", "modelLoadSeconds": 4.61, … }
 ```
 
 `modelSource` is `disk` when the cache was reused and `download` when this machine did not have the
 weights — a run that fetched 769 MB says so, in its own output, rather than looking like a hang.
+
+### A model name is not a version
+
+`small` resolves to whatever `Systran/faster-whisper-small`'s `main` points at *on the day it is first
+fetched*, and the hub may move that. Two machines set up a month apart could then load different
+weights, transcribe the same recording differently, and have nothing in either output to explain it.
+So every model this project measured is pinned to the commit it was verified at — `models.py`,
+`MODELS[...]["revision"]`, plus `ALIGN_REVISION` for the wav2vec2 aligner — and both the transcriber and
+the aligner hand that commit to the loader:
+
+* `doctor` prints the shortened pin beside every preset, and names the aligner's separately;
+* every transcript records it as `modelRevision`, and every alignment records it in its provenance, so
+  two machines can be compared instead of guessed at;
+* *"is this model downloaded?"* now means *is the pinned snapshot here*: a machine holding an older
+  commit reports `will download` and fetches the verified weights rather than quietly using others;
+* a model nothing here has verified (`large-v3`, or a hub id from outside the catalogue) has no pin —
+  reported as `unpinned` and loaded as given, because an invented revision would look verified.
 
 ## The bridge to caption-studio
 

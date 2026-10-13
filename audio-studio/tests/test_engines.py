@@ -79,10 +79,16 @@ def test_available_engines_reports_rather_than_raises():
 
 
 def _cached_model(root: Path, model_id: str) -> None:
-    """Lay out a hub cache entry the way the hub does: ``snapshots/<rev>/model.bin``."""
+    """
+    Lay out a hub cache entry the way the hub does: ``snapshots/<rev>/model.bin``.
+
+    At the commit the catalogue pins, not an invented one: the loader is handed *that* pin,
+    so these fixtures describe the cache a real machine would actually hit.
+    """
     from audio_studio import models as catalogue
 
-    directory = root / catalogue.repo_cache_name(catalogue.MODELS[model_id]["repo"]) / "snapshots" / ("b" * 40)
+    revision = catalogue.revision_for(model_id) or ("b" * 40)
+    directory = root / catalogue.repo_cache_name(catalogue.MODELS[model_id]["repo"]) / "snapshots" / revision
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "model.bin").write_bytes(b"")
 
@@ -135,6 +141,30 @@ def test_an_empty_snapshot_is_a_download_not_a_cache_hit(tmp_path):
     plan = load_plan("small", root=tmp_path)
     assert plan["downloaded"] is False
     assert plan["localOnly"] is False
+
+
+def test_the_plan_hands_the_loader_the_verified_commit(tmp_path):
+    """
+    A plan that named the model but not the weights would leave the hub to choose them.
+
+    The revision is returned by the plan rather than looked up again at load time, so what a
+    person is told and what is loaded cannot disagree — which is the whole point of pinning.
+    """
+    from audio_studio import models as catalogue
+    from audio_studio.engines.whisper import load_plan
+
+    _cached_model(tmp_path, "small")
+    plan = load_plan("small", root=tmp_path)
+    assert plan["revision"] == catalogue.MODELS["small"]["revision"]
+    assert len(plan["revision"]) == 40
+
+
+def test_a_model_nothing_verified_is_planned_without_a_pin(tmp_path):
+    """A local path or an unknown hub id must still load: there is just nothing to pin it to."""
+    from audio_studio.engines.whisper import load_plan
+
+    assert load_plan("some-org/their-whisper", root=tmp_path)["revision"] is None
+    assert load_plan("medium", root=tmp_path)["revision"] is not None
 
 
 # --------------------------------------------------------------------------- #

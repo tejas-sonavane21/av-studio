@@ -40,6 +40,7 @@ from typing import Any, Optional, Sequence
 
 from ..config import DEFAULT_ALIGN_MODEL, ALIGN_FRAME_HOP, AlignOptions
 from ..media import Audio
+from ..models import revision_for
 from ..model import Transcript
 from .apply import limits_for
 from .base import AlignmentResult, Aligner, ProgressHook, WordSpan
@@ -64,6 +65,12 @@ def _load(model_name: str, device: str):
     Conforming to ``transformers`` rather than hand-rolling a checkpoint loader
     buys one thing that matters: the vocabulary comes from the tokenizer, so a
     different checkpoint (a multilingual one, say) works by naming it.
+
+    The default checkpoint is **pinned** to the commit its weights were verified at (see
+    ``models.py``): a re-timing pass is only reproducible if the acoustic model that
+    produced the timings is the same one, and the hub's ``main`` can move under a studio
+    that was never changed. A checkpoint from outside the catalogue is passed through
+    untouched — there is nothing verified to pin it to.
     """
     from transformers import AutoTokenizer, Wav2Vec2ForCTC  # type: ignore
 
@@ -72,8 +79,10 @@ def _load(model_name: str, device: str):
     if cached is not None:
         return cached
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = Wav2Vec2ForCTC.from_pretrained(model_name).to(device)
+    revision = revision_for(model_name)
+    pinned: dict = {"revision": revision} if revision else {}
+    tokenizer = AutoTokenizer.from_pretrained(model_name, **pinned)
+    model = Wav2Vec2ForCTC.from_pretrained(model_name, **pinned).to(device)
     model.eval()
 
     vocab = tokenizer.get_vocab()
@@ -255,6 +264,9 @@ class Wav2VecAligner(Aligner):
 
         model_name = options.model or DEFAULT_ALIGN_MODEL
         model, vocab, blank, boundary, hop, sample_rate = _load(model_name, options.device)
+        # Which weights, in the artifact: two machines that re-time the same transcript
+        # differently should be comparable without guessing at the checkpoint.
+        revision = revision_for(model_name)
 
         if audio.sample_rate != sample_rate:
             raise RuntimeError(
@@ -319,6 +331,7 @@ class Wav2VecAligner(Aligner):
             provenance={
                 "backend": self.name,
                 "model": model_name,
+                "revision": revision,
                 "device": options.device,
                 "frames": emissions.frames,
                 "channels": emissions.channels,
