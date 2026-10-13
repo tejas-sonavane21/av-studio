@@ -562,9 +562,16 @@ environment — with a `.env` file loaded underneath it, so there is no `export`
 remember:
 
 ```bash
-cp .env.example .env      # from the repository root
+cp .env.example .env      # in audio-studio/ - the studio ships its own template
 # then edit .env and set GEMINI_API_KEY=...
 ```
+
+**This studio runs standalone.** It is not required to sit inside the `web_av_editor`
+tree, so the template travels with it: `audio-studio/.env.example` is the one to copy
+when you are working in this folder, and the suite root carries the same file for a run
+started from `caption-studio`. Either is found from either directory - the nearest file
+to where you run wins - so a checkout of just this folder is a complete install, key
+setup included. `.env` is gitignored in both places, so neither can publish a key.
 
 The rules are `audio_studio/env.py`'s, and there are three of them:
 

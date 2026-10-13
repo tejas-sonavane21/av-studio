@@ -167,3 +167,33 @@ def test_the_template_that_ships_is_the_file_this_module_reads():
     placeholders = parse_env(example.read_text(encoding="utf-8"))
     assert "GEMINI_API_KEY" in placeholders
     assert "your-gemini-api-key-here" in placeholders["GEMINI_API_KEY"]
+
+
+def test_the_studio_ships_a_template_of_its_own():
+    """
+    The studio is standalone, so *this* folder has to carry the template.
+
+    The suite root's `.env.example` is reachable from a run started at the root, and it is
+    no help at all to a checkout of `audio-studio` on its own - which is exactly how the
+    studio is expected to be used. Copying the studio somewhere else must not leave the
+    user with a key error and nothing to copy.
+    """
+    example = Path(__file__).resolve().parents[1] / ENV_EXAMPLE_FILENAME
+    assert example.is_file(), f"{ENV_EXAMPLE_FILENAME} is missing from audio-studio/"
+    placeholders = parse_env(example.read_text(encoding="utf-8"))
+    assert "GEMINI_API_KEY" in placeholders
+    assert "your-gemini-api-key-here" in placeholders["GEMINI_API_KEY"]
+
+
+def test_the_studio_ignores_its_own_dot_env():
+    """
+    A key must not be committable from this folder either.
+
+    The rule lives in two places for one reason: the root `.gitignore` protects the tree
+    it was written in, and a clone of `audio-studio` alone gets this file and not that
+    one. A template that ships without the rule that hides its copy is a trap.
+    """
+    rules = (Path(__file__).resolve().parents[1] / ".gitignore").read_text(encoding="utf-8")
+    lines = [line.strip() for line in rules.replace("\r\n", "\n").split("\n")]
+    assert ENV_FILENAME in lines
+    assert not any(line.startswith("!") and line.endswith(ENV_FILENAME) for line in lines)

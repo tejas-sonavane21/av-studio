@@ -1,3 +1,17 @@
+# Local secrets - never committed. This folder runs standalone, so the rule has to
+# live here as well as in the suite root's .gitignore: a checkout of just this
+# folder is one `git add -A` away from publishing a key. `.env.example` is the
+# committed template and is deliberately not matched.
+.env
+.env.local
+.env.*.local
+!*.env.example
+
+# The older bare-key file. No longer read by anything (see audio_studio/env.py),
+# kept ignored so a machine that still has one cannot publish it by accident.
+gemini_api_key.txt
+*.api_key
+
 # Local virtualenv - never committed. The studio is always installed into .venv
 # so the system Python is never touched.
 .venv/
