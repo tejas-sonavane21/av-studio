@@ -587,9 +587,11 @@ cp .env.example .env      # in audio-studio/ - the studio ships its own template
 **This studio runs standalone.** It is not required to sit inside the `web_av_editor`
 tree, so the template travels with it: `audio-studio/.env.example` is the one to copy
 when you are working in this folder, and the suite root carries the same file for a run
-started from `caption-studio`. Either is found from either directory - the nearest file
-to where you run wins - so a checkout of just this folder is a complete install, key
-setup included. `.env` is gitignored in both places, so neither can publish a key.
+started from `caption-studio`. What the walk finds is the file nearest to where you
+start - the working directory and its four nearest parents are searched, then the
+repository root beside the package - so a checkout of just this folder is a complete
+install, key setup included, and `.env` is gitignored in both places so neither can
+publish a key.
 
 The rules are `audio_studio/env.py`'s, and there are three of them:
 

@@ -27,10 +27,11 @@
 # Python is fine. See the note on `av` — that is the one that is not obvious.
 #
 # The API key for the optional `[llm]` validation pass comes from the process
-# environment, with `audio-studio/../.env` (or the working directory's `.env`, or
-# any of its four nearest ancestors) loaded underneath it — see `../.env.example`
-# for the shape, and `audio_studio/env.py` for the exact rules. Nothing else is
-# needed to install, and no key is needed at all unless you ask for `--validate llm`.
+# environment, with `.env` loaded underneath it — the file in this folder, or in the
+# working directory and any of its four nearest ancestors. `.env.example` ships beside
+# this file and holds the shape (`../.env.example` is the same template, for a run
+# started from the suite root); `audio_studio/env.py` has the exact rules. Nothing else
+# is needed to install, and no key is needed at all unless you ask for `--validate llm`.
 # `python -m audio_studio doctor` prints the packages and passes it can actually see.
 
 # --- asr: real transcription (faster-whisper / CTranslate2 backend) ---------
