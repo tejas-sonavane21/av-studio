@@ -9,7 +9,7 @@ This is a **fresh project**. The previous subtitle-replication work (versions 1�
 Everything learned there is distilled into [`docs/KNOWLEDGE-BASE.md`](docs/KNOWLEDGE-BASE.md)
 so this folder is self-contained.
 
-> **Status: Phases 0–4 complete and verified.** All engines are built and **282/282 tests pass**:
+> **Status: Phases 0–4 complete and verified.** All engines are built and **448/448 tests pass**:
 > the caption document model, the format I/O (SRT/VTT/Veed JSON/project), the
 > **quality-correction engine** (rolling-cue resolution → anchors → banded DTW → typed, auditable
 > corrections), the **Canvas2D renderer with the Veed parity template**, and the **Phase 4 editing
@@ -56,7 +56,12 @@ so this folder is self-contained.
 | An export you can watch and a state you can read — visible track, percentage, and the saved file named | ✅ `describeExportResult` in `src/io/export-settings.js` |
 | CapCut-style timeline — caption, video and audio lanes on one source clock | ✅ `src/editor/timeline.js` |
 | Cuts — trim edges, split, cut left / cut right, delete, honoured by the preview *and* the export | ✅ `src/model/timeline.js`, `src/editor/preview.js` |
-| Playback that respects the cut — a gap is jumped, and the end of the kept material ends the programme | ✅ `playbackTarget` in `src/model/timeline.js` |
+| Playback that respects the cut — a gap is jumped, and the programme ends only when no lane has material left | ✅ `playbackTarget` in `src/model/timeline.js` |
+| A picture shorter than the track — the sound carries the programme on, and the picture layer goes blank rather than freezing | ✅ `hasMaterial()` in `src/editor/preview.js` |
+| A preview copy of a heavy picture — re-encoded smaller *in the browser* for the transport, frame-stamped from the source and encoded off the wall clock, with the export still encoding the original file | ✅ `src/io/preview-proxy.js`, `src/io/preview-source.js` |
+| Imported pictures and logos as *clips* — a window on the clock, on their own lane, over the caption layer in both the preview and the export | ✅ `src/model/media.js`, `src/editor/media-library.js`, `src/render/media-layer.js` |
+| Presets that name their model — repository, parameter count and whether it is already downloaded here | ✅ `GET /health` → `presetDetails` (`audio_studio/models.py`) |
+| A finished run fills in Sources — its Veed master and its own SRT, instead of leaving them in a job folder | ✅ `reflectRunInSources()` in `src/main.js` |
 | Per-source audio — the picture's own track and the uploaded master track, each with its own switch | ✅ `src/editor/preview.js` |
 | Tabbed workspace — Sources / Transcribe / Export share one column instead of three narrow ones | ✅ `index.html`, `src/main.js` |
 | Caption files — `.caproj`, Veed JSON, SRT, VTT | ✅ `src/io/download.js` |
@@ -206,6 +211,60 @@ sung. A leading insertion is now bounded by its own block's first measured word 
 wins over the gap, and `floor` still wins when it is later. On the reference pair the caption that
 began at 140.12 s now begins at 154.52 s, beside the word it belongs to.
 
+## A lighter picture for the preview
+
+Decoding 4K is what stalls the transport, and no care taken in this app's frame loop can lift it.
+`tools/preview-perf.mjs` measures the two separately — a bare `<video>` on an empty page against the
+real editor, same file, same browser — and on this project's 4K fixture the decoder presents **15.9**
+frames a second while the editor's own loop holds **60.0**. The decoder is the limit, so the only thing
+that helps is asking it for less: **Build smooth preview copy** re-encodes the file smaller, in the
+browser, from the file you already have. The export is untouched — `src/io/preview-source.js` keeps the
+two apart, and the encoder is handed the *original* URL and resolution, never the copy.
+
+How the copy is made is the whole story of this module, because the obvious way to make one is wrong:
+
+- **The frames are stamped with their own times.** Each frame the decoder presents is handed to a
+  `VideoEncoder` carrying the *media* time it had in the source (`requestVideoFrameCallback`'s
+  `mediaTime`), so the copy runs at the speed of the picture it came from. Recording the canvas with
+  `MediaRecorder` — the first version of this — stamps every frame with the time it was handed over,
+  which turns a source presenting 16 frames a second into a 30 fps file with the stutter baked in.
+- **Nothing is dropped to keep up with a clock.** A `MediaRecorder` competes with the 4K decoder for
+the same cores and drops frames under the load, which is a copy *choppier* than the original and
+invisible until it is played. Here the encode is allowed to take longer than playback did; when its
+queue gets deep the *source* is paused for a moment instead, because dropping a frame is the stutter
+this exists to remove. The result is reported against what was available: "119 frame(s) encoded of the
+119 the decoder presented — the picture had 29.8 frames a second to give".
+- **The sound comes along.** The element's own audio track is captured (never decoded twice) and
+  encoded alongside, with its configuration taken from the first buffer rather than from the track's
+  reported settings — the two disagree, and an encoder configured for stereo that is fed mono fails
+  with "Input audio buffer is incompatible with codec parameters", which is a copy that silently loses
+  its soundtrack. Whether the copy really carries sound is *measured*: the smoke run decodes the copy
+  back and asserts the result is not silence.
+
+Every number above is from `npm run ui`, which builds a copy in real Chrome, plays it back and counts
+what the browser presents: 119 of 119 frames kept, sound present, **29.0 fps played back over 4.1 s**.
+What the copy can never fix is what the file itself never had — a source that only decodes 16 frames a
+second still has 16 frames a second of motion, and the panel says so rather than blaming itself.
+
+## Imported clips — pictures and logos over the captions
+
+A caption-only editor cannot put a logo in the corner or a second shot in the middle, so the media
+library imports images and videos as **clips**: each one is a window on the clock, kept entirely
+separate from the caption blocks.
+
+- **Its own lane.** Clips draw as blocks on the timeline's Clips lane, and they *move* as well as trim
+  — the caption, video and audio lanes are parts of one file and a cut there is a gap, whereas a clip
+  is a separate file whose whole point is where it sits. Drag the body to move it, either edge to trim
+  it, `Delete` to remove it.
+- **`src/model/media.js` is the contract.** A clip's window is `[start, end]` on the *output* clock,
+  and `clipSourceTime` maps output time back into the source file, which is what lets the same clip
+  survive a cut that removes material before it. It is pure and unit-tested, like the timeline.
+- **One layer, two places.** `src/render/media-layer.js` draws the layer, and both the preview and the
+  WebCodecs export composite it through the same function — so what you see is what is written. Images
+  are awaited before the export starts (a `drawImage` on bytes that have not arrived throws, and the
+  layer's guard would then skip that clip on every frame), and a clip whose source file is missing is
+  reported rather than silently absent.
+
 ## The audio-studio bridge
 
 This studio corrects an AI transcript against a trusted subtitle file, and it is good at it — but it
@@ -218,7 +277,11 @@ at the top of the page is where the two meet:
 
 1. **Check server** — `GET /health` reports the version and what can actually run here (which engines,
    aligners and validators are installed), so a missing aligner is a fact up front rather than a
-   failure a minute into a job.
+   failure a minute into a job. It also reports **which model each preset loads, and whether this
+   machine already has it**: "balanced" is a trade-off, not a model, and the one difference that has
+   already made the same commit behave differently on two machines is an empty model cache — so the
+   menu names the repository (`Systran/faster-whisper-small`, 244 M) and marks it `downloaded` or
+   `will download`, and the line under it reads the same for whichever preset is selected.
 2. **Transcribe** — the recording's bytes go over the wire as the request body (a browser cannot read
    a path off the user's disk — deliberately), the job is polled with live progress, and the
    Veed-shaped answer is handed to the **same `importJSON`** a file from disk goes through. Nothing
@@ -234,7 +297,7 @@ at the top of the page is where the two meet:
    runs, and a menu entry whose folder has since been deleted is worse than no entry. Opening one
    reads the same `GET /jobs/{id}/veed` a finished job would, and nothing is transcribed.
 
-5. **The original lyrics, if you have them** — the optional file under *Recording to transcribe*.
+5. **The original lyrics, if you have them** — the optional file under *Recording to transcribe*.
    The words then come from that file and only the timing comes from the audio, so the transcript
    stops being a guess about *what* was sung: on the real song it takes the word error rate from
    **11.8 % to 0.0 %**. The page reads the file and posts its text (a browser cannot read a path off
@@ -242,6 +305,22 @@ at the top of the page is where the two meet:
    recording rather than applying it, and the result is reported in the panel exactly like the other
    passes. Note that the **TRUTH source** further down is a different pass — that one fixes spelling
    locally, this one reconciles against the words — and the same file can be given to both.
+
+6. **The run lands in Sources** — a finished run already wrote its artifacts next door, so they are
+   fetched and put into the panel the next step reads: the Veed master JSON into **AI source**, and
+   the run's own SRT into **TRUTH**.
+
+   TRUTH is the studio's SRT rather than the lyric sheet the run was given, and that is a measurement
+   rather than a preference. The two files are not the same document even when they read the same: the
+   sheet is the words that were *asked for*, while the SRT is what the studio **produced from the
+   recording** — transcribed against the audio, aligned word by word, validated, and reconciled with
+   those lyrics. Where the two disagree about spelling, the one that was measured against the audio is
+   the better authority to correct against. The sheet is not discarded: it went to the run as its
+   reference, which is what makes the SRT good in the first place, and the panel still takes any file
+   by hand.
+
+   Each field is handed a real `File` and a real `change` event, so the panel behaves exactly as it
+   does when the same file is picked from a folder.
 
 That last panel is where the timing question is answered, so it is worth stating the answer. With
 `align = wav2vec` selected, the clock that arrives here is **unbiased against the voice band
@@ -275,8 +354,8 @@ with the server staying up (`/%zz` gives `400`).
 
 ```bash
 cd caption-studio
-npm test          # node --test "tests/unit/*.test.js" → 305 tests
-npm run ui        # headless-Chrome smoke test of the editor page (87 checks)
+npm test          # node --test "tests/unit/*.test.js" → 468 tests
+npm run ui        # headless-Chrome smoke test of the editor page (262 checks)
 npm run e2e       # the two studios on the real song — needs the Python venv (see below)
 npm run quality   # the whole pass through the real UI, scored against the reference lyrics
 ```
@@ -291,7 +370,7 @@ calculated by hand rather than mirrored from the implementation.
 
 ```bash
 cd caption-studio
-npm run ui        # → headless Chrome over CDP, 87 checks, exits non-zero on failure
+npm run ui        # → headless Chrome over CDP, 262 checks, exits non-zero on failure
 ```
 
 `src/main.js` is the one module no unit test can reach — it exists only as browser side effects on

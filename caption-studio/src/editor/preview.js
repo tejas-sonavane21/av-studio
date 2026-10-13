@@ -13,16 +13,30 @@
  * 3. **Sizing.** The canvas is fitted to the document's aspect ratio inside its container, at
  *    device resolution, and re-fitted on resize. Export never uses this path (plan §9.8: output
  *    size must not depend on the window), it is preview-only convenience.
+ * 4. **The clip layer.** Overlay clips (see `model/media.js`) are drawn on a canvas of their own that
+ *    sits *between* the picture and the captions, so a caption is never hidden by a clip and a clip
+ *    is never hidden by the picture. They are drawn here rather than by the caption renderer because
+ *    that renderer's whole contract is "a pure function of (document, time)" over caption layout, and
+ *    a second, unrelated layer inside it would put two different jobs behind one purity claim.
  */
 
 import { createRenderer } from '../render/renderer.js';
 import { createLogger } from '../util/log.js';
 import { mergeDeep } from '../util/math.js';
-import { outputToSource, playbackTarget, sourceToOutput, trackRanges } from '../model/timeline.js';
+import { clipSourceTime } from '../model/media.js';
+import { drawMediaClips } from '../render/media-layer.js';
+import { outputToSource, playbackTarget, sourceToOutput, totalSourceEnd, trackRanges } from '../model/timeline.js';
 
 const log = createLogger('preview');
 
-export function createPreview({ canvas, video = null, audio = null, container = null, onFrame = null } = {}) {
+export function createPreview({
+  canvas,
+  video = null,
+  audio = null,
+  container = null,
+  onFrame = null,
+  mediaCanvas = null,
+} = {}) {
   if (!canvas) throw new Error('createPreview(): a canvas element is required');
 
   const renderer = createRenderer('canvas2d');
@@ -38,6 +52,18 @@ export function createPreview({ canvas, video = null, audio = null, container = 
   // rather than re-measuring: they are exactly the boxes that are on screen right now, which is
   // what makes "drag the text you can see" cheap and impossible to desync from the render.
   let layouts = [];
+  // The clip layer: the clips to draw, and the one function that can turn a clip id into a drawable
+  // element (the media library owns the files; this module never loads one).
+  let clips = [];
+  let resolveMedia = () => null;
+  let mediaCtx = null;
+  let mediaDpr = 1;
+  // Whether the clip layer is currently on screen. Tracked rather than read back from the element's
+  // style, so "show it" and "hide it" are each applied exactly once instead of on every frame.
+  let mediaVisible = false;
+  // The fitted frame in *logical* pixels — what the caption canvas was just sized to. The clip layer
+  // copies it so the two canvases cannot disagree about where the frame is.
+  let frameSize = { width: 0, height: 0 };
   // Whether the *video layer* is shown. Deliberately unrelated to caption drawing: hiding the
   // video must not stop the caption preview (that would make "show video" a rendering switch).
   let videoVisible = true;
@@ -60,7 +86,31 @@ export function createPreview({ canvas, video = null, audio = null, container = 
   const isReady = (m) => Boolean(m) && Number.isFinite(m.currentTime) && m.readyState > 0;
 
   /**
-   * Which element the clock follows: the video while it still has material, else the audio.
+   * Does this track still have something to play at its own playhead?
+   *
+   * "Not ended" is not the same question, and the difference is the whole bug this exists for. A
+   * track is *running out* in three separate ways:
+   *
+   * * the element has reached the end of its file (`ended`);
+   * * the element is still mid-file but the **cut** has no material at or after its playhead — a
+   *   trimmed tail, where the file carries on and the programme does not;
+   * * the track was cut away entirely (`ranges === []`), which is why an empty list is not treated
+   *   as "no cut" below.
+   *
+   * With no timeline at all there is nothing but the element's own end, so that is the answer.
+   */
+  function hasMaterial(track) {
+    const media = track === 'audio' ? audio : video;
+    if (!isReady(media) || media.ended) return false;
+    const map = mediaMap();
+    if (!map) return true;
+    const ranges = track === 'audio' ? map.audio : map.video;
+    if (!ranges.length) return false;
+    return !playbackTarget(ranges, media.currentTime).ended;
+  }
+
+  /**
+   * Which element the clock follows: the picture while it still has material, else the track.
    *
    * The picture is preferred *while it is running* — when both are loaded the video is normally the
    * full-length stream, and `resyncAudio()` keeps the track glued to it so two independent decoders
@@ -71,13 +121,17 @@ export function createPreview({ canvas, video = null, audio = null, container = 
    * its duration. With a picture shorter than the track — a cut-down music video against the
    * full-length master, which is the normal case here — the clock stopped at the picture's end, the
    * track kept playing underneath, and `resyncAudio()` pulled it back to the frozen time on every
-   * frame. That is what "the audio collapses when the video is shorter" was. The programme's length
-   * is its longest part (see `duration()`), so the track takes the clock over and the picture simply
-   * stops showing anything.
+   * frame. That is what "the audio collapses when the video is shorter" was, and it is why the
+   * question asked here is `hasMaterial()` rather than `!ended` or a latched "picture is done"
+   * flag: a *trimmed* picture pauses mid-file, where `ended` is false and a latched flag would go
+   * stale the moment the user cut another clip.
+   *
+   * The programme's length is its longest part (see `duration()`), so the track takes the clock over
+   * and the picture simply stops showing anything.
    */
   function activeMedia() {
-    if (isReady(video) && !video.ended) return video;
-    if (isReady(audio) && !audio.ended) return audio;
+    if (hasMaterial('video')) return video;
+    if (hasMaterial('audio')) return audio;
     // Both run out, or neither is loaded: keep whichever of the two there is, so a paused-at-the-end
     // transport still reports the time it is parked on rather than falling back to the wall clock.
     if (isReady(video)) return video;
@@ -148,10 +202,13 @@ export function createPreview({ canvas, video = null, audio = null, container = 
       const at = media.currentTime;
       const target = playbackTarget(ranges, at);
       if (target.ended) {
-        // Nothing at or after this point survives the cut. The picture ending is the programme ending;
-        // a track that has run out stops rather than playing what was removed.
-        if (media === video) pause();
-        else media.pause();
+        // Nothing at or after this point survives the cut, so this element stops rather than playing
+        // material the programme dropped. That is the end of the *track* — and deliberately not a
+        // decision about the programme: a 161 s picture under a 182 s master leaves 21 s of sound to
+        // play, and pausing the whole transport at the picture's last frame is exactly what "the
+        // preview stops if the video is shorter than the audio" was. Whether the programme is over is
+        // decided in one place, by the frame loop, where every lane can be asked. See `loop()`.
+        media.pause?.();
         continue;
       }
       if (target.time === at) continue; // still on kept material — leave the decoder alone
@@ -172,10 +229,11 @@ export function createPreview({ canvas, video = null, audio = null, container = 
    */
   function resyncAudio() {
     if (!isReady(video) || !isReady(audio)) return;
-    // A picture that has run out is not a clock — see `activeMedia()`. Gluing the track to a frozen
-    // picture is worse than letting the two loose for a moment: it would seek the audio backwards on
-    // every frame, which is heard as the track stuttering to a halt.
-    if (video.ended) return;
+    // Only the picture that *is* the clock may pull the sound. A picture that has run out — ended, or
+    // stopped at the end of its kept material — is not a clock, and gluing the track to a frozen
+    // frame is worse than letting the two loose for a moment: it seeks the audio backwards on every
+    // frame, which is heard as the track stuttering to a halt. See `activeMedia()`.
+    if (activeMedia() !== video) return;
     let target = video.currentTime;
     const map = mediaMap();
     if (map) {
@@ -201,26 +259,44 @@ export function createPreview({ canvas, video = null, audio = null, container = 
   };
 
   /**
-   * Put the video layer exactly where the caption canvas is.
+   * Put a layer exactly where the caption canvas is.
    *
-   * The two have to agree pixel-for-pixel or the captions drift off the picture they were timed
-   * against. Letting the video position itself with `inset: 0` works only while its container is the
-   * frame's own shape — which is true in the editor but *not* on the full screen, where the browser
-   * forces the full-screen element to fill the display and the frame can only be letterboxed inside
-   * it. Copying the canvas's box is one rule that holds in both places, and it costs a couple of
-   * layout reads per resize rather than per frame.
+   * The layers have to agree pixel-for-pixel or the captions drift off the picture they were timed
+   * against, and a clip lands somewhere other than where the caption beside it was placed. Letting a
+   * layer position itself with `inset: 0` works only while its container is the frame's own shape —
+   * which is true in the editor but *not* on the full screen, where the browser forces the full-screen
+   * element to fill the display and the frame can only be letterboxed inside it. Copying the canvas's
+   * box is one rule that holds in both places, and it costs a couple of layout reads per resize rather
+   * than per frame.
    */
-  function syncVideoBox() {
-    if (!video?.style || !canvas) return;
+  function copyFrameBox(element) {
+    if (!element?.style || !canvas) return;
     const host = container ?? canvas.parentElement;
     const frame = canvas.getBoundingClientRect?.();
     const parent = host?.getBoundingClientRect?.();
     if (!frame || !parent || !frame.width || !frame.height) return;
-    video.style.inset = 'auto';
-    video.style.left = `${frame.left - parent.left}px`;
-    video.style.top = `${frame.top - parent.top}px`;
-    video.style.width = `${frame.width}px`;
-    video.style.height = `${frame.height}px`;
+    element.style.inset = 'auto';
+    element.style.left = `${frame.left - parent.left}px`;
+    element.style.top = `${frame.top - parent.top}px`;
+    element.style.width = `${frame.width}px`;
+    element.style.height = `${frame.height}px`;
+  }
+
+  /**
+   * Size the clip layer to the frame, at device resolution, and put it behind the captions.
+   *
+   * The backing store is `logical × dpr` and the context is pre-scaled in `drawMedia`, so clip boxes
+   * are expressed in the same logical units the document uses and nothing here has to think about DPR.
+   */
+  function syncMediaCanvas() {
+    if (!mediaCanvas) return;
+    if (!(frameSize.width > 0 && frameSize.height > 0)) return;
+    copyFrameBox(mediaCanvas);
+    mediaDpr = Math.max(1, Number(globalThis.devicePixelRatio) || 1);
+    const width = Math.round(frameSize.width * mediaDpr);
+    const height = Math.round(frameSize.height * mediaDpr);
+    if (mediaCanvas.width !== width) mediaCanvas.width = width;
+    if (mediaCanvas.height !== height) mediaCanvas.height = height;
   }
 
   /** Re-fit the canvas to the document's aspect inside its container. */
@@ -228,7 +304,9 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     if (!doc) return null;
     const size = renderer.fit(doc, box());
     // after the fit, not before: the box to copy is the one the fit just produced
-    syncVideoBox();
+    frameSize = { width: size?.width ?? 0, height: size?.height ?? 0 };
+    copyFrameBox(video);
+    syncMediaCanvas();
     return size;
   }
 
@@ -239,10 +317,83 @@ export function createPreview({ canvas, video = null, audio = null, container = 
    */
   function renderFrame(t) {
     if (!doc) return null;
+    // The clips are drawn first: they belong *under* the captions, and the two live on separate
+    // canvases precisely so neither has to know how to draw the other.
+    drawMedia(t);
     const result = renderer.draw(doc, t, options);
     layouts = result?.layouts ?? [];
     onFrame?.(t, doc);
     return result;
+  }
+
+  /**
+   * Draw the clips active at `t` onto the clip layer, and answer how many were drawn.
+   *
+   * A clip whose file is not loaded is skipped rather than drawn as a hole — `resolveMedia` returns
+   * `null` for it, and the panel is where the user is told which clip is offline.
+   */
+  function drawMedia(t) {
+    if (!mediaCanvas) return 0;
+    if (!clips.length) {
+      // Nothing to draw, so the layer is taken out of the way rather than cleared every frame.
+      if (mediaVisible) {
+        mediaCanvas.style.display = 'none';
+        mediaCanvas.hidden = true;
+        mediaVisible = false;
+      }
+      return 0;
+    }
+    if (!mediaVisible) {
+      mediaCanvas.style.display = '';
+      mediaCanvas.hidden = false;
+      mediaVisible = true;
+      syncMediaCanvas();
+    }
+    mediaCtx = mediaCtx ?? mediaCanvas.getContext('2d');
+    if (!mediaCtx) return 0;
+    // The context is pre-scaled once per frame, so everything below draws in logical units and nothing
+    // here has to know about DPR — the same rule the caption canvas follows.
+    mediaCtx.setTransform(mediaDpr, 0, 0, mediaDpr, 0, 0);
+    return drawMediaClips(mediaCtx, { clips, size: frameSize, time: t, resolve: resolveMedia });
+  }
+
+  /**
+   * Keep the *video* clips where the playhead is.
+   *
+   * A clip element knows nothing about the programme's clock, so while the transport is playing an
+   * active clip is played and every other clip is paused; while it is parked, the active clip is
+   * seeked so a scrub shows the right frame. Clips are silent by design (see `editor/media-library.js`),
+   * which is also why nothing here touches `muted`.
+   */
+  function syncClipElements(t, { force = false } = {}) {
+    for (const clip of clips) {
+      if (clip.kind !== 'video') continue;
+      const element = resolveMedia(clip.id);
+      if (!element || !(element.duration > 0)) continue;
+      const inside = t >= clip.start && t < clip.end;
+      const wanted = Math.max(0, Math.min(clipSourceTime(clip, t), Math.max(0, element.duration - 1e-3)));
+      if (playing && inside && !force) {
+        if (element.paused) {
+          try {
+            element.currentTime = wanted;
+          } catch {
+            /* not seekable yet */
+          }
+          element.play?.()?.catch?.(() => {});
+        }
+        continue;
+      }
+      if (!element.paused) element.pause?.();
+      if (inside || force) {
+        if (force || Math.abs(element.currentTime - wanted) > 0.25) {
+          try {
+            element.currentTime = wanted;
+          } catch {
+            /* not seekable yet — the next frame tries again */
+          }
+        }
+      }
+    }
   }
 
   function loop() {
@@ -256,7 +407,18 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     lastTick = now;
     if (playing) {
       skipCuts();
-      resyncAudio();
+      // The programme is over when **no** lane has material left, and this is the only place that
+      // decides it. Asking here rather than inside `skipCuts()` is what keeps a picture shorter than
+      // the track from ending the show: the picture runs out, the sound carries on. It is also the
+      // only place that can catch a transport started *at* the end — a parked element never plays, so
+      // the cut-skipping pass never sees it, and the old code left the clock frozen at the last kept
+      // frame while reporting that it was playing.
+      const loaded = isReady(video) || isReady(audio);
+      if (loaded && !hasMaterial('video') && !hasMaterial('audio')) pause();
+      else {
+        resyncAudio();
+        if (playing) syncClipElements(currentTime());
+      }
     }
     syncPictureCoverage();
 
@@ -279,10 +441,16 @@ export function createPreview({ canvas, video = null, audio = null, container = 
   function syncPictureCoverage() {
     if (!video) return;
     const videoLength = trackDuration('video');
+    const map = mediaMap();
+    // Where the *programme* runs out of picture: the far end of the video track's kept material when
+    // there is a cut, the end of the file when there is not. A trimmed tail is no picture either, and
+    // the layer has to go away there for the same reason it does past the end of the file — otherwise
+    // cutting a clip's tail looks like it did nothing while the preview sits on its last frame.
+    const pictureEnd = map?.video?.length ? totalSourceEnd(map.video) : videoLength;
     const next = Boolean(
-      videoLength > 0 &&
-        (video.ended || currentTime() >= videoLength - 1e-3) &&
-        trackDuration('audio') > videoLength + 1e-3,
+      pictureEnd > 0 &&
+        (video.ended || currentTime() >= pictureEnd - 1e-3) &&
+        trackDuration('audio') > pictureEnd + 1e-3,
     );
     if (next === pictureDone) return;
     pictureDone = next;
@@ -329,9 +497,18 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(loop);
     resyncAudio();
-    // autoplay may be blocked before a user gesture; the button click *is* the gesture
-    for (const m of [video, audio]) {
-      if (m) m.play().catch((err) => log.warn('media.play() refused:', err?.message ?? err));
+    // autoplay may be blocked before a user gesture; the button click *is* the gesture.
+    for (const [track, media] of [
+      ['video', video],
+      ['audio', audio],
+    ]) {
+      if (!media || !media.paused) continue;
+      // `play()` on a media element that has **ended** restarts it from the beginning, so a picture
+      // the programme has already run out of is left parked where it is. Pressing Play on a project
+      // whose picture ended (or was trimmed) at 161 s must not throw the video back to frame zero
+      // underneath a track that is still at 3:00.
+      if (!hasMaterial(track)) continue;
+      media.play().catch((err) => log.warn('media.play() refused:', err?.message ?? err));
     }
   }
 
@@ -377,7 +554,11 @@ export function createPreview({ canvas, video = null, audio = null, container = 
       if (map) {
         const out = sourceToOutput(map.video, videoTime);
         const mapped = out == null ? null : outputToSource(map.audio, out);
-        if (mapped != null) audioTime = mapped;
+        // The picture can run out before the sound does — a short cut of a long master — and there is
+        // no output position to map through then. The sound is seeked by its own clock instead of
+        // being dragged back to the picture's last frame, which is where a seek into the tail used to
+        // land: the last minute of the track was unreachable in the preview.
+        audioTime = mapped == null ? clamped : mapped;
       }
       try {
         audio.currentTime = audioTime;
@@ -385,6 +566,10 @@ export function createPreview({ canvas, video = null, audio = null, container = 
         /* ignore, as above */
       }
     }
+    // A scrub is a deliberate move, so every clip is re-seeked even the ones that have not changed
+    // which side of their window the playhead is on — otherwise stepping back over a clip's edge would
+    // show the frame the clip was left on rather than the one the playhead is over.
+    syncClipElements(videoTime, { force: true });
     renderFrame(videoTime);
   }
 
@@ -395,7 +580,7 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     resize();
     // fonts must resolve before the first measurement, or the layout is built with a fallback face
     const fonts = await renderer.ensureFonts(next);
-    syncVideoBox();
+    copyFrameBox(video);
     renderFrame(currentTime());
     if (autoplay) start();
     return fonts;
@@ -439,7 +624,7 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     pictureDone = false;
     applyVideoVisibility();
     applyAudioRouting();
-    syncVideoBox();
+    copyFrameBox(video);
     return video;
   }
 
@@ -478,10 +663,29 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     return volume;
   }
 
+  /**
+   * Hand the preview the clips to draw, and the one function that can find their elements.
+   *
+   * Both arrive together because they are one fact in two halves: a clip with no element cannot be
+   * drawn, and an element with no clip has nowhere to be drawn. The media library owns the files and
+   * the loader; the preview only ever asks "which element is this id?", which is what keeps file
+   * handling (and its failure modes) out of the render path.
+   */
+  function setMedia(next, resolve = null) {
+    clips = Array.isArray(next) ? next : [];
+    if (typeof resolve === 'function') resolveMedia = resolve;
+    syncClipElements(currentTime(), { force: true });
+    renderFrame(currentTime());
+    return clips;
+  }
+
   function dispose() {
     pause();
     cancelAnimationFrame(raf);
     raf = 0;
+    clips = [];
+    resolveMedia = () => null;
+    mediaVisible = false;
     renderer.dispose();
   }
 
@@ -505,6 +709,8 @@ export function createPreview({ canvas, video = null, audio = null, container = 
     setOptions,
     setVideo,
     setVideoVisible,
+    /** The overlay clips to draw under the captions, plus the lookup for their elements. */
+    setMedia,
     /** The length of one track's own media, for the cut to be measured against. */
     trackDuration,
     setAudio,

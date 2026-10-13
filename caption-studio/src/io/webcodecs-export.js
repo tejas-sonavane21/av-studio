@@ -34,6 +34,11 @@
  * and the export walks them, so a trimmed clip is a shorter file rather than a longer one with the
  * removed part left in.
  *
+ * Overlay clips (`doc.media`) are rendered the same way, on a layer of their own between the picture and
+ * the captions: a video clip is **seeked** to its own frame for each output frame, exactly like the base
+ * picture, so a moving logo is stepped rather than sampled — and never played, which is what would make
+ * the export depend on the wall clock again.
+ *
  * Everything that can be decided without a browser — the codec choices, the frame count, the bitrate
  * ladder, the range mapping — is a pure function, so it is unit-tested in Node (see
  * `tests/unit/webcodecs-export.test.js`).
@@ -42,8 +47,10 @@
 import { Muxer as WebmMuxer, ArrayBufferTarget as WebmTarget } from '../../vendor/muxers/webm-muxer.mjs';
 import { Muxer as Mp4Muxer, ArrayBufferTarget as Mp4Target } from '../../vendor/muxers/mp4-muxer.mjs';
 import { createRenderer } from '../render/renderer.js';
+import { drawMediaClips } from '../render/media-layer.js';
 import { fitRect } from '../util/math.js';
 import { audioBitrate, videoBitrate } from './download.js';
+import { clipSourceTime } from '../model/media.js';
 import { outputDuration, outputToSource, trackRanges } from '../model/timeline.js';
 
 /** The containers this studio can write, and what each one is. */
@@ -225,8 +232,11 @@ async function readyMedia(element, timeout = 20000) {
  *
  * The point is that the preview keeps working: the user can scrub, or leave it playing, and the
  * export is unaffected because it never touches that element.
+ *
+ * Exported because `io/preview-proxy.js` needs the same thing for the same reason: copying the picture
+ * has to decode it, and decoding it must not disturb the element on screen.
  */
-function createDecodeElement(url) {
+export function createDecodeElement(url) {
   const element = document.createElement('video');
   element.muted = true;
   element.defaultMuted = true;
@@ -239,6 +249,23 @@ function createDecodeElement(url) {
   element.src = url;
   element.load?.();
   return element;
+}
+
+/**
+ * An off-screen `<img>` for an image clip, awaited on load.
+ *
+ * Awaited because the alternative is silent: `drawImage` on an image whose bytes have not arrived throws,
+ * and the layer's own guard would skip that clip on *every* frame — a logo missing from the whole export
+ * because it was a few milliseconds late on the first one. The timeout is the other half: a URL that
+ * never loads must delay the export for a moment, not hang it.
+ */
+async function loadClipImage(url) {
+  const image = new Image();
+  image.decoding = 'async';
+  const loaded = once(image, 'load', 15000);
+  image.src = url;
+  await loaded;
+  return image;
 }
 
 /** Take the off-screen element back out of the document and release its decoder. */
@@ -397,8 +424,9 @@ async function drain(encoder, threshold) {
  * @param {number}  [options.audioBitsPerSecond]       the audio bitrate to ask for first
  * @param {(fraction:number, message:string)=>void} [options.onProgress]
  * @param {AbortSignal} [options.signal]
+ * @param {Record<string,string>} [options.clipUrls]  the file behind each overlay clip, by clip id
  * @param {typeof createRenderer} [options.createRendererImpl]
- * @returns {Promise<{blob: Blob, mimeType: string, format: string, seconds: number, sourceSeconds: number, width: number, height: number, frames: number, fps: number, audio: boolean, audioSkipped: string|null, audioNote: string|null, audioBitrate: number, videoCodec: string, audioCodec: string, videoBitsPerSecond: number, trimmed: boolean}>}
+ * @returns {Promise<{blob: Blob, mimeType: string, format: string, seconds: number, sourceSeconds: number, width: number, height: number, frames: number, fps: number, audio: boolean, audioSkipped: string|null, audioNote: string|null, audioBitrate: number, videoCodec: string, audioCodec: string, videoBitsPerSecond: number, trimmed: boolean, clips: number, clipsMissing: string[]}>}
  */
 export async function exportDocumentToVideo({
   doc,
@@ -413,6 +441,7 @@ export async function exportDocumentToVideo({
   audioBitsPerSecond = null,
   onProgress = null,
   signal = null,
+  clipUrls = null,
   createRendererImpl = createRenderer,
 } = {}) {
   if (!doc?.blocks?.length) {
@@ -423,6 +452,16 @@ export async function exportDocumentToVideo({
   }
 
   const container = format === 'webm' ? 'webm' : 'mp4';
+
+  // Overlay clips are decoded from elements of the export's own (see the note in `editor/media-library.js`
+  // — the preview's elements are being played and scrubbed, and a seek on one of those would jump the
+  // preview under the user while the export ran). `clipsMissing` is what could not be loaded, so the
+  // caller can say so instead of shipping a file that quietly lost a logo.
+  const clipElements = new Map();
+  const clipsMissing = [];
+  let mediaCanvas = null;
+  let mediaCtx = null;
+  let drawClipLayer = null;
 
   // ---- the decode surface -------------------------------------------------
   // Never the element on screen. `sourceUrl` gives the export its own, so the preview keeps whatever
@@ -495,6 +534,59 @@ export async function exportDocumentToVideo({
     renderer.attach(captionCanvas);
     renderer.resize({ width, height, devicePixelRatio: 1, applyCssSize: false });
     await renderer.ensureFonts(doc);
+
+    // ---- the clip layer ----------------------------------------------------
+    // A canvas of the same size as the frame, drawn between the picture and the captions. One size, one
+    // DPR: the export draws at the output resolution, so the layer needs no scaling of its own.
+    const clips = Array.isArray(doc.media) ? doc.media : [];
+    if (clips.length) {
+      mediaCanvas = document.createElement('canvas');
+      mediaCanvas.width = width;
+      mediaCanvas.height = height;
+      mediaCtx = mediaCanvas.getContext('2d');
+      /*
+       * Step the video clips to their own frames, then draw the whole layer.
+       *
+       * A clip's frame lives at `clipSourceTime(clip, t)` **inside its own file** — which is what the
+       * head trim advanced (`sourceIn`), and therefore what makes a clip trimmed at the front show the
+       * frames it was trimmed *to* rather than the ones it began with. Images need none of this: their
+       * single frame is the element.
+       */
+      drawClipLayer = async (t) => {
+        for (const clip of clips) {
+          if (clip.kind !== 'video') continue;
+          const element = clipElements.get(clip.id);
+          const duration = Number(element?.duration);
+          if (!element || !(duration > 0)) continue;
+          await seekToFrame(element, Math.min(clipSourceTime(clip, t), Math.max(0, duration - 1e-3)));
+        }
+        return drawMediaClips(mediaCtx, {
+          clips,
+          size: { width, height },
+          time: t,
+          resolve: (id) => clipElements.get(id) ?? null,
+        });
+      };
+      for (const clip of clips) {
+        const url = clipUrls?.[clip.id];
+        if (!url) {
+          clipsMissing.push(clip.name || clip.id);
+          continue;
+        }
+        try {
+          if (clip.kind === 'video') {
+            const element = createDecodeElement(url);
+            await readyMedia(element);
+            element.pause?.();
+            clipElements.set(clip.id, element);
+          } else {
+            clipElements.set(clip.id, await loadClipImage(url));
+          }
+        } catch (err) {
+          clipsMissing.push(clip.name || clip.id);
+        }
+      }
+    }
 
     // ---- audio, decided before a single frame is encoded -------------------
     const AudioEncoderApi = typeof AudioEncoder !== 'undefined' ? AudioEncoder : null;
@@ -611,6 +703,16 @@ export async function exportDocumentToVideo({
         } catch {
           /* a frame not yet decodable — the next one draws */
         }
+        // ...then the clips, *under* the captions: the same stacking the preview shows, because the
+        // export is meant to be what the preview showed.
+        if (mediaCtx) {
+          try {
+            const drawn = await drawClipLayer(sourceTime);
+            if (drawn > 0) cctx.drawImage(mediaCanvas, 0, 0);
+          } catch {
+            /* the overlay must never abort the export */
+          }
+        }
         try {
           renderer.draw(doc, sourceTime, {});
           cctx.drawImage(captionCanvas, 0, 0, width, height);
@@ -693,6 +795,8 @@ export async function exportDocumentToVideo({
         audioCodec: audioBuffer ? audioCodec : '',
         videoBitsPerSecond: videoBits,
         trimmed: dropped.length > 0 || outputDuration(videoRanges) < sourceSeconds - 1e-3,
+        clips: clipElements.size,
+        clipsMissing,
       };
     } finally {
       try {
@@ -712,6 +816,13 @@ export async function exportDocumentToVideo({
     }
   } finally {
     destroyDecodeElement(owned);
+    // Every clip element the export created goes with it — including the ones for clips the file never
+    // got to use.
+    for (const clip of doc.media ?? []) {
+      const element = clipElements.get(clip.id);
+      if (element) destroyDecodeElement(element);
+    }
+    clipElements.clear();
   }
 }
 
@@ -733,8 +844,13 @@ export function lastCaptionEnd(doc) {
 /**
  * Ask `VideoEncoder.isConfigSupported` for each candidate until one says yes.
  * Returns `{ ok, codec, error }` — never throws.
+ *
+ * Asynchronous on purpose, and that is why it exists at all: `pickVideoCodec` takes a *synchronous*
+ * probe, and a `Promise` is always truthy, so a caller that passed `isConfigSupported(...)` directly
+ * would silently pick the first candidate the browser cannot encode. The preview copy
+ * (`io/preview-proxy.js`) goes through here for exactly this reason.
  */
-async function probeVideoConfig(format, width, height, fps, bitrate) {
+export async function probeVideoConfig(format, width, height, fps, bitrate) {
   if (typeof VideoEncoder?.isConfigSupported !== 'function') {
     return { ok: true, codec: pickVideoCodec(format, () => true), error: null };
   }

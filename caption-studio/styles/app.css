@@ -151,6 +151,22 @@ button:hover:not(:disabled) { filter: brightness(1.08); }
   object-fit: contain;
   visibility: hidden;
 }
+/*
+ * The clip layer, pinned to the frame by JS like the video (`copyFrameBox` in editor/preview.js).
+ *
+ * `.stage > .media-canvas` rather than plain `.media-canvas`, for the same reason the overlay needs
+ * it: `.stage canvas { position: relative; display: block }` would make this a second *relative* grid
+ * item, and a grid item is laid out by the stage instead of stacked over it — the clips would push the
+ * captions around instead of appearing behind them. The `hidden` attribute (and the inline
+ * `display: none` the preview sets while there are no clips) still wins over the `display` here.
+ */
+.stage > .media-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
 
 /*
  * Full screen. The browser forces a full-screen element to fill the display (`width`/`height` are
@@ -528,6 +544,28 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 .timeline-handle.left { left: 0; border-radius: 4px 0 0 4px; }
 .timeline-handle.right { right: 0; border-radius: 0 4px 4px 0; }
 .timeline-handle:hover { background: var(--accent); }
+
+/*
+ * The overlay-clip lane.
+ *
+ * A third kind of thing, so it does not reuse the caption background or the blue/green cut lanes: an
+ * overlay clip is a file of its own, placed on the programme, and its body is draggable along the clock
+ * (`cursor: grab` is the only hint a person gets, so it is worth having). The two `.timeline-handle`
+ * edges trim it, exactly as they trim a cut range.
+ */
+.timeline-media-clip {
+  position: absolute; top: 3px; overflow: hidden; padding: 1px 8px;
+  display: flex; align-items: center;
+  background: rgba(168, 85, 247, 0.2); border: 1px solid #a855f7; border-radius: 4px;
+  color: var(--text-1); font-size: 10px; white-space: nowrap;
+  cursor: grab; user-select: none;
+}
+.timeline-media-clip:active { cursor: grabbing; }
+.timeline-media-clip.active { box-shadow: 0 0 0 1px var(--accent) inset; color: var(--text-0); }
+.timeline-media-clip.offline { border-style: dashed; opacity: 0.55; }
+.timeline-media-clip .timeline-clip-text {
+  font-size: 10px; pointer-events: none; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* A playhead is a 2px line with a head, drawn over everything and never a pointer target — grabbing
    the line instead of scrubbing the strip would be an infuriating way to miss a seek. */

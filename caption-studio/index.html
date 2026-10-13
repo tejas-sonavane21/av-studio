@@ -27,6 +27,12 @@
       <div class="stage" id="stage">
         <video id="preview-video" playsinline muted></video>
         <audio id="preview-audio" preload="metadata"></audio>
+        <!--
+          The clip layer. It sits after the picture and before the caption canvas, so overlay clips
+          are drawn *over* the video but *under* the captions — the stacking is the DOM order, and
+          the caption canvas stays the one element that is always on top.
+        -->
+        <canvas id="media-canvas" class="media-canvas" hidden></canvas>
         <canvas id="preview-canvas" width="1280" height="720"></canvas>
         <canvas id="overlay-canvas" class="overlay-canvas"></canvas>
         <div class="stage-empty" id="stage-empty">Load a source, or open the demo</div>
@@ -261,6 +267,29 @@
             <label for="video-in">Video (optional)</label>
             <input type="file" id="video-in" accept="video/*" />
             <div class="hint" id="video-note">No picture loaded.</div>
+            <!--
+              The editor decodes the picture on every frame it draws, so a 4K file can be a
+              decode limit rather than a rendering cost — and a smaller copy of the same picture
+              removes it. This is *preview only*: the export always encodes from the file you
+              loaded, at its own resolution, with every cut applied.
+            -->
+            <div class="style-bar">
+              <button
+                class="ghost"
+                id="proxy-build"
+                type="button"
+                disabled
+                title="Re-encode a smaller copy of the picture for the preview only — the export is untouched"
+              >
+                Build smooth preview copy
+              </button>
+              <button class="ghost" id="proxy-clear" type="button" disabled>Preview the original</button>
+            </div>
+            <div class="hint" id="proxy-note">
+              A large picture (4K, or a heavy codec) can be limited by decoding rather than by this
+              app. A smoother copy is smaller, made here in the browser, and used <b>only</b> in the
+              preview — Export always encodes the original file.
+            </div>
           </div>
 
           <div class="field">
@@ -270,6 +299,22 @@
               The original track — plays with the transport, and carries the programme when the
               picture is shorter than it.
             </div>
+          </div>
+
+          <!--
+            Overlay clips: pictures or videos placed *over* the main picture on their own lane. Their
+            bytes are not stored in the project (a `.caproj` is JSON) — the file is re-located with
+            `Relink` on a later visit, and a clip whose file is not here says so rather than drawing
+            nothing.
+          -->
+          <div class="field">
+            <label for="media-in">Overlay clips (optional)</label>
+            <input type="file" id="media-in" accept="image/*,video/*" multiple />
+            <div class="hint" id="media-note">
+              Images and videos drawn over the picture, under the captions. They are silent — the
+              master track under <b>Audio</b> is the programme's sound. No clips loaded.
+            </div>
+            <div class="clip-list" id="media-list"><div class="empty">—</div></div>
           </div>
 
           <div class="field">
@@ -365,9 +410,10 @@
             <label class="field-inline">
               <span>Preset</span>
               <select id="transcribe-preset">
-                <option value="fast">fast — base model</option>
-                <option value="balanced" selected>balanced — small model</option>
-                <option value="accurate">accurate — medium model</option>
+                <option value="fast">fast — Whisper base, 74 M</option>
+                <option value="balanced" selected>balanced — Whisper small, 244 M</option>
+                <option value="accurate">accurate — Whisper medium, 769 M</option>
+                <option value="best">best — distil-whisper large-v3, 756 M</option>
               </select>
             </label>
             <label class="field-inline">
@@ -399,6 +445,18 @@
               </select>
             </label>
             <button class="primary" id="transcribe-btn" disabled>Transcribe</button>
+          </div>
+
+          <!--
+            What the chosen preset actually runs. "balanced" is a speed/accuracy trade-off, not a
+            model — and the two things that decide whether a run works are which model it is and
+            whether this machine already has it downloaded. Filled from GET /health; the static
+            text is the answer before the server has been asked.
+          -->
+          <div class="hint" id="transcribe-model-note">
+            Preset <b>balanced</b> runs <b>Whisper small</b> — Systran/faster-whisper-small, 244 M
+            parameters, multilingual. Press <b>Check server</b> to see whether it is already
+            downloaded on this machine.
           </div>
 
           <div class="progress"><div class="progress-bar" id="transcribe-bar"></div></div>

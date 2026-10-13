@@ -278,8 +278,19 @@ function startStubStudio() {
         engines: [{ name: 'whisper', backend: 'faster-whisper', available: true, reason: 'stand-in' }],
         aligners: [{ name: 'wav2vec', backend: 'wav2vec2', available: true, reason: 'stand-in' }],
         validators: [{ name: 'rules', backend: 'rules', available: true, reason: 'stand-in' }],
-        presets: ['fast', 'balanced', 'accurate'],
+        presets: ['fast', 'balanced', 'accurate', 'best'],
         defaultPreset: 'balanced',
+        // What each preset actually loads, and whether this machine has it. The panel builds its menu
+        // from these, so a preset in the UI is a model with a repository and a size rather than a
+        // category — and `medium` is deliberately *not* downloaded here, so the "will download" half
+        // (the difference that has already made two machines disagree about the same commit) is
+        // exercised rather than assumed.
+        presetDetails: [
+          { id: 'fast', model: 'base', modelName: 'Whisper base', repo: 'Systran/faster-whisper-base', params: '74 M', languages: 'multilingual', downloaded: true, beamSize: 1, note: 'the quickest', known: true },
+          { id: 'balanced', model: 'small', modelName: 'Whisper small', repo: 'Systran/faster-whisper-small', params: '244 M', languages: 'multilingual', downloaded: true, beamSize: 5, note: 'the default', known: true },
+          { id: 'accurate', model: 'medium', modelName: 'Whisper medium', repo: 'Systran/faster-whisper-medium', params: '769 M', languages: 'multilingual', downloaded: false, beamSize: 5, note: 'slower on hard audio', known: true },
+          { id: 'best', model: 'distil-large-v3', modelName: 'distil-whisper large-v3', repo: 'Systran/faster-distil-whisper-large-v3', params: '756 M', languages: 'English only', downloaded: false, beamSize: 5, note: 'best accuracy', known: true },
+        ],
         emitKinds: ['json', 'veed', 'srt', 'vtt'],
         // Deliberately drifted, so the page's own warning is exercised: a server whose
         // dependencies are not the pinned ones is the failure this project has actually
@@ -341,6 +352,16 @@ function startStubStudio() {
     }
 
     if (url.pathname === '/jobs/stub-job/veed') return send(200, veed);
+
+    // The other artifact the Sources panel fills itself from, served as text exactly as the real
+    // server serves it, so the panel's SRT path is the real one.
+    if (url.pathname === '/jobs/stub-job/srt') {
+      return send(
+        200,
+        '1\n00:00:12,000 --> 00:00:16,000\nJust an ordinary boy,\n\n2\n00:00:16,000 --> 00:00:20,000\nLost in the crowd.\n',
+        'text/plain; charset=utf-8',
+      );
+    }
 
     return send(404, { error: `no route for ${url.pathname}` });
   });
@@ -444,9 +465,9 @@ async function main() {
 
   await check(
     cdp,
-    'the timeline draws a lane for the captions, the picture and the sound',
+    'the timeline draws a lane for the captions, the picture, the sound and the imported clips',
     '[...document.querySelectorAll("#timeline .timeline-track")].map((t)=>t.className.replace("timeline-track","").trim()).join("|")',
-    (v) => v === 'captions|video|audio',
+    (v) => v === 'captions|media|video|audio',
   );
   await check(
     cdp,
@@ -720,6 +741,157 @@ async function main() {
     'and no caption is left dimmed',
     'document.querySelectorAll("#timeline .timeline-clip.dropped").length',
     (v) => v === 0,
+  );
+
+  console.log('\n■ overlay clips');
+  // An image clip is made here rather than loaded from a fixture, for the same reason the video section
+  // encodes its own: the repo carries no media, and a clip's file is a file the page can invent.
+  const clipLane = 'document.querySelectorAll("#timeline .timeline-track.media .timeline-media-clip").length';
+  const addImageClip = async (name) => {
+    await evaluate(
+      cdp,
+      `(async () => {
+        const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+        const g = c.getContext('2d');
+        g.fillStyle = '#ff00ff'; g.fillRect(0, 0, 64, 64);
+        const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+        const dt = new DataTransfer();
+        dt.items.add(new File([blob], '${name}', { type: 'image/png' }));
+        const input = document.querySelector('#media-in');
+        input.files = dt.files; input.dispatchEvent(new Event('change'));
+      })()`,
+    );
+    await waitFor(cdp, clipLane, (v) => v >= 1, { describe: 'the clip to be added' });
+  };
+
+  await addImageClip('logo.png');
+  await delay(250);
+  await check(cdp, 'adding a clip puts it on the timeline\u2019s Clips lane', clipLane, (v) => v === 1);
+  await check(
+    cdp,
+    'and it appears in the sources panel, with its window',
+    'document.querySelector("#media-list .clip-row .clip-where").textContent',
+    (v) => /^\d+\.\d\d\u2013\d+\.\d\ds$/.test(String(v)),
+  );
+  await check(
+    cdp,
+    'and the panel says a clip is loaded rather than that none is',
+    'document.querySelector("#media-note").textContent',
+    (v) => /^1 clip over the picture/.test(String(v)),
+  );
+  // The drawing half. `getImageData` is the only way to see what was actually painted, and it is the
+  // check that a clip is drawn at all — the lane proves the *model*, not the pixels.
+  const clipPixels = () =>
+    `(() => {
+      const c = document.querySelector('#media-canvas');
+      if (!c || c.hidden || getComputedStyle(c).display === 'none') return -1;
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      let opaque = 0;
+      for (let i = 3; i < d.length; i += 4) if (d[i] > 10) opaque += 1;
+      return opaque;
+    })()`;
+  const painted = await evaluate(cdp, clipPixels());
+  assert(
+    'the clip is drawn over the picture, on a layer of its own',
+    painted > 1000,
+    `the clip layer had ${painted} opaque pixels${painted < 0 ? ' (it was hidden)' : ''}`,
+  );
+  const stack = await evaluate(
+    cdp,
+    `(() => {
+      const m = document.querySelector('#media-canvas');
+      const c = document.querySelector('#preview-canvas');
+      const a = m.getBoundingClientRect();
+      const b = c.getBoundingClientRect();
+      const drift = Math.max(
+        Math.abs(a.left - b.left), Math.abs(a.top - b.top),
+        Math.abs(a.width - b.width), Math.abs(a.height - b.height),
+      );
+      // ...and it is *before* the caption canvas in the document, so it paints under it
+      const under = Boolean(m.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING);
+      return { drift, under };
+    })()`,
+  );
+  assert(
+    'the clip layer lands exactly on the caption frame',
+    stack.drift <= 1,
+    `worst edge ${stack.drift}px out`,
+  );
+  assert(
+    'and sits under the captions, so a caption is never hidden by a clip',
+    stack.under === true,
+    'the clip layer came after the caption canvas in the document',
+  );
+
+  // ---- dragging one --------------------------------------------------------
+  // Everything through the strip's own pointer path, so what is tested is the gesture a user makes.
+  const dragClip = (part, dx) =>
+    `(() => {
+      const find = () => document.querySelector('#timeline .timeline-track.media .timeline-media-clip');
+      const window_ = () => document.querySelector('#media-list .clip-row .clip-where').textContent;
+      const clip = find();
+      const start = parseFloat(clip.style.left);
+      const width = clip.getBoundingClientRect().width;
+      const textBefore = window_();
+      const target = ${part === 'handle' ? "clip.querySelector('.timeline-media-handle.right')" : 'clip'};
+      const r = target.getBoundingClientRect();
+      const at = (x) => ({ bubbles: true, cancelable: true, clientX: x, clientY: r.top + r.height / 2, pointerId: 1, isPrimary: true });
+      const scroll = document.querySelector('#timeline .timeline-scroll');
+      scroll.setPointerCapture = () => {};
+      target.dispatchEvent(new PointerEvent('pointerdown', at(r.left + r.width / 2)));
+      scroll.dispatchEvent(new PointerEvent('pointermove', at(r.left + r.width / 2 + ${dx})));
+      scroll.dispatchEvent(new PointerEvent('pointerup', at(r.left + r.width / 2 + ${dx})));
+      const after = find();
+      return {
+        start, width, textBefore,
+        left: parseFloat(after.style.left),
+        widthAfter: after.getBoundingClientRect().width,
+        textAfter: window_(),
+      };
+    })()`;
+
+  const moved = await evaluate(cdp, dragClip('body', 60));
+  await delay(150);
+  assert(
+    'dragging a clip\u2019s body moves it along the clock, keeping its length',
+    moved.left > moved.start + 20 && Math.abs(moved.widthAfter - moved.width) < 2,
+    `left ${moved.start} \u2192 ${moved.left}, width ${moved.width} \u2192 ${moved.widthAfter}`,
+  );
+  assert(
+    'and the panel reports the new window rather than the one it had',
+    moved.textAfter !== moved.textBefore,
+    `the row still read ${JSON.stringify(moved.textAfter)}`,
+  );
+  const trimmed = await evaluate(cdp, dragClip('handle', -60));
+  await delay(150);
+  assert(
+    'dragging an edge trims the clip rather than moving it',
+    trimmed.widthAfter < trimmed.width - 5 && Math.abs(trimmed.left - trimmed.start) < 2,
+    `width ${trimmed.width} \u2192 ${trimmed.widthAfter}, left ${trimmed.start} \u2192 ${trimmed.left}`,
+  );
+  await check(
+    cdp,
+    'a trimmed clip is still one clip, not two',
+    clipLane,
+    (v) => v === 1,
+  );
+
+  // ---- taking it away ------------------------------------------------------
+  // Re-added before the removal, so the clip that the export section later measures is a whole one.
+  await addImageClip('badge.png');
+  await delay(250);
+  await check(cdp, 'a second clip joins the first on the lane', clipLane, (v) => v === 2);
+  await evaluate(
+    cdp,
+    'document.querySelectorAll("#media-list .clip-row")[1].querySelector(".clip-remove").click()',
+  );
+  await delay(250);
+  await check(cdp, 'the \u00d7 on a row takes that clip off the programme', clipLane, (v) => v === 1);
+  await check(
+    cdp,
+    'and the panel goes back to one clip',
+    'document.querySelector("#media-note").textContent',
+    (v) => /^1 clip over the picture/.test(String(v)),
   );
 
   console.log('\n■ templates');
@@ -1610,6 +1782,43 @@ async function main() {
     (v) => v === true,
   );
 
+  // Presets used to read "fast — base model", which names neither a model nor a file. The menu is now
+  // built from the server's own catalogue, so what a preset loads is on the label, and whether this
+  // machine already has that model is beside it — the failure that started all of this was a second
+  // laptop whose cache was empty, with nothing on screen to say so.
+  await check(
+    cdp,
+    'the preset menu names the model each preset loads, not a size category',
+    '[...document.querySelectorAll("#transcribe-preset option")].map((o)=>o.textContent).join("|")',
+    (v) => String(v).includes('Whisper small, 244 M') && String(v).includes('distil-whisper large-v3, 756 M'),
+  );
+  await check(
+    cdp,
+    'and says which of those models is already downloaded here',
+    '[...document.querySelectorAll("#transcribe-preset option")].map((o)=>o.textContent).join("|")',
+    (v) => String(v).includes('downloaded') && String(v).includes('will download'),
+  );
+  await check(
+    cdp,
+    'the note under the menu names the repository the run will load',
+    'document.querySelector("#transcribe-model-note").textContent',
+    (v) => String(v).includes('Systran/faster-whisper-small') && String(v).includes('already downloaded'),
+  );
+  await evaluate(
+    cdp,
+    '(()=>{const s=document.querySelector("#transcribe-preset");s.value="accurate";s.dispatchEvent(new Event("change"));})()',
+  );
+  await check(
+    cdp,
+    'choosing another preset re-reads it, and says when that model is not here yet',
+    'document.querySelector("#transcribe-model-note").textContent',
+    (v) => String(v).includes('Whisper medium') && String(v).includes('NOT downloaded yet'),
+  );
+  await evaluate(
+    cdp,
+    '(()=>{const s=document.querySelector("#transcribe-preset");s.value="balanced";s.dispatchEvent(new Event("change"));})()',
+  );
+
   // A synthetic WAV again: the smoke test must not depend on the (gitignored) reference workspace.
   const pickRecording = `(() => {
     const rate = 8000, samples = rate * 0.2;
@@ -1638,7 +1847,10 @@ async function main() {
   // The original lyrics are read *in the page* and posted with the job, because a browser cannot
   // read a path off the user's disk. This is the only place that whole path is real: a File, a
   // `.text()` call, and a query string.
-  const lyrics = 'And they say that a hero can save us\n';
+  // A real subtitle file rather than a sentence with a .srt name: the Sources panel puts this very
+  // file into its TRUTH field once the run finishes, and a file that cannot be parsed there would
+  // make that auto-fill a lie.
+  const lyrics = '1\n00:00:12,000 --> 00:00:16,000\nAnd they say that a hero can save us\n';
   const pickLyrics = `(() => {
     const dt = new DataTransfer();
     dt.items.add(new File([${JSON.stringify(lyrics)}], 'spidy.srt', { type: 'text/plain' }));
@@ -1771,6 +1983,33 @@ async function main() {
     (v) => v === 'recording.wav',
   );
 
+  // The Sources panel is where a person goes next, so the run's own files are put there instead of
+  // being left in a job folder to be found by hand. The AI source is the run's Veed master — the
+  // timing everything downstream is built on — and TRUTH is the lyric file the run was actually
+  // given, because a subtitle file *is* the spelling authority and that is where it belongs.
+  await check(
+    cdp,
+    'the run\'s Veed master is put in the AI source field, not left in a job folder',
+    '(()=>{const f=document.querySelector("#ai-in").files;return f.length===1?f[0].name:""})()',
+    (v) => /\.veed\.json$/.test(String(v)),
+  );
+  // The studio's own SRT, not the lyric sheet the run was given: the sheet is the words that were
+  // asked for, and the SRT is what the studio produced from the recording (transcribed against the
+  // audio, aligned, validated, reconciled with those lyrics). Where the two disagree about spelling,
+  // the file that was measured against the audio is the one worth correcting against.
+  await check(
+    cdp,
+    'and the run\u2019s own SRT is in the TRUTH field, rather than the lyric sheet it was given',
+    '(()=>{const f=document.querySelector("#truth-in").files;return f.length===1?f[0].name:""})()',
+    (v) => v === 'stub.srt',
+  );
+  await check(
+    cdp,
+    'the log says what it filled in rather than changing the panel behind the user\'s back',
+    'document.querySelector("#log").textContent.includes("filled in from this run")',
+    (v) => v === true,
+  );
+
   // ------------------------------------------------------------------------- //
   // the runs the server already finished
   // -------------------------------------------------------------------------
@@ -1813,6 +2052,15 @@ async function main() {
     'and its captions are on the timeline',
     'document.querySelectorAll("#timeline .timeline-clip").length',
     (v) => Number(v) > 0,
+  );
+  // An opened run gets the same treatment as a fresh one: its two artifacts are fetched from the job
+  // that wrote them and put where the next step looks. The names come from the server's own output
+  // (`stub.veed.json` / `stub.srt`), so this is the run's files rather than a guess at them.
+  await check(
+    cdp,
+    'an opened run fills the panel from its own artifacts too',
+    '(()=>{const a=document.querySelector("#ai-in").files;const t=document.querySelector("#truth-in").files;return [a.length?a[0].name:"", t.length?t[0].name:""].join("|")})()',
+    (v) => v === 'stub.veed.json|stub.srt',
   );
   assert(
     'no second transcription was run to open it',
@@ -2399,6 +2647,275 @@ async function main() {
       (v) => v === true,
     );
   }
+
+  console.log('\n■ a picture shorter than the track');
+  // The bug this round fixes, measured through the real transport instead of by calling the model:
+  // with a 5 s picture under a longer master, playback stopped when the picture ran out. The programme
+  // is its longest part, so the sound carries it — and the picture layer goes blank rather than
+  // freezing on its last frame while the track plays on over it.
+  const longTrack = `(() => {
+    const rate = 8000, seconds = 8, samples = rate * seconds;
+    const bytes = new Uint8Array(44 + samples * 2);
+    const dv = new DataView(bytes.buffer);
+    const ascii = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+    ascii(0, 'RIFF'); dv.setUint32(4, 36 + samples * 2, true); ascii(8, 'WAVE');
+    ascii(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+    dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+    ascii(36, 'data'); dv.setUint32(40, samples * 2, true);
+    for (let i = 0; i < samples; i++) dv.setInt16(44 + i * 2, Math.round(Math.sin(i / 20) * 8000), true);
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'master.wav', { type: 'audio/wav' }));
+    const input = document.querySelector('#audio-in');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change'));
+    return input.files.length;
+  })()`;
+  await check(cdp, 'a master track longer than the picture can be loaded', longTrack, (v) => v === 1);
+  await waitFor(
+    cdp,
+    '(()=>{const a=document.querySelector("#preview-audio");return a.readyState>=1&&a.duration>7})()',
+    (v) => v === true,
+    { describe: 'the 8s master track to decode' },
+  );
+
+  // Started just before the picture's end, so what is measured is the handover rather than five
+  // seconds of ordinary playback.
+  await evaluate(
+    cdp,
+    `(()=>{const s=document.querySelector('#seek');s.value='4.4';s.dispatchEvent(new Event('input',{bubbles:true}));return s.value})()`,
+  );
+  await delay(200);
+  await evaluate(cdp, 'document.querySelector("#play-btn").click()');
+  await waitFor(
+    cdp,
+    '(()=>{const a=document.querySelector("#preview-audio");return Number(a.currentTime.toFixed(2))>6.2})()',
+    (v) => v === true,
+    { attempts: 120, intervalMs: 100, describe: "the transport to carry on past the picture's end" },
+  );
+  const past = await evaluate(
+    cdp,
+    '(()=>({label:document.querySelector("#play-btn").textContent,audio:Number(document.querySelector("#preview-audio").currentTime.toFixed(2)),videoEnded:document.querySelector("#preview-video").ended,visibility:document.querySelector("#preview-video").style.visibility}))()',
+  );
+  assert(
+    'a picture shorter than the track no longer stops the programme at the picture',
+    past.audio > 6.2 && past.videoEnded === true && String(past.label).includes('Pause'),
+    `the track was at ${past.audio}s with the picture ended, and the button said ${JSON.stringify(past.label)}`,
+  );
+  assert(
+    'and the picture layer goes blank rather than freezing on its last frame',
+    past.visibility === 'hidden',
+    `visibility was ${JSON.stringify(past.visibility)}`,
+  );
+  await evaluate(cdp, 'document.querySelector("#play-btn").click()'); // stop it again
+
+  console.log('\n■ the preview copy (preview only — the export keeps the original)');
+  // A 640×360 picture is small enough that the copy is not even offered, which is the first half of
+  // the rule: the feature exists for pictures that actually stall a transport.
+  await check(
+    cdp,
+    'a picture that decodes fine is not offered a copy at all',
+    'document.querySelector("#proxy-build").disabled',
+    (v) => v === true,
+  );
+  await check(
+    cdp,
+    'and the panel says what a copy would be for, and that the export is untouched',
+    'document.querySelector("#proxy-note").textContent',
+    (v) => String(v).includes('Export always encodes the original file'),
+  );
+  // Then the copy itself, built through the real module in a real browser: a real decode, a canvas,
+  // real WebCodecs encoders, the real muxer. This is the half no unit test can reach.
+  //
+  // The fixture is made **with a soundtrack**, which the page's own test picture has not got, because
+  // the one thing a preview copy must not silently lose is the sound — and "is the captured track
+  // silent?" is a question about this browser's behaviour, not about this code. The copy is then
+  // *played back* and counted frame by frame: a copy that stutters is exactly the failure the rewrite
+  // of this module was for, and the only way to catch it is to watch the file play.
+  const sourceSrcBefore = await evaluate(cdp, 'document.querySelector("#preview-video").src');
+  const proxyRun = await evaluate(
+    cdp,
+    `(async () => {
+      try {
+        const mod = await import('./src/io/preview-proxy.js');
+        if (!mod.proxySupported()) return { skipped: true };
+        const { Muxer, ArrayBufferTarget } = await import('./vendor/muxers/webm-muxer.mjs');
+
+        // ---- a fixture with a picture and a 440 Hz tone, built here so no gitignored file is needed
+        const W = 320, H = 180, FPS = 30, SECONDS = 4, TONE = 440;
+        const canvas = document.createElement('canvas');
+        canvas.width = W; canvas.height = H;
+        const g = canvas.getContext('2d');
+        const vchunks = [];
+        const venc = new VideoEncoder({ output: (c, m) => vchunks.push({ t: c.timestamp, c, m }), error: () => {} });
+        venc.configure({ codec: 'vp09.00.10.08', width: W, height: H, bitrate: 800000, framerate: FPS });
+        for (let i = 0; i < FPS * SECONDS; i++) {
+          g.fillStyle = 'hsl(' + ((i * 5) % 360) + ' 80% 45%)';
+          g.fillRect(0, 0, W, H);
+          g.fillStyle = '#fff';
+          g.fillRect((i * 6) % W, 60, 30, 30);
+          const frame = new VideoFrame(canvas, { timestamp: Math.round((i / FPS) * 1e6), duration: Math.round(1e6 / FPS) });
+          venc.encode(frame, { keyFrame: i % 30 === 0 });
+          frame.close();
+        }
+        await venc.flush();
+        venc.close();
+        const achunks = [];
+        const aenc = new AudioEncoder({ output: (c, m) => achunks.push({ t: c.timestamp, c, m }), error: () => {} });
+        aenc.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1, bitrate: 64000 });
+        const per = 960; // 20 ms
+        const samples = new Float32Array(per);
+        for (let n = 0; n < Math.ceil((SECONDS * 48000) / per); n++) {
+          for (let k = 0; k < per; k++) samples[k] = Math.sin(2 * Math.PI * TONE * ((n * per + k) / 48000)) * 0.4;
+          const data = new AudioData({
+            format: 'f32-planar',
+            sampleRate: 48000,
+            numberOfFrames: per,
+            numberOfChannels: 1,
+            timestamp: Math.round((n * per / 48000) * 1e6),
+            data: samples,
+          });
+          aenc.encode(data);
+          data.close();
+        }
+        await aenc.flush();
+        aenc.close();
+
+        // Both muxers want monotonically increasing timestamps, so the fixture is written in time
+        // order too — the same merge the module itself does.
+        const target = new ArrayBufferTarget();
+        const fixtureMuxer = new Muxer({
+          target,
+          video: { codec: 'V_VP9', width: W, height: H, frameRate: FPS },
+          audio: { codec: 'A_OPUS', numberOfChannels: 1, sampleRate: 48000 },
+        });
+        const ordered = [
+          ...vchunks.map((e) => ({ ...e, kind: 'video' })),
+          ...achunks.map((e) => ({ ...e, kind: 'audio' })),
+        ].sort((a, b) => a.t - b.t || (a.kind === 'video' ? -1 : 1));
+        for (const entry of ordered) {
+          if (entry.kind === 'video') fixtureMuxer.addVideoChunk(entry.c, entry.m);
+          else fixtureMuxer.addAudioChunk(entry.c, entry.m);
+        }
+        fixtureMuxer.finalize();
+        const url = URL.createObjectURL(new Blob([target.buffer], { type: 'video/webm' }));
+
+        // ---- the copy ----
+        const started = performance.now();
+        const result = await mod.buildPreviewProxy({ url, size: { width: 160, height: 90 }, fps: 30 });
+        const copySeconds = (performance.now() - started) / 1000;
+
+        // ---- what the copy sounds like: decoded back, and measured rather than eyeballed ----
+        let rms = 0;
+        try {
+          const context = new AudioContext();
+          const decoded = await context.decodeAudioData(await result.blob.arrayBuffer());
+          const channel = decoded.getChannelData(0);
+          let sum = 0;
+          for (let i = 0; i < channel.length; i++) sum += channel[i] * channel[i];
+          rms = Math.sqrt(sum / Math.max(1, channel.length));
+          context.close();
+        } catch (err) {
+          rms = -1;
+        }
+
+        // ---- how the copy plays: every frame the browser actually presents ----
+        const copyUrl = URL.createObjectURL(result.blob);
+        const player = document.createElement('video');
+        player.muted = true;
+        player.playsInline = true;
+        player.preload = 'auto';
+        player.src = copyUrl;
+        player.style.cssText = 'position:fixed;left:-10000px;top:0;width:2px;height:2px;opacity:0;';
+        document.body.appendChild(player);
+        await new Promise((resolve) => player.addEventListener('loadedmetadata', resolve, { once: true }));
+        let playedFrames = 0;
+        const count = () => {
+          playedFrames += 1;
+          if (!player.ended) player.requestVideoFrameCallback(count);
+        };
+        player.requestVideoFrameCallback(count);
+        await player.play();
+        await new Promise((resolve) => {
+          player.addEventListener('ended', resolve, { once: true });
+          setTimeout(resolve, 6000);
+        });
+        const playedFor = player.currentTime;
+        player.pause();
+        player.remove();
+        URL.revokeObjectURL(copyUrl);
+        URL.revokeObjectURL(url);
+
+        return {
+          bytes: result.blob.size,
+          width: result.width,
+          height: result.height,
+          seconds: Number(result.seconds.toFixed(2)),
+          sourceSeconds: Number(result.sourceSeconds.toFixed(2)),
+          audio: result.audio,
+          audioError: result.audioError,
+          mimeType: result.mimeType,
+          codec: result.codec,
+          frames: result.frames,
+          decoderFrames: result.presented,
+          averageFps: result.averageFps,
+          summary: result.summary,
+          copySeconds: Number(copySeconds.toFixed(2)),
+          rms: Number(rms.toFixed(4)),
+          playedFor: Number(playedFor.toFixed(2)),
+          playedFrames,
+        };
+      } catch (err) {
+        return { error: String((err && err.message) || err) };
+      }
+    })()`,
+    { timeout: 120 },
+  );
+  if (proxyRun?.skipped) {
+    console.log('  \u2022 skipped \u2014 this browser has no WebCodecs VideoEncoder');
+  } else if (proxyRun?.error) {
+    assert('a preview copy can be built from the loaded picture', false, proxyRun.error);
+  } else {
+    assert(
+      'a smaller copy of the picture really is produced, here, from the file that is loaded',
+      proxyRun.bytes > 2000 && proxyRun.width === 160 && proxyRun.height === 90,
+      `got ${JSON.stringify(proxyRun)}`,
+    );
+    assert(
+      'and it runs for about as long as the picture it was copied from',
+      proxyRun.sourceSeconds > 3.5 && Math.abs(proxyRun.seconds - proxyRun.sourceSeconds) < 0.5,
+      `the copy is ${proxyRun.seconds}s of a ${proxyRun.sourceSeconds}s picture`,
+    );
+    assert(
+      'the copy holds the frames the decoder gave up, not the ones a clock asked for',
+      proxyRun.frames >= 100 && proxyRun.frames <= proxyRun.decoderFrames && proxyRun.decoderFrames > 0,
+      `${proxyRun.frames} frame(s) encoded of ${proxyRun.decoderFrames} presented`,
+    );
+    assert(
+      'the copy carries the picture\u2019s own soundtrack, and it is not silence',
+      proxyRun.audio === true && proxyRun.rms > 0.02,
+      `audio=${proxyRun.audio}, rms=${proxyRun.rms}${proxyRun.audioError ? `, the encoder said: ${proxyRun.audioError}` : ''}`,
+    );
+    assert(
+      'and the copy itself plays without dropping frames \u2014 measured, not assumed',
+      proxyRun.playedFrames >= 80 && proxyRun.playedFor >= 3.5,
+      `the copy presented ${proxyRun.playedFrames} frame(s) over ${proxyRun.playedFor}s`,
+    );
+    console.log(
+      `  \u2022 the copy: ${proxyRun.width}\u00d7${proxyRun.height} ${proxyRun.codec}, ${proxyRun.bytes} bytes, ` +
+        `${proxyRun.seconds}s of ${proxyRun.sourceSeconds}s, sound ${proxyRun.audio ? `captured (rms ${proxyRun.rms})` : 'not captured'}, ${proxyRun.mimeType}`,
+    );
+    console.log(`  \u2022 ${proxyRun.summary}; encoded in ${proxyRun.copySeconds}s`);
+    console.log(
+      `  \u2022 played back: ${proxyRun.playedFrames} frames over ${proxyRun.playedFor}s ` +
+        `(${(proxyRun.playedFrames / Math.max(0.01, proxyRun.playedFor)).toFixed(1)} fps)`,
+    );
+  }
+  await check(
+    cdp,
+    'building a copy does not disturb the picture already on screen',
+    'document.querySelector("#preview-video").src',
+    (v) => v === sourceSrcBefore,
+  );
 
   console.log('\n■ console health');
   await check(cdp, 'the font-size readout resolved to pixels', '/\\d+px/.test(document.querySelector("#size-out").textContent)');

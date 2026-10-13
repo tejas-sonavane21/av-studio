@@ -385,7 +385,23 @@ test('playback stops at the last frame the cut kept instead of running into mate
 
   assert.equal(preview.playing, false, 'the transport stopped rather than sailing past the cut');
   assert.equal(video.paused, true);
-  assert.ok(video.pauseCalls >= 1);
+  // Parked past the end of its kept material, the element is never started at all: `play()` on a
+  // picture with nothing left to show is what used to run the preview through the dropped seconds.
+  assert.equal(video.playCalls, 0);
+});
+
+// The same cut, reached *while playing*, which is the case a person actually sees. Here the element is
+// mid-file and has to be stopped on the spot — it knows nothing about the cut and would otherwise carry
+// on into the removed seconds until the next pass around the loop.
+test('a picture that reaches the end of its kept material is paused where it stands', async () => {
+  const video = fakeVideo({ duration: 5, currentTime: 2.5 });
+  video.paused = false; // already decoding when the frame is drawn
+  const { preview } = await mountWithCut(video, 5, [{ id: 'keep', srcIn: 0, srcOut: 2 }]);
+
+  runLoop(preview);
+
+  assert.ok(video.pauseCalls >= 1, 'the decoder was stopped, not left decoding frames the cut removed');
+  assert.equal(preview.playing, false, 'and the transport stopped with it — no other lane has material');
 });
 
 test('playback jumps a region the cut removed rather than playing it', async () => {

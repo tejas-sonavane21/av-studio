@@ -27,9 +27,20 @@ import { toHexColor } from './util/color.js';
 import { parseSRT } from './io/srt.js';
 import { parseVTT } from './io/vtt.js';
 import { importJSON } from './io/project-file.js';
-import { describeStudioAudit, health, listRuns, openRun, optionsFor, transcribeFile } from './io/audio-studio-client.js';
+import {
+  baseName,
+  describeStudioAudit,
+  fetchArtifact,
+  health,
+  listRuns,
+  openRun,
+  optionsFor,
+  transcribeFile,
+} from './io/audio-studio-client.js';
 import { captionFiles, downloadBlob, downloadText, exportStem } from './io/download.js';
 import { exportDocumentToVideo } from './io/webcodecs-export.js';
+import { createPreviewSource } from './io/preview-source.js';
+import { buildPreviewProxy, needsProxy, proxySize, proxySupported } from './io/preview-proxy.js';
 import { defaultExportSettings, encoderSettings, outputSize } from './io/export-settings.js';
 import { alignCaptions } from './align/aligner.js';
 import { validateDocument } from './model/document.js';
@@ -39,7 +50,18 @@ import { createDemoDocument } from './model/demo.js';
 import { joinBlockWithPrevious, setBlockText, setWordText, splitBlock, splitBlockAtTime } from './model/edit.js';
 import { createPreview } from './editor/preview.js';
 import { createCanvasOverlay } from './editor/canvas-overlay.js';
+import { createMediaLibrary } from './editor/media-library.js';
 import { createTimeline } from './editor/timeline.js';
+import {
+  addMediaClip,
+  clipLength,
+  describeClip,
+  mediaClips,
+  moveMediaClip,
+  planClip,
+  removeMediaClip,
+  trimMediaClip,
+} from './model/media.js';
 import { createExportDialog } from './editor/export-dialog.js';
 import {
   TIMELINE_TRACKS,
@@ -96,6 +118,14 @@ const store = createStore({ video: null, audio: null, aiDoc: null, truthCues: nu
 
 let videoUrl = null;
 let audioUrl = null;
+// The copy of the picture the preview may be playing, if one has been made. Revoked and replaced
+// whenever a new one is built, and on unloading a picture.
+let proxyUrl = null;
+let proxyBuilding = false;
+let proxyController = null;
+// Which picture is on screen against which one the export encodes — the two are deliberately
+// different once a preview copy exists. See `io/preview-source.js`.
+const previewSource = createPreviewSource();
 let preview = null;
 let overlay = null;
 let timeline = null;
@@ -119,6 +149,13 @@ let aspectLocked = false;
 // Which video/audio clip the timeline has selected — `{ track, id }`. The cut commands that act on
 // "the selected clip" read this; ones that act on the whole programme ignore it.
 let selectedClip = null;
+// The overlay clip the strip has selected (`doc.media`), if any. Kept apart from `selectedClip` because
+// the two are not interchangeable: a cut clip is part of the one source file (so `Delete` removes a
+// range of it), while an overlay clip is a whole object in the document (so `Delete` removes it).
+let selectedMediaClipId = null;
+// The files behind the overlay clips, keyed by clip id. The document stores timing and placement; this
+// holds the bytes, for this session only.
+const mediaLibrary = createMediaLibrary();
 
 // ---------------------------------------------------------------------------
 // logging + status
@@ -288,6 +325,99 @@ function refreshAlignButton() {
 }
 
 // ---------------------------------------------------------------------------
+// a finished run, reflected back into Sources
+// ---------------------------------------------------------------------------
+
+/**
+ * Put a file into a `<input type="file">`, exactly as the user's own picker would.
+ *
+ * A page cannot set `input.files` directly; a `DataTransfer` can, and it is the documented way — so
+ * the input is left holding a real `File`, which is what every handler downstream already expects.
+ * Dispatching `change` afterwards is not decoration: it is what makes the panel behave identically
+ * whether the file came from the run or from a folder, which is the whole point of filling it in.
+ *
+ * @returns {boolean} whether the file is now in the input
+ */
+function fillSourceInput(selector, file) {
+  const input = $(selector);
+  if (!input || !file) {
+    log(`  ⚠ could not fill ${selector}: ${input ? 'no file was fetched' : 'that field is not on the page'}`);
+    return false;
+  }
+  try {
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+  } catch (err) {
+    log(`  ⚠ could not put ${file.name} into ${selector}: ${err.message}`);
+    return false;
+  }
+  input.dispatchEvent(new Event('change'));
+  return true;
+}
+
+/** A string as a `File`, so an artifact fetched over HTTP can go where a chosen file goes. */
+function textAsFile(name, text, type = 'text/plain') {
+  return new File([text], name, { type });
+}
+
+/** The stem a run's own files are named after, taken from the artifact it actually wrote. */
+function runStem(job, fallback = 'captions') {
+  const name = baseName(job?.files?.veed ?? '');
+  return name ? name.replace(/\.veed\.json$/i, '') : fallback;
+}
+
+/**
+ * Fill the Sources panel from a run that finished.
+ *
+ * Transcription is the one step that already produced files, and until now the panel that *consumes*
+ * them was left empty: the recording was loaded automatically and the two files the run wrote were
+ * not, so "load the AI source" meant remembering which job folder held them. The panel is the place a
+ * person goes next, so the run's own artifacts land in it:
+ *
+ * * **AI source** — the run's Veed master JSON: the timing the whole editor is built around;
+ * * **TRUTH source** — the run's own SRT.
+ *
+ * The TRUTH file is the studio's own SRT **on purpose**, and not the lyric sheet the run was given.
+ * The two are not the same document even when they read the same: the lyrics are the words that were
+ * *asked for*, while the SRT is what the studio actually produced from the recording — transcribed
+ * against the audio, aligned word by word, validated, and reconciled with those lyrics. Measured on
+ * this project's own material, the studio's file is the better spelling authority of the two, and it
+ * is the one that carries the words the captions actually had. The supplied lyrics are not thrown
+ * away: they went to the run as its reference, which is what makes the SRT good in the first place.
+ *
+ * A person can still point TRUTH at any file by hand — that is what the field is for — and this only
+ * decides what is filled in for them.
+ *
+ * Nothing here is guessed at: each artifact is fetched from the job that just finished, and a file that
+ * cannot be fetched says so instead of leaving a field that looks loaded.
+ *
+ * @returns {Promise<string[]>} what was filled in, for a log line and the panel's own message
+ */
+async function reflectRunInSources({ base, jobId, job, stem }) {
+  const filled = [];
+  const name = runStem(job, stem);
+  try {
+    const veed = await fetchArtifact(base, jobId, 'veed');
+    if (fillSourceInput('#ai-in', textAsFile(`${name}.veed.json`, veed, 'application/json'))) {
+      filled.push('AI source');
+    }
+  } catch (err) {
+    log(`  ⚠ the run's Veed JSON could not be fetched: ${err.message}`);
+  }
+
+  try {
+    const srt = await fetchArtifact(base, jobId, 'srt');
+    if (fillSourceInput('#truth-in', textAsFile(`${name}.srt`, srt, 'application/x-subrip'))) {
+      filled.push(`TRUTH source (${name}.srt from the run)`);
+    }
+  } catch (err) {
+    log(`  ⚠ the run's SRT could not be fetched: ${err.message}`);
+  }
+  return filled;
+}
+
+// ---------------------------------------------------------------------------
 // sources
 // ---------------------------------------------------------------------------
 
@@ -301,9 +431,15 @@ async function onVideo(file) {
   const video = $('#preview-video');
   if (videoUrl) URL.revokeObjectURL(videoUrl);
   videoUrl = URL.createObjectURL(file);
+  // A new picture starts un-copied: the old copy is a copy of *another* file, and the export must be
+  // reading this one. Its size and length are filled in when the element has read its metadata.
+  previewSource.setOriginal({ name: file.name, url: videoUrl });
+  refreshProxyControls();
   preview?.setVideo(video);
   video.src = videoUrl;
   video.load();
+  // The stale copy's URL is revoked only once the element has been moved off it.
+  dropProxy();
   $('#play-btn').disabled = false;
   $('#video-toggle').checked = true;
   preview?.setVideoVisible(true);
@@ -319,6 +455,10 @@ async function onVideo(file) {
       $('#video-note').textContent =
         `${file.name} — ${video.videoWidth}×${video.videoHeight}, ${video.duration.toFixed(2)}s, ` +
         `${(file.size / 1e6).toFixed(1)} MB`;
+      // The export's own numbers. Read from the file, never from whatever the preview element is
+      // playing: once a copy exists the element is smaller than the master.
+      previewSource.setOriginalSize({ width: video.videoWidth, height: video.videoHeight, duration: video.duration });
+      refreshProxyControls();
       reportMediaLengths();
       const doc = preview?.document;
       if (doc) {
@@ -340,6 +480,180 @@ async function onVideo(file) {
     },
     { once: true },
   );
+}
+
+// ---------------------------------------------------------------------------
+// the picture's own cost — a smaller copy, for the preview only
+// ---------------------------------------------------------------------------
+
+/**
+ * The four things that decide whether a copy is worth offering: is there a picture, is it big, will
+ * the browser let one be made, and is there one already.
+ */
+function refreshProxyControls() {
+  const build = $('#proxy-build');
+  const clear = $('#proxy-clear');
+  if (!build || !clear) return;
+  const picture = previewSource.original;
+  const worthwhile = Boolean(picture) && needsProxy(picture.width, picture.height) && proxySupported();
+  build.disabled = proxyBuilding || !worthwhile || previewSource.proxied;
+  clear.disabled = proxyBuilding || !previewSource.proxied;
+  if (proxyBuilding) {
+    build.textContent = 'Copying…';
+    return;
+  }
+  build.textContent = 'Build smooth preview copy';
+  if (picture && !previewSource.proxied) {
+    const size = proxySize(picture.width, picture.height);
+    if (size && worthwhile) build.textContent = `Build smooth preview copy (${size.width}×${size.height})`;
+  }
+}
+
+function setProxyNote(text) {
+  const note = $('#proxy-note');
+  if (note) note.textContent = text;
+}
+
+/** Forget the copy: revoke its URL and point the preview back at the file the user loaded. */
+function dropProxy() {
+  if (proxyUrl) URL.revokeObjectURL(proxyUrl);
+  proxyUrl = null;
+  previewSource.clearProxy();
+}
+
+/**
+ * Play the element from `url`, keeping the playhead where it was.
+ *
+ * Swapping a `<video>`'s source resets it to zero, and a preview that jumps back to the first caption
+ * every time its picture is swapped is a preview nobody can check a cut against — so the time the user
+ * was parked on is restored as soon as the new source can be seeked.
+ */
+function usePictureUrl(url, { restore = null, label = '' } = {}) {
+  const video = $('#preview-video');
+  if (!video || !url) return;
+  video.addEventListener(
+    'loadedmetadata',
+    () => {
+      if (restore != null) preview?.seek(restore);
+      if (label) log(label);
+    },
+    { once: true },
+  );
+  video.src = url;
+  video.load();
+  preview?.setVideo(video);
+}
+
+/**
+ * Re-encode a smaller copy of the picture, in the browser, for the preview to play.
+ *
+ * Explicitly a user action and not something that happens on load: on a three-minute 4K file it takes
+ * about as long as the clip plays, which is a cost nobody should pay without asking. What it fixes is
+ * measured, not asserted — the transport's frame rate against the decoder's, in `tools/preview-perf.mjs`.
+ */
+async function onBuildProxy() {
+  const picture = previewSource.original;
+  if (!picture || proxyBuilding) return;
+  const size = proxySize(picture.width, picture.height);
+  if (!size) return;
+
+  const at = preview?.currentTime() ?? 0;
+  const wasPlaying = Boolean(preview?.playing);
+  preview?.pause();
+
+  proxyBuilding = true;
+  const controller = new AbortController();
+  proxyController = controller;
+  refreshProxyControls();
+  setProxyNote('copying — this plays the clip through once, with the sound off');
+  log(
+    `preview copy: re-encoding ${picture.width}×${picture.height} → ${size.width}×${size.height} in this browser ` +
+      `(${(picture.duration || 0).toFixed(1)}s — one pass over the clip; the encoding itself is not on the clock, ` +
+      'so no frames are dropped to keep up). The export is untouched.',
+  );
+  stateOf('sources', 'busy', 'copying…', `Making a ${size.width}×${size.height} copy of the picture for the preview.`);
+
+  try {
+    const result = await buildPreviewProxy({
+      url: previewSource.exportUrl,
+      size,
+      signal: controller.signal,
+      onProgress: (fraction, message) => setProxyNote(`${message} (${Math.round(fraction * 100)}%)`),
+    });
+    if (proxyUrl) URL.revokeObjectURL(proxyUrl);
+    proxyUrl = URL.createObjectURL(result.blob);
+    previewSource.setProxy({
+      url: proxyUrl,
+      width: result.width,
+      height: result.height,
+      seconds: result.seconds,
+      bytes: result.blob.size,
+      mimeType: result.mimeType,
+      audio: result.audio,
+      frames: result.frames,
+      averageFps: result.averageFps,
+    });
+    usePictureUrl(proxyUrl, {
+      restore: at,
+      label: `preview copy: playing the ${result.width}×${result.height} copy (${(result.blob.size / 1e6).toFixed(1)} MB)`,
+    });
+    log(
+      `preview copy: ready — ${result.width}×${result.height}, ${(result.blob.size / 1e6).toFixed(1)} MB, ` +
+        `${result.codec}${result.audio ? ' + opus' : ' (no sound captured)'}, ${result.encodeSeconds}s to encode`,
+    );
+    // The frames the copy holds, against the frames the picture presented. This is the number that
+    // separates a stutter that came with the file from one the copy introduced — the two used to be
+    // indistinguishable, which is how a copy *choppier* than the original went unnoticed.
+    if (result.summary) log(`  ${result.summary}`);
+    if (!result.audio && result.audioError) log(`  ⚠ the copy has no sound: ${result.audioError}`);
+    if (result.drift) log(`  ⚠ ${result.drift}`);
+    setProxyNote(previewSource.describe());
+    stateOf(
+      'sources',
+      'ok',
+      'copy ready',
+      `The preview is playing a ${result.width}×${result.height} copy, so the transport has less to decode.\n` +
+        `The export still encodes the original ${picture.width}×${picture.height} file, with every cut applied.` +
+        (result.drift ? `\n⚠ ${result.drift}` : ''),
+    );
+    if (wasPlaying) preview?.start();
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      log('preview copy: stopped — the preview is still on the original');
+      setProxyNote('the copy was stopped. The preview is still on the original file.');
+      stateOf('sources', 'warn', 'copy stopped', 'The preview copy was stopped, so the preview is still playing the original.');
+    } else {
+      log(`ERROR preview copy: ${err.message}`);
+      setProxyNote(`the copy could not be made: ${err.message}`);
+      stateOf('sources', 'failed', 'copy failed', `The preview copy could not be made.\n${err.message}`);
+    }
+  } finally {
+    proxyBuilding = false;
+    if (proxyController === controller) proxyController = null;
+    refreshProxyControls();
+    setStatus('idle');
+  }
+}
+
+/**
+ * Go back to the original file on the preview.
+ *
+ * The element is pointed at the original *first* and the copy's URL revoked after, so the browser is
+ * never asked to keep playing a blob that has just been released.
+ */
+function onClearProxy() {
+  if (!previewSource.proxied) return;
+  const at = preview?.currentTime() ?? 0;
+  const original = previewSource.original;
+  preview?.pause();
+  usePictureUrl(original?.url, { restore: at, label: 'preview copy: back on the original picture' });
+  dropProxy();
+  refreshProxyControls();
+  setProxyNote(
+    `${original?.name || 'the picture'} — previewing the original, ${original?.width}×${original?.height}. ` +
+      'A copy can be built again at any time.',
+  );
+  stateOf('sources', 'ok', 'original', 'The preview is back on the original picture.');
 }
 
 /**
@@ -395,6 +709,234 @@ async function onAudio(file) {
     },
     { once: true },
   );
+}
+
+// ---------------------------------------------------------------------------
+// overlay clips — pictures and videos laid over the programme
+// ---------------------------------------------------------------------------
+
+/**
+ * Republish the overlay clips, in one place.
+ *
+ * Three views of the same list — the preview's clip layer, the strip's lane, and the panel's rows — and
+ * they drift the moment one of them is updated without the others. Same rule as `syncTimeline()`: one
+ * function, called after any edit, from `doc.media` alone.
+ */
+function syncMedia() {
+  const doc = preview?.document;
+  const clips = doc ? mediaClips(doc) : [];
+  preview?.setMedia(clips, (id) => mediaLibrary.element(id));
+  timeline?.setMediaClips(clips);
+  timeline?.setMediaOffline(mediaLibrary.missing(clips.map((clip) => clip.id)));
+  timeline?.setSelectedMediaClip(selectedMediaClipId);
+  renderMediaList();
+  return clips;
+}
+
+/**
+ * Point the clip layer at a document that has just been shown.
+ *
+ * The files stay loaded only if the new document still refers to them: a `.caproj` opened over another
+ * one carries its own clip ids, and leaving the previous project's bytes in the registry would let a
+ * clip draw from a file nobody chose. Everything else is released, and the clips that have no file come
+ * back as "offline" — a real state the panel can state (see `Relink`).
+ */
+function adoptMedia(doc) {
+  const wanted = new Set(mediaClips(doc).map((clip) => clip.id));
+  for (const id of mediaLibrary.ids()) if (!wanted.has(id)) mediaLibrary.remove(id);
+  if (selectedMediaClipId && !wanted.has(selectedMediaClipId)) selectedMediaClipId = null;
+  return syncMedia();
+}
+
+/**
+ * Load files as overlay clips, each placed at the playhead.
+ *
+ * One loop over what was selected, and one failure never stops the rest — the same shape as every other
+ * multi-file path here. A file that is not an image or a video is refused with a sentence naming it
+ * rather than being added as a clip that can never draw.
+ */
+async function onMediaFiles(files) {
+  const list = [...(files ?? [])];
+  if (!list.length) return;
+  // The input is cleared as soon as its files have been copied out, so choosing the same file twice in
+  // a row adds it twice: a file input whose value has not changed fires no event at all.
+  $('#media-in').value = '';
+  const doc = preview?.document;
+  if (!doc) {
+    log('ERROR clip: there is no programme to place a clip on — load a source, or open the demo');
+    stateOf(
+      'sources',
+      'warn',
+      'no programme',
+      'An overlay clip is placed on a programme. Load an AI source and run the correction, open a ' +
+        'project, or open the demo first.',
+    );
+    return;
+  }
+
+  setStatus('reading clips…');
+  const at = Math.max(0, preview?.currentTime() ?? 0);
+  let added = 0;
+  for (const file of list) {
+    const result = await mediaLibrary.add(file);
+    if (!result.ok) {
+      log(`ERROR clip: ${result.error}`);
+      continue;
+    }
+    const entry = result.entry;
+    const clip = planClip({ entry, at, canvas: doc.canvas, limit: preview?.duration() ?? 0, id: entry.id });
+    if (!clip) {
+      // Nothing usable came back, so the file is released again rather than left loaded for a clip
+      // that does not exist.
+      mediaLibrary.remove(entry.id);
+      log(`ERROR clip: "${entry.name}" has no usable time window`);
+      continue;
+    }
+    addMediaClip(doc, clip);
+    added += 1;
+    log(`clip added: ${describeClip(clip)}${clip.kind === 'video' ? ' (silent)' : ''}`);
+  }
+  setStatus('idle');
+  syncMedia();
+  if (added) {
+    stateOf(
+      'sources',
+      'ok',
+      `${added} clip${added === 1 ? '' : 's'}`,
+      `${added} overlay clip${added === 1 ? '' : 's'} added at ${at.toFixed(2)}s. Drag a clip along the ` +
+        'Clips lane in the timeline to move it, or drag its edges to trim it. Clips are silent.',
+    );
+    // Showing the clip is the point of adding it, so the playhead goes to where it now is.
+    preview?.seek(at + 0.01);
+  }
+}
+
+/** Take a clip off the programme, and release its file with it. */
+function removeClip(id) {
+  const doc = preview?.document;
+  const clip = mediaClips(doc).find((c) => c.id === id);
+  if (!doc || !clip || !removeMediaClip(doc, id)) return false;
+  mediaLibrary.remove(id);
+  if (selectedMediaClipId === id) selectedMediaClipId = null;
+  log(`clip removed: "${clip.name}" (${(clip.end - clip.start).toFixed(2)}s at ${clip.start.toFixed(2)}s)`);
+  syncMedia();
+  return true;
+}
+
+/**
+ * Give a clip back its file, in place.
+ *
+ * The project stores the clip — its window, its box, its id — and not the bytes, so this is how a
+ * project saved yesterday is made whole today. The clip is rebuilt rather than patched, because the new
+ * file may be a different *kind* (an image standing in for a video), and `updateMediaClip` deliberately
+ * keeps the original kind: an edit must not turn a clip into another sort of thing by accident.
+ */
+async function relinkClip(id, file) {
+  if (!file) return;
+  const doc = preview?.document;
+  const before = mediaClips(doc).find((clip) => clip.id === id);
+  if (!doc || !before) return;
+  const result = await mediaLibrary.add(file, { id });
+  if (!result.ok) {
+    log(`ERROR clip: ${result.error}`);
+    renderMediaList();
+    return;
+  }
+  const entry = result.entry;
+  removeMediaClip(doc, id);
+  addMediaClip(doc, { ...before, kind: entry.kind, name: entry.name });
+  log(`clip relinked: "${before.name}" ← "${entry.name}" (${entry.width}×${entry.height})`);
+  selectMediaClip(id);
+}
+
+/** Select an overlay clip, everywhere it is shown. */
+function selectMediaClip(id) {
+  selectedMediaClipId = id ?? null;
+  timeline?.setSelectedMediaClip(selectedMediaClipId);
+  renderMediaList();
+  const clip = mediaClips(preview?.document).find((c) => c.id === id);
+  if (clip) {
+    log(`clip: selected "${clip.name}" ${clip.start.toFixed(2)}s → ${clip.end.toFixed(2)}s`);
+    // A clip is only visible while the playhead is inside it, so selecting one parks the playhead just
+    // inside its window. Selecting something you cannot see is a click that appears to do nothing.
+    preview?.seek(clip.start + 0.01);
+  }
+  return clip;
+}
+
+/** A drag on an overlay clip's edge. Applied live, so the strip and the list follow the pointer. */
+function onMediaClipTrim(id, edge, seconds) {
+  const doc = preview?.document;
+  if (!doc) return;
+  trimMediaClip(doc, id, edge, seconds);
+  syncMedia();
+}
+
+/** A drag on an overlay clip's body: a new start on the source clock, keeping its length. */
+function onMediaClipMove(id, start) {
+  const doc = preview?.document;
+  const clip = mediaClips(doc).find((c) => c.id === id);
+  if (!doc || !clip) return;
+  const delta = start - clip.start;
+  if (Math.abs(delta) < 1e-9) return;
+  moveMediaClip(doc, id, delta);
+  syncMedia();
+}
+
+/** One row of the clip list: what it is, when it runs, and the two things you can do to it. */
+function mediaRow(clip) {
+  const row = el('div', 'clip-row');
+  row.dataset.clipId = clip.id;
+  if (clip.id === selectedMediaClipId) row.classList.add('active');
+
+  const name = el('button', 'clip-name', `${clip.kind === 'video' ? '\u25b6' : '\u25a2'} ${clip.name}`);
+  name.title =
+    `${clip.kind} · ${clipLength(clip).toFixed(2)}s · ${clip.start.toFixed(2)}s → ${clip.end.toFixed(2)}s\n` +
+    'click to select it (the playhead moves to it)';
+  name.addEventListener('click', () => selectMediaClip(clip.id));
+
+  const where = el('span', 'clip-where mono', `${clip.start.toFixed(2)}–${clip.end.toFixed(2)}s`);
+
+  const actions = el('span', 'clip-actions');
+  if (!mediaLibrary.has(clip.id)) {
+    // The clip is in the programme but its bytes are not in this session. Drawn, so the programme is
+    // honest about what it contains, and relinkable rather than silently empty.
+    row.classList.add('offline');
+    const relink = el('label', 'clip-relink', 'Relink');
+    relink.title = `Choose the file for "${clip.name}" again — a project stores the clip, not its bytes`;
+    const input = el('input');
+    input.type = 'file';
+    input.accept = 'image/*,video/*';
+    input.addEventListener('change', () => relinkClip(clip.id, input.files?.[0]));
+    relink.append(input);
+    actions.append(el('span', 'clip-offline', 'offline'), relink);
+  }
+  const remove = el('button', 'clip-remove', '\u00d7');
+  remove.title = 'Remove this clip from the programme';
+  remove.addEventListener('click', () => removeClip(clip.id));
+  actions.append(remove);
+
+  row.append(name, where, actions);
+  return row;
+}
+
+/** The clip list under the file input: one row per clip, plus the count in the hint. */
+function renderMediaList() {
+  const host = $('#media-list');
+  if (!host) return;
+  const clips = mediaClips(preview?.document);
+  if (!clips.length) {
+    host.replaceChildren(el('div', 'empty', '—'));
+  } else {
+    host.replaceChildren(...clips.map(mediaRow));
+  }
+  const offline = clips.filter((clip) => !mediaLibrary.has(clip.id)).length;
+  const note = $('#media-note');
+  if (note) {
+    note.textContent = !clips.length
+      ? 'Images and videos drawn over the picture, under the captions. They are silent — the master track under Audio is the programme\u2019s sound. No clips loaded.'
+      : `${clips.length} clip${clips.length === 1 ? '' : 's'} over the picture${offline ? `, ${offline} with no file loaded (Relink to bring it back)` : ''}. Drag along the Clips lane to move, drag the edges to trim.`;
+  }
 }
 
 async function onAi(file) {
@@ -453,6 +995,86 @@ let transcribing = false;
  * disk goes through, so the alignment and editing that follow are exactly the ones that already
  * worked.
  */
+// ---------------------------------------------------------------------------
+// presets — which model a run actually loads
+// ---------------------------------------------------------------------------
+
+/**
+ * What the server says each preset runs: `[]` until it has been asked.
+ *
+ * A preset id is a speed/accuracy trade-off, and the two things that decide whether a run works are
+ * which model it loads and whether this machine already has that model. The panel used to offer
+ * "balanced — small model", which answers neither — `balanced` is not a model and "small" is not a
+ * file. The server's `presetDetails` is the answer (`audio_studio/models.py` builds it), and the
+ * static labels in `index.html` stand in until the first probe.
+ */
+let presetDetails = [];
+
+/** One preset in a sentence: what it loads, how big it is, and whether it is already here. */
+function describePresetRun(presetId) {
+  const row = presetDetails.find((entry) => entry.id === presetId);
+  if (!row) return null;
+  const size = row.params ? `, ${row.params} parameters` : '';
+  const state =
+    row.downloaded === true
+      ? 'That model is already downloaded on this machine'
+      : row.downloaded === false
+        ? `That model is NOT downloaded yet — the first run fetches ${row.repo} from the hub`
+        : 'The server did not say whether that model is downloaded here';
+  return (
+    `Preset ${row.id} runs ${row.modelName} — ${row.repo}${size}, ${row.languages}. ${state}` +
+    (row.note ? ` — ${row.note}.` : '.')
+  );
+}
+
+function setModelNote(text) {
+  const note = $('#transcribe-model-note');
+  if (note) note.textContent = text;
+}
+
+/**
+ * Re-read the note for the preset that is selected.
+ *
+ * Silent when the server has not been asked yet: the static sentence in the page is better than
+ * replacing it with nothing, and "ask the server" is already the button right above it.
+ */
+function refreshModelNote() {
+  const select = $('#transcribe-preset');
+  if (!select) return;
+  const text = describePresetRun(select.value);
+  if (text) setModelNote(text);
+}
+
+/**
+ * Rebuild the preset menu from the server's answer, download state included.
+ *
+ * The ids are the server's contract and do not change; what changes is that the label now names the
+ * model, so choosing "accurate" no longer means picking between three words that say nothing about
+ * what is about to run. An unrecognised current value falls back to the default rather than silently
+ * selecting whatever happens to be first.
+ */
+function rebuildPresetOptions(info) {
+  const rows = Array.isArray(info?.presetDetails) ? info.presetDetails : [];
+  if (!rows.length) return;
+  const select = $('#transcribe-preset');
+  if (!select) return;
+  const wanted = select.value;
+  const label = (row) => {
+    const mark = row.downloaded === true ? ' · downloaded' : row.downloaded === false ? ' · will download' : '';
+    return `${row.id} — ${row.modelName}${row.params ? `, ${row.params}` : ''}${mark}`;
+  };
+  select.replaceChildren(
+    ...rows.map((row) => {
+      const option = el('option', null, label(row));
+      option.value = row.id;
+      return option;
+    }),
+  );
+  if (rows.some((row) => row.id === wanted)) select.value = wanted;
+  else if (rows.some((row) => row.id === 'balanced')) select.value = 'balanced';
+  refreshModelNote();
+}
+
 function setTranscribeNote(text) {
   $('#transcribe-note').textContent = text;
 }
@@ -508,9 +1130,26 @@ async function onTranscribeProbe() {
     badge.textContent = `audio-studio ${info.version}`;
     log(`audio-studio ${info.version} — engines: ${engines.join(', ') || 'none'}`);
     log(`  aligners: ${aligners.join(', ') || 'none'} · validators: ${validators.join(', ') || 'none'}`);
+
+    // The models behind the presets, and whether this machine already has them. That is the one
+    // difference that has already made the same commit behave differently on two machines, so it is
+    // said here — before a job is queued — rather than surfacing as a hub download that fails
+    // halfway through one. `audio_studio/models.py` builds it; the option labels are rebuilt from it.
+    presetDetails = Array.isArray(info.presetDetails) ? info.presetDetails : [];
+    rebuildPresetOptions(info);
+    const presetLines = presetDetails.map((row) => {
+      const mark = row.downloaded === true ? 'downloaded' : row.downloaded === false ? 'NOT downloaded yet' : 'unknown';
+      return `  ${row.id}: ${row.modelName} (${row.repo}) — ${mark}`;
+    });
+    for (const line of presetLines) log(line);
+    const toFetch = presetDetails.filter((row) => row.downloaded === false).map((row) => row.id);
+    if (toFetch.length) {
+      log(`  ⚠ not downloaded on this machine yet: ${toFetch.join(', ')} — that preset fetches its model on the first run`);
+    }
     if (pins) log(`  ⚠ ${pins}`);
     setTranscribeNote(
       `audio-studio ${info.version} is up.\npresets: ${(info.presets ?? []).join(', ')} (default ${info.defaultPreset})\n` +
+        `${presetLines.join('\n')}\n` +
         `aligners: ${aligners.join(', ') || 'none'}   validators: ${validators.join(', ') || 'none'}` +
         (pins ? `\n\n⚠ ${pins}` : ''),
     );
@@ -592,6 +1231,14 @@ async function onOpenRun() {
     store.setState({ aiDoc: doc });
     const words = doc.blocks.reduce((n, b) => n + b.words.length, 0);
     await showDocument(doc, `an existing run's captions → ${doc.blocks.length} blocks`);
+    // An opened run gets the same treatment as a fresh one: its Veed master and its SRT go into
+    // Sources, so "open an existing run" ends somewhere usable instead of in an empty panel.
+    const filled = await reflectRunInSources({
+      base: $('#transcribe-url').value,
+      jobId,
+      job,
+    });
+    if (filled.length) log(`sources: ${filled.join(' + ')} filled in from this run`);
     const audit = describeStudioAudit(job);
     for (const line of audit) log(`  ${line}`);
     stateOf(
@@ -599,7 +1246,8 @@ async function onOpenRun() {
       'ok',
       'opened',
       `Opened ${label} — ${doc.blocks.length} captions, ${words} words (${kind}), read from the ` +
-        "server's own output. Nothing was transcribed again.",
+        "server's own output. Nothing was transcribed again." +
+        (filled.length ? `\nSources: ${filled.join(' + ')} filled in from this run.` : ''),
     );
   } catch (err) {
     log(`ERROR runs: ${err.toString()}`);
@@ -705,16 +1353,36 @@ async function onTranscribe() {
 
     // The credits, and then the captions themselves: a run that finished and left the stage empty
     // would have done all the work and shown nothing, which is what used to happen here.
+    //
+    // A recording that is also a video is loaded as the picture as well. It is the same file the user
+    // chose to transcribe — not a guess at a different one — and a project with a picture in it is
+    // ready to export without a second trip to Sources.
+    const isVideo = String(file.type ?? '').startsWith('video/');
+    if (isVideo) await onVideo(file);
     await onAudio(file);
     await showDocument(
       doc,
       `transcribed captions → ${doc.blocks.length} blocks from "${file.name}"`,
     );
+
+    // The run's own files, put where the next step looks for them. TRUTH is filled from the run's
+    // own SRT — see `reflectRunInSources` for why the studio's file wins over the lyric sheet the
+    // run was given, even when that sheet was a subtitle file.
+    const filled = await reflectRunInSources({
+      base: $('#transcribe-url').value,
+      jobId: job.jobId ?? job.id,
+      job,
+      stem: exportStem(file),
+    });
+    if (filled.length) log(`sources: ${filled.join(' + ')} filled in from this run`);
+
     stateOf(
       'transcribe',
       'ok',
       'done',
-      `Done — ${doc.blocks.length} captions, ${words} words from "${file.name}". They are on the stage and on the timeline now.`,
+      `Done — ${doc.blocks.length} captions, ${words} words from "${file.name}". They are on the stage and on the timeline now.` +
+        (isVideo ? '\nThe recording is a video, so it is loaded as the picture too.' : '') +
+        (filled.length ? `\nSources: ${filled.join(' + ')} filled in from this run.` : ''),
     );
     // The run that just finished is now the newest entry in the list.
     await refreshRuns({ announce: false });
@@ -839,8 +1507,13 @@ function openExportDialog() {
 function exportContext() {
   const doc = preview?.document ?? null;
   const video = $('#preview-video');
+  // The **original** file's size, never the preview copy's. Once a preview copy exists the element on
+  // screen is smaller than the master, and reading the size off it would quietly cap the export at the
+  // preview's resolution — the one thing a proxy must never do. `previewSource` is the single place
+  // that knows the difference; see `io/preview-source.js`.
   const sourceSize =
-    video && video.videoWidth > 0 ? { width: video.videoWidth, height: video.videoHeight } : null;
+    previewSource.exportSize ??
+    (video && video.videoWidth > 0 ? { width: video.videoWidth, height: video.videoHeight } : null);
   const docSize = doc?.canvas ? { width: doc.canvas.width, height: doc.canvas.height } : sourceSize;
   return {
     doc,
@@ -895,21 +1568,37 @@ async function runExport(settings) {
       `${(encoder.videoBitsPerSecond / 1e6).toFixed(1)} Mbps video — frames are drawn and encoded, not recorded`,
   );
   // Honest about the one thing that silently costs quality: a frame smaller than the picture is a
-  // downscale, and the ratio picker is where that gets fixed.
-  if (video.videoWidth > size.width || video.videoHeight > size.height) {
+  // downscale, and the ratio picker is where that gets fixed. Measured against the *original* file, so
+  // a preview copy can never make a real downscale look like it is not one.
+  const master = previewSource.exportSize;
+  if (master && (master.width > size.width || master.height > size.height)) {
     log(
       `  ⚠ encoding at ${size.width}×${size.height} while the picture is ` +
-        `${video.videoWidth}×${video.videoHeight} — the export is downscaled (set the frame ratio to the picture’s own)`,
+        `${master.width}×${master.height} — the export is downscaled (set the frame ratio to the picture’s own)`,
     );
   }
+  log(
+    `  decoding from the file you loaded${previewSource.proxied ? ', not the preview copy' : ''}` +
+      `${master ? ` (${master.width}×${master.height})` : ''}`,
+  );
   // deliberately *not* `preview.pause()`: the exporter decodes from its own off-screen copy, so
   // leaving the transport exactly where the user put it is the point of this path
 
   try {
     const result = await exportDocumentToVideo({
       doc,
-      sourceUrl: video.currentSrc || video.src,
+      // The original URL, deliberately not `video.src`: a preview copy may be what the element is
+      // playing, and burning captions into a 720p copy would write the low-quality preview to disk.
+      sourceUrl: previewSource.exportUrl || video.currentSrc || video.src,
       audioBlob: state.audio ?? null,
+      // The files behind the overlay clips, by clip id. The export decodes them from elements of its own,
+      // so neither the preview nor the export can disturb the other; a clip with no file is reported
+      // below rather than dropped in silence.
+      clipUrls: Object.fromEntries(
+        mediaClips(doc)
+          .map((clip) => [clip.id, mediaLibrary.url(clip.id)])
+          .filter(([, url]) => Boolean(url)),
+      ),
       format,
       fps,
       quality,
@@ -928,6 +1617,10 @@ async function runExport(settings) {
     setExportProgress(1);
     if (result.audioSkipped) log(`  ⚠ ${result.audioSkipped}`);
     else if (result.audioNote) log(`  note: ${result.audioNote}`);
+    if (result.clips) log(`  ${result.clips} overlay clip(s) rendered into the frames`);
+    if (result.clipsMissing?.length) {
+      log(`  ⚠ ${result.clipsMissing.length} clip(s) had no file loaded and are not in the export: ${result.clipsMissing.join(', ')}`);
+    }
     const mb = (result.blob.size / 1e6).toFixed(1);
     const mbps = (result.videoBitsPerSecond / 1e6).toFixed(1);
     log(
@@ -1066,6 +1759,9 @@ async function showDocument(doc, label = 'document') {
   // edits instead of with everything put back.
   ensureTimeline(doc, { video: trackSpan('video'), audio: trackSpan('audio') });
   selectedClip = null;
+  // The overlay clips come with the document, and their files do not: a project opened in a fresh
+  // session shows its clips as offline until they are relinked.
+  adoptMedia(doc);
   // A new document invalidates any selection from the previous one.
   selectedBlockId = doc.blocks[0]?.id ?? null;
   renderBlocks();
@@ -1261,9 +1957,15 @@ function commitCut(track, next) {
 function onTimelineCommand(command) {
   const doc = preview?.document;
   if (!doc) return;
+  // Delete means the thing that is selected, and there are two kinds of selected clip. An overlay clip
+  // is a whole object in the document (so Delete removes it), a cut clip is a range of the source (so
+  // Delete removes that range) — and with a picture/sound clip selected, the range is the meaning.
+  if (command === 'delete' && selectedMediaClipId && !selectedClip) {
+    removeClip(selectedMediaClipId);
+    return;
+  }
   ensureTimeline(doc, { video: trackSpan('video'), audio: trackSpan('audio') });
   const time = Math.max(0, preview?.currentTime() ?? 0);
-
   if (command === 'reset') {
     let changed = false;
     for (const track of TIMELINE_TRACKS) {
@@ -1320,8 +2022,16 @@ function onTimelineCommand(command) {
   afterCut(time);
 }
 
-/** A drag on a clip's edge. Applied live, so the strip follows the pointer. */
+/**
+ * A drag on a clip's edge. Applied live, so the strip follows the pointer.
+ *
+ * The lane decides which *kind* of clip this is, and the two are genuinely different edits: a cut range
+ * is a part of the one source file (so trimming it is a statement about what survives), while an overlay
+ * clip is a file of its own placed on the programme (so trimming it is a statement about the placed
+ * clip, and its head trim also advances its own in-point — see `trimMediaClip`).
+ */
 function onTimelineTrim(track, id, edge, seconds) {
+  if (track === 'media') return onMediaClipTrim(id, edge, seconds);
   const doc = preview?.document;
   if (!doc) return;
   const span = trackSpan(track);
@@ -1337,7 +2047,17 @@ function onTimelineTrim(track, id, edge, seconds) {
 
 /** Select a picture/sound clip, so the cut commands know which one is meant. */
 function onTimelineSelectClip(track, id) {
+  // The Clips lane selects an overlay clip, which is not a cut range at all — and is kept in its own
+  // variable so that no cut command can ever mistake one for the other.
+  if (track === 'media') {
+    selectedClip = null;
+    timeline?.setSelectedClip(null);
+    return selectMediaClip(id);
+  }
   selectedClip = track && id ? { track, id } : null;
+  selectedMediaClipId = null;
+  timeline?.setSelectedMediaClip(null);
+  renderMediaList();
   timeline?.setSelectedClip(selectedClip);
   const range = (trackRanges(preview?.document, track, trackSpan(track)) ?? []).find((r) => r.id === id);
   if (range) {
@@ -2599,6 +3319,8 @@ preview = createPreview({
   container: $('#stage'),
   video: $('#preview-video'),
   audio: $('#preview-audio'),
+  // The overlay clips are drawn on their own canvas, between the picture and the captions.
+  mediaCanvas: $('#media-canvas'),
   onFrame,
 });
 
@@ -2617,6 +3339,7 @@ timeline = createTimeline({
   },
   onSelectClip: (track, id) => onTimelineSelectClip(track, id),
   onTrim: (track, id, edge, seconds) => onTimelineTrim(track, id, edge, seconds),
+  onMoveClip: (id, start) => onMediaClipMove(id, start),
   onCommand: (command) => onTimelineCommand(command),
 });
 syncTimeline();
@@ -2634,6 +3357,9 @@ wireTabs();
 
 $('#video-in').addEventListener('change', (e) => onVideo(e.target.files?.[0]));
 $('#audio-in').addEventListener('change', (e) => onAudio(e.target.files?.[0]));
+// `multiple`, because a set of lower-thirds or logos is normally added in one go — and each one is
+// placed at the playhead, where the user can see it before the next.
+$('#media-in').addEventListener('change', (e) => onMediaFiles(e.target.files));
 
 // A file that the browser cannot play used to fail in complete silence: the element simply never
 // fired `loadedmetadata`, so the stage stayed black, no caption appeared and nothing said why. These
@@ -2673,6 +3399,12 @@ $('#lyrics-text').addEventListener('input', () => {
 });
 $('#transcribe-btn').addEventListener('click', onTranscribe);
 $('#transcribe-probe').addEventListener('click', onTranscribeProbe);
+// The model behind the preset is worth re-reading whenever the preset changes: which file runs is the
+// thing a person is actually choosing here.
+$('#transcribe-preset').addEventListener('change', refreshModelNote);
+$('#proxy-build').addEventListener('click', onBuildProxy);
+$('#proxy-clear').addEventListener('click', onClearProxy);
+refreshProxyControls();
 $('#runs-refresh').addEventListener('click', () => refreshRuns());
 $('#runs-open').addEventListener('click', onOpenRun);
 $('#runs-select').addEventListener('change', (e) => {

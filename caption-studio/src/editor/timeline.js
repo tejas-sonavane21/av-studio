@@ -1,13 +1,14 @@
 /**
  * editor/timeline.js — the timeline strip, in the shape a video editor uses.
  *
- * A ruler, three tracks laid out along the source clock, and a playhead:
+ * A ruler, four lanes laid out along the source clock, and a playhead:
  *
  *   * **Captions** — the document's blocks, where they appear;
+ *   * **Clips** — the overlay clips (`doc.media`), each in its own window;
  *   * **Video** — the parts of the picture that are kept;
  *   * **Audio** — the parts of the track that are kept.
  *
- * All three share **one** clock — the source's own — and that is the central decision. The timeline is
+ * All four share **one** clock — the source's own — and that is the central decision. The timeline is
  * a view of the *same* clock the captions were timed against, so a caption can never be drawn over
  * the wrong frame: a cut is a gap in a track, not a change to when things happen (see
  * `model/timeline.js` for why).
@@ -19,10 +20,15 @@
  * The time-to-pixels mapping is one number — `pxPerSecond` — so zooming is a single multiplication
  * and every element (ticks, clips, playhead) stays consistent without renegotiating.
  *
- * What it is *not* is a second source of truth. The ranges come in through `setRanges`, the playhead
- * is driven by the preview's clock, and every edit goes straight back out as a callback (`onTrim`,
- * `onCommand`, `onSelectClip`) for the editor to apply to the document. Nothing here mutates a
- * document.
+ * What it is *not* is a second source of truth. The ranges come in through `setRanges`, the clips
+ * through `setMediaClips`, the playhead is driven by the preview's clock, and every edit goes straight
+ * back out as a callback (`onTrim`, `onMoveClip`, `onCommand`, `onSelectClip`) for the editor to apply
+ * to the document. Nothing here mutates a document.
+ *
+ * The two kinds of clip are deliberately **not** the same thing. A cut range is a part of the one
+ * source file, so it can only ever be trimmed (its position is a fact about the file). An overlay clip
+ * is a separate file placed on the programme, so it can be *moved* as well — and it is, by dragging its
+ * body, which is the only gesture a person would try first.
  */
 
 const TICK_STEPS = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
@@ -41,15 +47,18 @@ const WHEEL_ZOOM = 1.16;
 
 /** Row geometry, in one place so the CSS and the hit-testing cannot disagree. */
 const RULER_H = 22;
-const ROW_TOP = { captions: RULER_H + 2, video: RULER_H + 38, audio: RULER_H + 74 };
-const ROW_H = { captions: 32, video: 32, audio: 26 };
+const ROW_TOP = { captions: RULER_H + 2, media: RULER_H + 36, video: RULER_H + 66, audio: RULER_H + 100 };
+const ROW_H = { captions: 32, media: 28, video: 32, audio: 26 };
 const INNER_H = ROW_TOP.audio + ROW_H.audio + 6;
 
 /** How close (in pixels) a drag has to come to the playhead or to zero before it snaps. */
 const SNAP_PX = 7;
 
+/** The lanes whose clips are *parts of one file* — trimmed, never moved. */
 const TRACKS = ['video', 'audio'];
-const ROW_LABEL = { captions: 'Captions', video: 'Video', audio: 'Audio' };
+/** The lane of overlay clips — separate files, so they move as well as trim. */
+const MEDIA_TRACK = 'media';
+const ROW_LABEL = { captions: 'Captions', media: 'Clips', video: 'Video', audio: 'Audio' };
 
 /** `12.34` seconds as `0:12.3` (or `1:02:03.4` past an hour). Pure. */
 export function formatClock(seconds) {
@@ -111,6 +120,7 @@ function el(tag, cls, text) {
  * @param {(blockId:string)=>void} [options.onSelectBlock]
  * @param {(track:string, id:string)=>void} [options.onSelectClip]
  * @param {(track:string, id:string, edge:'in'|'out', seconds:number)=>void} [options.onTrim]
+ * @param {(id:string, seconds:number)=>void} [options.onMoveClip]  an overlay clip dragged to a new start
  * @param {(command:string)=>void} [options.onCommand]  `split` | `cut-left` | `cut-right` | `delete` | `reset`
  * @param {(ranges:object)=>void} [options.onRanges]    a finished drag, as whole range lists
  */
@@ -120,6 +130,7 @@ export function createTimeline({
   onSelectBlock = null,
   onSelectClip = null,
   onTrim = null,
+  onMoveClip = null,
   onCommand = null,
 } = {}) {
   if (!container) throw new Error('createTimeline(): a container element is required');
@@ -160,6 +171,7 @@ export function createTimeline({
   const ruler = el('div', 'timeline-ruler');
   const rows = {
     captions: el('div', 'timeline-track captions'),
+    media: el('div', 'timeline-track media'),
     video: el('div', 'timeline-track video'),
     audio: el('div', 'timeline-track audio'),
   };
@@ -177,7 +189,7 @@ export function createTimeline({
   const endMark = el('div', 'timeline-end');
   endMark.title = 'End of the recording';
   const empty = el('div', 'timeline-empty', 'No captions yet — load a source or open the demo.');
-  inner.append(ruler, rows.captions, rows.video, rows.audio, endMark, playhead);
+  inner.append(ruler, rows.captions, rows.media, rows.video, rows.audio, endMark, playhead);
   inner.style.height = `${INNER_H}px`;
   scroll.append(inner, empty);
   container.append(toolbar, scroll);
@@ -189,6 +201,9 @@ export function createTimeline({
   let selectedClip = null; // { track, id }
   let ranges = { video: [], audio: [] };
   let dropped = new Set();
+  let mediaClips = [];
+  let selectedMediaId = null;
+  let offlineMedia = new Set();
   let zoom = 1;
   // Re-entrancy guard for `layout()`: it writes the strip's width, and a width change is itself a
   // resize event on some browsers, so without this the observer can call back into the layout that
@@ -315,6 +330,49 @@ export function createTimeline({
     row.style.width = `${inner.style.width || '100%'}`;
   }
 
+  /**
+   * The overlay-clip lane.
+   *
+   * A clip is drawn from its own window on the source clock, exactly like a caption — sharing the ruler
+   * is what makes "this logo sits under that caption" something you can *see* rather than work out. The
+   * two trim handles are at its edges, and its body drags it along the clock (see the pointer handlers),
+   * which is the difference between this lane and the video/audio ones.
+   */
+  function renderMediaClips(pps) {
+    const row = rows.media;
+    row.replaceChildren(row.querySelector('.timeline-row-label') ?? el('span', 'timeline-row-label', ROW_LABEL.media));
+    for (const clip of mediaClips) {
+      const node = el('div', 'timeline-media-clip');
+      node.style.left = `${clip.start * pps}px`;
+      node.style.width = `${Math.max(MIN_CLIP_PX, (clip.end - clip.start) * pps)}px`;
+      node.style.height = `${ROW_H.media - 6}px`;
+      node.dataset.clipId = clip.id;
+      node.dataset.kind = clip.kind;
+      node.title =
+        `${clip.name} — ${clip.kind}, ${formatClock(clip.start)} – ${formatClock(clip.end)}\n` +
+        'drag to move it in time · drag an edge to trim it';
+      if (clip.id === selectedMediaId) node.classList.add('active');
+      // The file behind the clip has not been loaded (a project reopened without its media, or one that
+      // failed to decode). Drawn dimmed and marked, because a clip that is in the programme is a fact
+      // about the programme — the missing bytes are a fact about *this* session.
+      if (offlineMedia.has(clip.id)) node.classList.add('offline');
+      for (const edge of ['in', 'out']) {
+        const handle = el('span', `timeline-handle timeline-media-handle ${edge === 'in' ? 'left' : 'right'}`);
+        handle.dataset.edge = edge;
+        handle.title = edge === 'in' ? 'Drag to trim the start of the clip' : 'Drag to trim the end of the clip';
+        node.append(handle);
+      }
+      node.append(el('span', 'timeline-clip-text', clip.name));
+      // Selecting is a click, like the cut clips: a pointerdown that turns into a move is a drag.
+      node.addEventListener('click', (event) => {
+        event.stopPropagation();
+        onSelectClip?.(MEDIA_TRACK, clip.id);
+      });
+      row.append(node);
+    }
+    row.style.width = `${inner.style.width || '100%'}`;
+  }
+
   function layout() {
     if (layingOut) return;
     layingOut = true;
@@ -328,6 +386,7 @@ export function createTimeline({
       inner.style.width = `${innerWidth}px`;
       renderRuler(pps, innerWidth);
       renderCaptions(pps);
+      renderMediaClips(pps);
       for (const track of TRACKS) renderTrackSegments(track, pps);
       endMark.style.left = `${duration * pps}px`;
       endMark.hidden = !(duration > 0);
@@ -393,7 +452,7 @@ export function createTimeline({
     set(splitBtn, !inside);
     set(cutLeftBtn, !TRACKS.some((track) => (ranges[track] ?? []).some((r) => r.srcIn < time - 0.05)));
     set(cutRightBtn, !TRACKS.some((track) => (ranges[track] ?? []).some((r) => r.srcOut > time + 0.05)));
-    set(deleteBtn, !selectedClip && !TRACKS.some((track) => hitSegment(track, time)));
+    set(deleteBtn, !selectedClip && !selectedMediaId && !TRACKS.some((track) => hitSegment(track, time)));
     set(resetBtn, !anyCut);
   }
 
@@ -439,6 +498,7 @@ export function createTimeline({
 
   let scrubbing = false;
   let trimming = null; // { track, id, edge }
+  let moving = null; // { id, grab }  — an overlay clip dragged along the clock
 
   const scrubTo = (event) => {
     if (duration <= 0) return;
@@ -449,6 +509,7 @@ export function createTimeline({
     if (duration <= 0) return;
     const handle = event.target.closest?.('.timeline-handle');
     const segment = event.target.closest?.('.timeline-segment');
+    const mediaClip = event.target.closest?.('.timeline-media-clip');
     // A trim starts on a handle, and only there — grabbing the middle of a clip has to keep meaning
     // "this clip", not "shrink this clip".
     if (handle && segment) {
@@ -457,7 +518,21 @@ export function createTimeline({
       event.preventDefault();
       return;
     }
-    // Both kinds of clip select on click, so the strip does not scrub when a clip was the target.
+    if (mediaClip) {
+      const pps = pxPerSecond();
+      const clip = mediaClips.find((c) => c.id === mediaClip.dataset.clipId);
+      if (clip) {
+        scroll.setPointerCapture?.(event.pointerId);
+        // The edge handles trim; the body moves. Both are the same pointerdown, so which one it is has
+        // to be decided here — and the *offset* of the grab is what stops the clip jumping so its start
+        // lands under the pointer the moment the drag begins.
+        trimming = handle ? { track: MEDIA_TRACK, id: clip.id, edge: handle.dataset.edge } : null;
+        moving = handle ? null : { id: clip.id, grab: timeFromEvent(event, pps) - clip.start };
+        event.preventDefault();
+        return;
+      }
+    }
+    // Every kind of clip selects on click, so the strip does not scrub when a clip was the target.
     if (segment || event.target.closest?.('.timeline-clip')) return;
     scroll.setPointerCapture?.(event.pointerId);
     scrubbing = true;
@@ -465,9 +540,15 @@ export function createTimeline({
   });
 
   scroll.addEventListener('pointermove', (event) => {
+    const pps = pxPerSecond();
     if (trimming) {
-      const pps = pxPerSecond();
       onTrim?.(trimming.track, trimming.id, trimming.edge, snap(timeFromEvent(event, pps), pps));
+      return;
+    }
+    if (moving) {
+      // Snapped like a trim: a clip dragged near the playhead or the start lands exactly on it, which
+      // is what makes "put it under this caption" a gesture rather than a measurement.
+      onMoveClip?.(moving.id, snap(timeFromEvent(event, pps) - moving.grab, pps));
       return;
     }
     if (scrubbing) scrubTo(event);
@@ -476,6 +557,7 @@ export function createTimeline({
   const endDrag = () => {
     scrubbing = false;
     trimming = null;
+    moving = null;
   };
   scroll.addEventListener('pointerup', endDrag);
   scroll.addEventListener('pointercancel', endDrag);
@@ -566,6 +648,28 @@ export function createTimeline({
     setDropped(ids) {
       dropped = ids instanceof Set ? ids : new Set(ids ?? []);
       layout();
+    },
+    /** The overlay clips (`doc.media`), each drawn in its own window. */
+    setMediaClips(clips) {
+      mediaClips = Array.isArray(clips) ? clips : [];
+      layout();
+      return mediaClips;
+    },
+    /** Which overlay clips have no file loaded in this session — drawn, but marked. */
+    setMediaOffline(ids) {
+      offlineMedia = ids instanceof Set ? ids : new Set(ids ?? []);
+      layout();
+    },
+    /** Highlight the selected overlay clip. */
+    setSelectedMediaClip(id) {
+      selectedMediaId = id ?? null;
+      for (const node of rows.media.querySelectorAll('.timeline-media-clip')) {
+        node.classList.toggle('active', node.dataset.clipId === selectedMediaId);
+      }
+      updateButtons();
+    },
+    get selectedMediaClipId() {
+      return selectedMediaId;
     },
     setSelected(id) {
       selectedId = id ?? null;

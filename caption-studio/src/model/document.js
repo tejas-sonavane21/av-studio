@@ -13,6 +13,10 @@
 
 import { newWordId } from './id.js';
 import { createDefaultStyle } from './schema.js';
+// Normalizing the clip list with the document is deliberate: a `.caproj` is the one place clips arrive
+// from outside the app, and a clip that cannot be one (no window, an unknown kind) has to be dropped
+// where every other piece of untrusted input is — at the edge, with the rest of the import.
+import { normalizeClips } from './media.js';
 import { mergeDeep, isPlainObject } from '../util/math.js';
 
 const finite = (x) => typeof x === 'number' && Number.isFinite(x);
@@ -90,6 +94,7 @@ export function normalizeDocument(doc) {
   if (!Array.isArray(doc.blocks)) doc.blocks = [];
   doc.blocks.forEach(normalizeBlock);
   doc.blocks.sort((a, b) => a.start - b.start);
+  doc.media = normalizeClips(doc.media);
   return doc;
 }
 
