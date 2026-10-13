@@ -32,6 +32,13 @@ def test_doctor_json_is_machine_readable(capsys):
     assert {e["name"] for e in report["engines"]} == {"fake", "whisper"}
     assert report["cpuCount"] >= 1
     assert "accurate" in report["presets"]
+    # The model behind each preset, and whether this machine has it. A report that named
+    # the preset alone is what made two machines look identical while behaving differently.
+    details = {row["id"]: row for row in report["presetDetails"]}
+    assert details["balanced"]["modelName"] == "Whisper small"
+    assert details["balanced"]["repo"] == "Systran/faster-whisper-small"
+    assert isinstance(details["balanced"]["downloaded"], bool)
+    assert report["modelCache"], "doctor says where it looks for a model, cached or not"
 
 
 def test_doctor_prints_a_human_report(capsys):
@@ -40,6 +47,10 @@ def test_doctor_prints_a_human_report(capsys):
     assert "audio-studio" in out
     assert "engines" in out
     assert "virtualenv" in out
+    assert "Whisper small (Systran/faster-whisper-small, 244 M)" in out
+    assert "model cache" in out
+    # ASCII only: this is printed to a Windows console, where an em dash arrives as mojibake.
+    assert all(ord(char) < 128 for char in out), "the human report must survive cp1252"
 
 
 # --------------------------------------------------------------------------- #

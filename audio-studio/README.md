@@ -92,6 +92,78 @@ Three backend defaults fall out of that, and each protects *timing*:
   and, on four CPU cores, too slow to return at all. `small` is the smallest
   model whose lyrics are actually usable.
 
+### Which model a preset loads
+
+A preset name is a trade-off, not a model — and the two questions a person has before typing a path
+are *which model am I loading* and *is it already here*. `audio_studio/models.py` is the catalogue
+that answers both, and `doctor`, `GET /health` and the browser's transcribe panel all render their
+answer from it rather than repeating it:
+
+| preset | loads | repository | weights |
+|---|---|---|---|
+| `fast` | Whisper base | `Systran/faster-whisper-base` | 74 M |
+| `balanced` *(default)* | Whisper small | `Systran/faster-whisper-small` | 244 M |
+| `accurate` | Whisper medium | `Systran/faster-whisper-medium` | 769 M |
+| `best` | distil-whisper large-v3 | `Systran/faster-distil-whisper-large-v3` | 756 M |
+
+`best` is on the menu because the machine is not always a four-core laptop: on a GPU, distil-whisper
+large-v3 is `large`'s accuracy for a little over a third of its weights, and leaving it off made the
+studio look as though it had no answer for anyone with the hardware to run it. It is listed last,
+because it is the one choice here that can take minutes on the machine this was tuned for. The
+catalogue is asserted against the installed library's own name map (`tests/test_models.py`), so a
+rename upstream fails the suite rather than a run.
+
+The second half is the one that has already cost a day: **is that model downloaded here?** The check
+resolves the Hugging Face cache exactly as the hub does (`HUGGINGFACE_HUB_CACHE`, then `HF_HOME`,
+then the platform default) and counts only a snapshot with files in it, because an interrupted fetch
+leaves a directory behind. The same commit transcribed correctly on one laptop and failed on another,
+and the difference was an empty cache — a machine-level fact that used to surface as a hub error
+minutes into a job, and is now on screen before one starts:
+
+```
+$ python -m audio_studio doctor
+  presets       fast, balanced, accurate, best (default: balanced)
+    fast       Whisper base (Systran/faster-whisper-base, 74 M) - cached
+    balanced   Whisper small (Systran/faster-whisper-small, 244 M) - cached
+    accurate   Whisper medium (Systran/faster-whisper-medium, 769 M) - will download
+    best       distil-whisper large-v3 (Systran/faster-distil-whisper-large-v3, 756 M) - will download
+  model cache   /home/you/.cache/huggingface/hub
+    ! not downloaded yet: accurate (Whisper medium), best (distil-whisper large-v3) - the first run fetches it from the hub
+```
+
+### The weights are fetched once, and a run says which case it is in
+
+"It feels like it downloads the model every time" is a measurable claim, and the answer is that it
+does not. `engines/whisper.py::load_plan()` is the whole of it, and it is pure — the catalogue already
+knows whether the snapshot is on disk, and that one fact decides what happens next *and* what a person
+is told while it happens:
+
+| the catalogue says | what runs | what the panel shows |
+|---|---|---|
+| `downloaded: true` | `WhisperModel(..., local_files_only=True)` — a disk read, the hub is never contacted | *"Whisper small is already on this machine — reading it from the cache, no download"* |
+| `downloaded: false` | the ordinary hub fetch, once | *"…is not on this machine yet — fetching Systran/faster-whisper-medium, 769 M once; every later run reads it from the cache"* |
+| `unknown` (a path, or a hub id not in the catalogue) | passed to the library as given | *"loading …"* |
+
+Measured on this machine, all five models under `~/.cache/huggingface/hub` were already there, and an
+uncached lookup cost **1.16 s** where the offline one cost **0.27 s** — per model, per process. Small,
+but it is the part that touches the network on *every* run, and it is the reason a machine with no
+internet can transcribe from cache at all. A cached snapshot that turns out to be incomplete falls
+back to the hub once rather than failing the job.
+
+The model *instance* is cached beside it (`_MODEL_CACHE`, keyed by model, device, compute type and
+thread count), because constructing one reparses hundreds of megabytes: measured here, **4.6 s** for
+`small`, **11.3 s** for `medium` and for `distil-large-v3`. That is what the first `loaded …` line is
+measuring — and why a second run in the same server reports *"already loaded in this server"* instead
+of repeating a number it did not spend. Both facts are written into the artifact's provenance, so a
+finished file can answer the question later:
+
+```json
+"engine": { "model": "small", "modelSource": "disk", "modelLoadSeconds": 4.61, … }
+```
+
+`modelSource` is `disk` when the cache was reused and `download` when this machine did not have the
+weights — a run that fetched 769 MB says so, in its own output, rather than looking like a hang.
+
 ## The bridge to caption-studio
 
 `caption-studio`'s importer is written against Veed's extractor output, and the
@@ -141,7 +213,7 @@ python -m audio_studio serve --preset balanced      # the engine/preset jobs inh
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET` | `/health` | version, usable engines, presets, emit kinds |
+| `GET` | `/health` | version, usable engines, presets, emit kinds, and each preset's model + whether it is downloaded |
 | `POST` | `/transcribe` | `{path, engine?, preset?, model?, language?, emit?, emphasis?}` → `202 {jobId}` |
 | `GET` | `/jobs/{id}` | status, progress, and (when done) `files` + `urls` |
 | `GET` | `/jobs/{id}/{kind}` | the artifact itself — `kind` is `json`, `veed`, `srt` or `vtt` |
@@ -437,6 +509,7 @@ on a stopwatch.
 | Engine registry, lazy imports, no-dependency base install | ✅ `audio_studio/engines/base.py` |
 | Deterministic offline backend (`--engine fake`) | ✅ `audio_studio/engines/fake.py` |
 | CLI: `transcribe` / `emit` / `align` / `validate` / `doctor` / `serve` | ✅ `audio_studio/cli.py` |
+| Model catalogue — what each preset loads, and whether this machine has it | ✅ `audio_studio/models.py` |
 | Local Whisper transcription (`faster-whisper`) | ✅ `audio_studio/engines/whisper.py` |
 | HTTP server (job queue) for the browser | ✅ `audio_studio/server.py` |
 | **Forced alignment** (`wav2vec2` CTC, 20 ms frames) | ✅ `audio_studio/align/wav2vec.py` |
@@ -575,16 +648,18 @@ transcript — useful for checking the file layout and the caption-studio import
 without downloading a model.
 
 Presets: `balanced` (default — `small`), `accurate` (`medium`), `fast`
-(`base`). `--model distil-large-v3` is available but only sane with a GPU or
-many CPU cores; a 4-core machine will not finish it in a sitting. VAD is
-**off**; add `--vad` only for spoken-word audio.
+(`base`), `best` (`distil-large-v3`, only sane with a GPU or many CPU cores;
+a 4-core machine will not finish it in a sitting). `python -m audio_studio
+doctor` prints which model each one loads, how big it is, and whether it is
+already in the local cache. VAD is **off**; add `--vad` only for spoken-word
+audio.
 
 ## Test it
 
 ```bash
 cd audio-studio
 source .venv/Scripts/activate
-python -m pytest          # 353 tests, no model, no network, no browser
+python -m pytest          # 418 tests, no model, no network, no browser
 ```
 
 The suite is deliberately dependency-free: it runs on `pip install -e ".[dev]"`

@@ -15,8 +15,14 @@ copied from a benchmark table:
 So ``small`` is the default: on four cores it is the smallest model whose text
 is actually usable, and it still finishes a three-minute song in about a
 minute. Systems with a GPU or many cores can pass ``--model distil-large-v3``
-(see ``QUALITY_MODEL_EN``), which is near-``large`` accuracy but not viable on
-CPU here.
+or use the ``best`` preset (see ``QUALITY_MODEL_EN``), which is near-``large``
+accuracy but not viable on CPU here.
+
+What each model *is* — its hub repository, how large it is, and whether this
+machine already has it downloaded — lives in ``models.py``, not here: this module
+holds the options the engine consumes, and a model's name in the UI is a
+different question from the numbers a run needs.
+
 
 ``vad_filter`` is **off by default**, which is the opposite of most Whisper
 recipes, and on purpose. Voice-activity detection is tuned for *speech*, and a
@@ -85,13 +91,20 @@ class TranscribeOptions:
         return DEFAULT_MODEL
 
 
-#: Named starting points. ``balanced`` (``small``) is the default because it is
-#: the cheapest model measured to produce correct lyrics on this hardware;
-#: trading that away by default would defeat the studio's purpose.
+#: Named starting points, ordered quickest → best. ``balanced`` (``small``) is the
+#: default because it is the cheapest model measured to produce correct lyrics on this
+#: hardware; trading that away by default would defeat the studio's purpose.
+#:
+#: ``best`` exists because the machine is not always a 4-core laptop: on a GPU, the
+#: distilled large model is the accuracy of ``large`` for a little over a third of its
+#: weights, and leaving it off the menu made the studio look like it had no answer for
+#: anyone with the hardware to run it. It is last in the order on purpose — it is the one
+#: choice here that can take minutes on the machine this was tuned for.
 PRESETS: dict[str, dict] = {
     "fast": {"model": "base", "beam_size": 1, "vad_filter": False},
     "balanced": {"model": "small", "beam_size": 5, "vad_filter": False},
     "accurate": {"model": "medium", "beam_size": 5, "vad_filter": False},
+    "best": {"model": "distil-large-v3", "beam_size": 5, "vad_filter": False},
 }
 
 DEFAULT_PRESET = "balanced"

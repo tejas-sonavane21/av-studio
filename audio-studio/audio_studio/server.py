@@ -65,7 +65,7 @@ from .config import (
 from .emit import DEFAULT_KINDS, filename, kinds, safe_stem, write_bundle
 from .engines import available_engines, engine_names, get_engine
 from .media import AUDIO_EXTENSIONS, MediaError, load_audio
-from . import pins
+from . import models, pins
 from .pipeline import PipelineOptions, post_process
 from .reference import Reference, ReferenceParseError
 from .validate import available_validators, validator_names
@@ -500,8 +500,15 @@ def build_health_report() -> dict:
         "engines": available_engines(),
         "aligners": available_aligners(),
         "validators": available_validators(),
-        "presets": sorted(PRESETS),
+        "presets": list(PRESETS),
         "defaultPreset": DEFAULT_PRESET,
+        # Which model each preset loads, whether this machine already has that model
+        # downloaded, and the hub cache it would live in. The browser panel shows this
+        # instead of the bare preset names — "balanced" does not tell anyone that the run
+        # will fetch 244 MB of Whisper, and a missing download is the one difference that
+        # has already made two machines disagree about the same commit. See `models.py`.
+        "presetDetails": models.preset_details(PRESETS),
+        "modelCache": str(models.cache_dir()),
         "emitKinds": kinds(),
         # The pinned set this checkout was verified against, against what this
         # interpreter actually has. Cheap (metadata only) and reported *here* because

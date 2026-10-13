@@ -41,7 +41,7 @@ from .emit import DEFAULT_KINDS, kinds, safe_stem, write_bundle
 from .engines import available_engines, engine_names, get_engine
 from .media import MediaError, describe, load_audio
 from .model import validate
-from . import pins
+from . import models, pins
 from .pipeline import PassUnavailable, PipelineOptions, post_process, summarise_passes
 from .reference import Reference, ReferenceParseError
 from .runlog import build_manifest, write_manifest
@@ -307,10 +307,17 @@ def build_doctor_report() -> dict:
         "engines": available_engines(),
         "aligners": available_aligners(),
         "validators": available_validators(),
-        "presets": sorted(PRESETS),
+        "presets": list(PRESETS),
         "defaultPreset": DEFAULT_PRESET,
         "defaultAligner": DEFAULT_ALIGNER,
         "defaultValidator": DEFAULT_VALIDATOR,
+        # Which model each preset loads, and whether this machine already has it. The
+        # cache, not the code, is what made one laptop transcribe and another fail on the
+        # same commit — so it is reported here, where a person already looks when the two
+        # machines disagree. See `models.py`.
+        "presetDetails": models.preset_details(PRESETS),
+        "modelCache": str(models.cache_dir()),
+        "models": models.catalog(),
     }
 
 
@@ -352,6 +359,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         mark = "ok " if validator["available"] else "no "
         print(f"    [{mark}] {validator['name']:<16} {validator['reason']}")
     print(f"  presets       {', '.join(report['presets'])} (default: {report['defaultPreset']})")
+    for row in report.get("presetDetails", []):
+        mark = "cached" if row["downloaded"] else ("will download" if row["downloaded"] is False else "unknown")
+        size = f", {row['params']}" if row["params"] else ""
+        print(f"    {row['id']:<10} {row['modelName']} ({row['repo']}{size}) - {mark}")
+    # The cache path is printed with the presets rather than only on a miss: the first thing
+    # worth knowing about a machine that behaves differently is *where* it looks for a model.
+    to_fetch = [row for row in report.get("presetDetails", []) if row["downloaded"] is False]
+    print(f"  model cache   {report.get('modelCache', '?')}")
+    if to_fetch:
+        names = ", ".join(f"{row['id']} ({row['modelName']})" for row in to_fetch)
+        print(f"    ! not downloaded yet: {names} - the first run fetches it from the hub")
     if not report["virtualenv"]:
         print("\n  ! Not inside a virtualenv. Create one with: python -m venv .venv")
     return 0

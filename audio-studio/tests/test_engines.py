@@ -74,6 +74,70 @@ def test_available_engines_reports_rather_than_raises():
 
 
 # --------------------------------------------------------------------------- #
+# what a run is about to do with the weights
+# --------------------------------------------------------------------------- #
+
+
+def _cached_model(root: Path, model_id: str) -> None:
+    """Lay out a hub cache entry the way the hub does: ``snapshots/<rev>/model.bin``."""
+    from audio_studio import models as catalogue
+
+    directory = root / catalogue.repo_cache_name(catalogue.MODELS[model_id]["repo"]) / "snapshots" / ("b" * 40)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "model.bin").write_bytes(b"")
+
+
+def test_a_cached_model_is_read_from_disk_and_the_hub_is_not_asked(tmp_path):
+    """
+    The guarantee this exists for: weights that are already here are never fetched again.
+
+    ``localOnly`` is what carries it into the loader — without it the hub resolves the
+    cached snapshot over the network on every process, which is the round-trip that reads
+    to a person as "it is downloading the model again".
+    """
+    from audio_studio.engines.whisper import load_plan
+
+    _cached_model(tmp_path, "small")
+    plan = load_plan("small", root=tmp_path)
+    assert plan["downloaded"] is True
+    assert plan["localOnly"] is True
+    assert "already on this machine" in plan["message"]
+    assert "no download" in plan["message"]
+
+
+def test_a_missing_model_says_it_is_fetching_once(tmp_path):
+    from audio_studio.engines.whisper import load_plan
+
+    plan = load_plan("medium", root=tmp_path)
+    assert plan["downloaded"] is False
+    assert plan["localOnly"] is False
+    assert plan["repo"] == "Systran/faster-whisper-medium"
+    assert "once" in plan["message"]
+    assert "769 M" in plan["message"]
+
+
+def test_an_uncatalogued_name_is_loaded_but_never_told_to_stay_offline(tmp_path):
+    """A local path or a hub id we do not know may be local; nothing is assumed about it."""
+    from audio_studio.engines.whisper import load_plan
+
+    plan = load_plan("some-org/their-whisper", root=tmp_path)
+    assert plan["downloaded"] is None
+    assert plan["localOnly"] is False
+    assert "some-org/their-whisper" in plan["message"]
+
+
+def test_an_empty_snapshot_is_a_download_not_a_cache_hit(tmp_path):
+    """A half-finished fetch must not be mistaken for weights that are already here."""
+    from audio_studio import models as catalogue
+    from audio_studio.engines.whisper import load_plan
+
+    (tmp_path / catalogue.repo_cache_name("Systran/faster-whisper-small") / "snapshots" / "c").mkdir(parents=True)
+    plan = load_plan("small", root=tmp_path)
+    assert plan["downloaded"] is False
+    assert plan["localOnly"] is False
+
+
+# --------------------------------------------------------------------------- #
 # apportion
 # --------------------------------------------------------------------------- #
 
