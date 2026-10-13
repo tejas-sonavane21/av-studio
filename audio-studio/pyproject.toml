@@ -7,9 +7,30 @@ name = "audio-studio"
 version = "0.1.0"
 description = "The audio-side studio of the web_av_editor suite: speech-to-text with word-level timing, forced alignment and transcript validation."
 readme = "README.md"
-requires-python = ">=3.10"
+# 3.11, not 3.10: the pinned set cannot install on 3.10 at all. `av==18.1.0` and
+# `numpy==2.4.6` both declare `Requires-Python: >=3.11`, so a 3.10 machine following the
+# documented install fails at the first package, nowhere near the code. This line is what
+# `pip` reads, so it has to agree with the pins or it sends people down a road that ends
+# in a resolution error. Verified on 3.11.0; every pin ships `abi3` wheels or per-version
+# builds for 3.12 and 3.13 as well.
+requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = []
+
+# Version locking, in two places for two different jobs.
+#
+# `requirements.txt` is the *install*: the exact set this project was built and verified
+# on, compared against the interpreter by `doctor` (see `audio_studio/pins.py`). These
+# extras are the flexible view of the same thing, for a machine that wants the newest of
+# everything and is willing to find out. Their floors are still the versions actually
+# verified - a floor below that is an untested combination nobody measured - and their
+# ceilings are the next *major* release, the point at which a library is entitled to
+# remove the call this code makes.
+#
+# Majors, not patch pins: a security release inside the verified major still lands. The
+# one ceiling that is not a guess is `av` - `faster-whisper` passes `av.open(...)` a
+# keyword `av` 19 removed, and the failure surfaces as "install the 'asr' extra or put
+# ffmpeg on PATH", naming a binary that was never needed. See the note below.
 
 [project.optional-dependencies]
 # Speech-to-text. CTranslate2 backend: no PyTorch, and by far the fastest
@@ -24,9 +45,9 @@ dependencies = []
 # Pinned to the last release that accepts the call. See the `av` note in
 # `requirements.txt` for the version table.
 asr = [
-    "faster-whisper>=1.0.3",
+    "faster-whisper>=1.2.1,<2",
     "av>=14,<19",
-    "numpy>=1.24",
+    "numpy>=1.24,<3",
 ]
 # Forced alignment: tightens word onsets to ~20-50 ms when we already trust the
 # text (we do - an SRT/VTT is usually available). This is the sync fix.
@@ -39,18 +60,22 @@ asr = [
 #     pip install "torch>=2.2" --index-url https://download.pytorch.org/whl/cpu
 #     pip install -e ".[align]"
 align = [
-    "torch>=2.2",
-    "transformers>=4.40",
-    "numpy>=1.24",
+    "torch>=2.2,<3",
+    "transformers>=4.40,<6",
+    "numpy>=1.24,<3",
 ]
 # Transcript validation / cleanup through a hosted LLM. Optional on purpose:
 # timings never depend on it.
+# `google-genai>=0.3.0` was the old floor, and it was a lie: the 0.x line reached the
+# API through a different module layout than `genai.Client(api_key=..., http_options=...)`,
+# so an install that satisfied it could not run this code. The floor is now the version
+# that was actually verified.
 llm = [
-    "google-genai>=0.3.0",
-    "httpx>=0.27",
+    "google-genai>=2.26,<3",
+    "httpx>=0.27,<1",
 ]
 dev = [
-    "pytest>=8",
+    "pytest>=8,<10",
 ]
 
 [project.scripts]
