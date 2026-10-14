@@ -40,7 +40,7 @@ from typing import Any, Optional, Sequence
 
 from ..config import DEFAULT_ALIGN_MODEL, ALIGN_FRAME_HOP, AlignOptions
 from ..media import Audio
-from ..models import revision_for
+from ..models import cached_commit, revision_for, revision_unavailable
 from ..model import Transcript
 from .apply import limits_for
 from .base import AlignmentResult, Aligner, ProgressHook, WordSpan
@@ -49,6 +49,11 @@ from .ctc import AlignmentError, forced_align, group_spans, log_softmax, merge_r
 #: (model, device) → (model, vocab, blank, boundary, hop, sample_rate)
 _MODEL_CACHE: dict[tuple, tuple] = {}
 
+#: The same key → which weights the cached pair actually came from, and whether the pin held.
+#: Kept beside the cache so the provenance a run writes describes the checkpoint it used, not
+#: the one the catalogue asked for.
+_LOAD_NOTES: dict[tuple, dict] = {}
+
 #: ~66 minutes of audio at 20 ms frames. Beyond this the emission matrix stops
 #: being a rounding error and the pass should be run per section instead.
 MAX_FRAMES = 200_000
@@ -56,6 +61,56 @@ MAX_FRAMES = 200_000
 
 def clear_cache() -> None:
     _MODEL_CACHE.clear()
+    _LOAD_NOTES.clear()
+
+
+def load_note(model_name: str, device: str) -> dict:
+    """Which weights the cached checkpoint came from, or ``{}`` before anything is loaded."""
+    return dict(_LOAD_NOTES.get((model_name, device)) or {})
+
+
+def _load_pair(model_name: str, revision: Optional[str], device: str):
+    """
+    The checkpoint and its tokenizer, at the pinned commit when the hub still has it.
+
+    The pin is what makes a re-timing pass reproducible: a word moved by a *different* acoustic
+    model is not an improvement, it is a different measurement. But a pin is a preference, not a
+    promise that the hub keeps the commit, so one that is gone falls forward to the checkpoint's
+    ``main`` - once, and only for a failure that is about the revision itself - and the caller is
+    handed a note saying so. Everything else (no network, a checkpoint that does not exist) is
+    raised as it was rather than retried into a second, more confusing error.
+
+    Returns ``(tokenizer, model, note)``, with the note empty when the pin held or when there was
+    never a pin to honour.
+    """
+    from transformers import AutoTokenizer, Wav2Vec2ForCTC  # type: ignore
+
+    def fetch(pin: Optional[str]):
+        kwargs = {"revision": pin} if pin else {}
+        tokenizer = AutoTokenizer.from_pretrained(model_name, **kwargs)
+        model = Wav2Vec2ForCTC.from_pretrained(model_name, **kwargs).to(device)
+        model.eval()
+        return tokenizer, model
+
+    if not revision:
+        tokenizer, model = fetch(None)
+        return tokenizer, model, ""
+
+    try:
+        tokenizer, model = fetch(revision)
+        return tokenizer, model, ""
+    except Exception as exc:  # noqa: BLE001 - re-raised below unless the pin is the problem
+        if not revision_unavailable(exc, revision):
+            raise
+        failure = exc
+
+    note = (
+        f"the pinned commit {revision[:8]} of {model_name} is not on the hub any more "
+        f"({type(failure).__name__}) - aligning with the current main instead, which is not the "
+        "checkpoint these timings were verified against"
+    )
+    tokenizer, model = fetch(None)
+    return tokenizer, model, note
 
 
 def _load(model_name: str, device: str):
@@ -70,20 +125,25 @@ def _load(model_name: str, device: str):
     ``models.py``): a re-timing pass is only reproducible if the acoustic model that
     produced the timings is the same one, and the hub's ``main`` can move under a studio
     that was never changed. A checkpoint from outside the catalogue is passed through
-    untouched — there is nothing verified to pin it to.
+    untouched — there is nothing verified to pin it to. A pin the hub no longer has falls
+    forward to ``main`` rather than failing the pass (``_load_pair``), and which of the two
+    happened is recorded beside the cached model for the provenance to report.
     """
-    from transformers import AutoTokenizer, Wav2Vec2ForCTC  # type: ignore
-
     key = (model_name, device)
     cached = _MODEL_CACHE.get(key)
     if cached is not None:
         return cached
 
     revision = revision_for(model_name)
-    pinned: dict = {"revision": revision} if revision else {}
-    tokenizer = AutoTokenizer.from_pretrained(model_name, **pinned)
-    model = Wav2Vec2ForCTC.from_pretrained(model_name, **pinned).to(device)
-    model.eval()
+    tokenizer, model, note = _load_pair(model_name, revision, device)
+    # What the timings are actually made of: the pin when it held, and otherwise the commit
+    # `main` resolved to - read off the refs the fetch just wrote, because provenance that says
+    # "main" is provenance nobody can compare.
+    _LOAD_NOTES[key] = {
+        "revision": revision if not note else cached_commit(model_name),
+        "pinned": revision,
+        "note": note,
+    }
 
     vocab = tokenizer.get_vocab()
     blank = int(vocab.get("<pad>", 0))
@@ -265,8 +325,11 @@ class Wav2VecAligner(Aligner):
         model_name = options.model or DEFAULT_ALIGN_MODEL
         model, vocab, blank, boundary, hop, sample_rate = _load(model_name, options.device)
         # Which weights, in the artifact: two machines that re-time the same transcript
-        # differently should be comparable without guessing at the checkpoint.
-        revision = revision_for(model_name)
+        # differently should be comparable without guessing at the checkpoint. Read from the load
+        # rather than from the catalogue, so a run that had to fall forward reports the commit it
+        # actually used.
+        loaded = load_note(model_name, options.device)
+        revision = loaded.get("revision")
 
         if audio.sample_rate != sample_rate:
             raise RuntimeError(
@@ -322,6 +385,10 @@ class Wav2VecAligner(Aligner):
             warnings.append(f"{unplaceable_total} word(s) had nothing alignable in them")
         if failed:
             warnings.append(f"{failed} segment(s) could not be aligned inside their window")
+        if loaded.get("note"):
+            # The timings are real, but they were not measured against the checkpoint this project
+            # verified, so the run says so where the timings are, not only on a terminal.
+            warnings.append(f"{loaded['note']} - these timings may not reproduce")
 
         if on_progress:
             on_progress(1.0, f"{len(transcript.segments)} segments aligned")
@@ -332,6 +399,7 @@ class Wav2VecAligner(Aligner):
                 "backend": self.name,
                 "model": model_name,
                 "revision": revision,
+                "revisionFallback": loaded.get("note") or None,
                 "device": options.device,
                 "frames": emissions.frames,
                 "channels": emissions.channels,

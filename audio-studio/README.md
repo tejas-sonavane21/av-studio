@@ -180,7 +180,16 @@ the aligner hand that commit to the loader:
 * *"is this model downloaded?"* now means *is the pinned snapshot here*: a machine holding an older
   commit reports `will download` and fetches the verified weights rather than quietly using others;
 * a model nothing here has verified (`large-v3`, or a hub id from outside the catalogue) has no pin —
-  reported as `unpinned` and loaded as given, because an invented revision would look verified.
+  reported as `unpinned` and loaded as given, because an invented revision would look verified;
+* **a pin the hub no longer has falls forward to `main`, once, instead of failing the run.** A commit
+  can be force-pushed away, and a studio that then refused to transcribe would be broken for a reason
+  nobody could act on. It is one retry, and only for a failure that is *about the revision* — a
+  repository that is gone, a machine with no network and a missing file are raised as they were,
+  because asking for `main` would fail the same way and bury the first error behind a second. When it
+  does happen the run says so in its output and in the artifact: `modelRevision` then names the commit
+  `main` resolved to — read out of the cache the fetch just wrote — and `modelRevisionFallback`
+  carries the sentence, so a transcript that came from other weights is a fact on the file rather than
+  something to infer from a date.
 
 ## The bridge to caption-studio
 

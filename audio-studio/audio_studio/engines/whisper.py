@@ -34,6 +34,12 @@ say why. ``models.py`` records the commit each model was verified at and this mo
 passes it to the loader, so the revision is part of the run rather than a fact about
 the afternoon it happened. An unpinned model (a local path, a hub id we do not
 catalogue) is passed through untouched, because there is nothing verified to pin it to.
+
+A pin is a preference, not a promise. The hub can force a commit away, and a studio that
+refused to run when it did would be broken for a reason nobody could act on - so a pin
+that is no longer there falls forward to ``main`` once, says so in its own output, and
+records the commit it actually loaded in the artifact. See ``_load_with_pin`` and
+``models.revision_unavailable``.
 """
 
 from __future__ import annotations
@@ -121,6 +127,41 @@ def loaded_state() -> list[dict]:
     return [dict(note) for note in _MODEL_NOTES.values()]
 
 
+def _load_with_pin(model_name: str, model_kwargs: dict, plan: dict) -> tuple[Any, str]:
+    """
+    Construct the model at its pinned commit, falling forward to the hub's ``main`` if that
+    commit is not there any more. Returns ``(model, note)``, the note empty when the pin held.
+
+    The pin is a preference for the weights this project measured, not a promise that the hub
+    keeps them. A commit that was force-pushed away used to turn a working install into a
+    failed run - and, worse, a hub error that named neither the preset nor the reason. Here it
+    costs one retry.
+
+    One retry, not a loop, and only for a failure that is *about the revision*
+    (:func:`models.revision_unavailable`): loading other weights changes what the run means,
+    so the caller is told in the returned note rather than left to notice. Everything else -
+    no network, a repository that is gone, a file named wrong - is raised as it was, because a
+    second attempt at ``main`` would fail the same way and bury the first error.
+    """
+    from faster_whisper import WhisperModel  # type: ignore
+
+    pin = str(model_kwargs.get("revision") or "")
+    try:
+        return WhisperModel(model_name, **model_kwargs), ""
+    except Exception as exc:  # noqa: BLE001 - re-raised below unless the pin is the problem
+        if not pin or not models.revision_unavailable(exc, pin):
+            raise
+        failure = exc
+
+    latest = {name: value for name, value in model_kwargs.items() if name != "revision"}
+    note = (
+        f"the pinned commit {pin[:8]} of {plan.get('repo') or model_name} is not on the hub any more "
+        f"({type(failure).__name__}) - loading the current main instead, which is not the set of weights "
+        "this project measured"
+    )
+    return WhisperModel(model_name, **latest), note
+
+
 def _load_model(options: TranscribeOptions, on_progress: Optional[ProgressHook] = None):
     """
     Construct (or reuse) the model for these options.
@@ -168,13 +209,23 @@ def _load_model(options: TranscribeOptions, on_progress: Optional[ProgressHook] 
         # below, once, rather than failing the job.
         try:
             model = WhisperModel(model_name, local_files_only=True, **model_kwargs)
+            note = ""
         except Exception as exc:  # noqa: BLE001 - only to retry with the hub reachable
             if on_progress:
                 on_progress(0.02, f"{plan['family']}: the cached copy is incomplete ({exc}); fetching it")
             source = "download"
-            model = WhisperModel(model_name, **model_kwargs)
+            model, note = _load_with_pin(model_name, model_kwargs, plan)
     else:
-        model = WhisperModel(model_name, **model_kwargs)
+        model, note = _load_with_pin(model_name, model_kwargs, plan)
+
+    # Which weights, in the artifact. The pin when the pin held; and when it did not, the commit
+    # the hub's `main` resolved to - read off the `refs/main` the fetch just wrote, because
+    # "main, whatever it was that afternoon" is not something two machines can be compared with.
+    revision = plan["revision"]
+    if note:
+        revision = models.cached_commit(plan["repo"])
+        if on_progress:
+            on_progress(0.02, note)
 
     seconds = time.perf_counter() - started
     _MODEL_CACHE[key] = model
@@ -184,7 +235,8 @@ def _load_model(options: TranscribeOptions, on_progress: Optional[ProgressHook] 
         "repo": plan["repo"],
         "device": options.device,
         "computeType": options.compute_type,
-        "revision": plan["revision"],
+        "revision": revision,
+        "revisionNote": note,
         "source": source,
         "seconds": round(seconds, 2),
     }
@@ -292,14 +344,25 @@ class WhisperEngine(Engine):
                 "modelLoadSeconds": load_note.get("seconds"),
                 # The exact commit these words came out of, or `null` for a model nothing
                 # here has verified. Recorded in the artifact so two machines can be
-                # compared without guessing at the weights - see `models.py`.
+                # compared without guessing at the weights - see `models.py`. When the pin
+                # was gone and `main` was loaded instead, this is the commit `main` resolved
+                # to, and `modelRevisionFallback` says what happened.
                 "modelRevision": load_note.get("revision"),
+                "modelRevisionFallback": load_note.get("revisionNote") or None,
             },
         )
 
         if not options.word_timestamps:
             transcript.warnings.append(
                 "word timestamps are disabled: per-word editing and split/join will not be available"
+            )
+        if load_note.get("revisionNote"):
+            # A warning rather than a log line: these words did not come out of the weights this
+            # project measured, which is exactly the kind of thing a transcript should carry with
+            # it rather than something only the terminal of the run that made it saw.
+            transcript.warnings.append(
+                f"{load_note['revisionNote']} - this transcript may not reproduce on a machine that "
+                "still has the pinned commit"
             )
         if not segments:
             transcript.warnings.append("no speech detected in this audio")

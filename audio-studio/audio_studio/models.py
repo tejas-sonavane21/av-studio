@@ -32,11 +32,21 @@ laptop is on different weights" is a fact you can read rather than one you infer
 ``is_downloaded`` asks the pinned question, not the loose one: the snapshot for *that*
 commit, or the answer is "not here yet". A cache holding an older snapshot is a machine
 that will fetch the verified weights, which is the whole point of pinning them.
+
+A pin is a preference, not a promise that the hub keeps the commit. It can be force-pushed
+away, and a studio that then refused to run would be broken for a reason nobody could act
+on - so a loader that is handed a pin it cannot have falls forward to ``main`` *once*, says
+so, and records the commit it actually loaded. :func:`revision_unavailable` is the
+recognition half of that (an error about *this commit*, as against a repository that is
+gone, a file that is named wrong, or a machine with no network), and
+:func:`cached_commit` is what turns "the hub's ``main``, whatever that is today" back into
+a fact a transcript can be compared against.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -224,6 +234,76 @@ def is_downloaded(
         return False
 
 
+#: A full commit, which is the only thing the hub cache calls a revision.
+_COMMIT = re.compile(r"\A[0-9a-f]{40}\Z")
+
+#: The exception the hub raises when the *revision* it was asked for is not there. Matched
+#: by name, never imported: this module holds no reference to huggingface_hub on purpose.
+_MISSING_REVISION_TYPES = ("revisionnotfound",)
+
+#: What a hub error says when it is about the revision rather than about the repository.
+_MISSING_REVISION_WORDS = ("not found", "does not exist", "unknown", "invalid", "404")
+
+
+def revision_unavailable(error: BaseException, revision: str = "") -> bool:
+    """
+    Is this failure about *the commit we asked for*, rather than about anything else?
+
+    The distinction is the whole safety of falling forward. Three failures look alike in a
+    log and only one of them is repairable by loading other weights:
+
+    * **the commit is gone** - the repository was force-pushed or the revision was never
+      there under that name. Falling forward to ``main`` is the fix, and it is the case
+      this function exists to recognise;
+    * **the repository is gone, or the machine has no network** - ``main`` fails in exactly
+      the same way, so a retry hides the real error behind a second one and swaps a clear
+      message for a confusing one;
+    * **a file inside the revision is missing** - the pin is fine and the download is not.
+
+    Two independent readings are accepted, because the two hub clients disagree about how
+    to say it: the exception's own name (``RevisionNotFoundError``), and a message that
+    talks about a revision *and* says it is not there. A 404 counts, but only when the
+    message names the commit we asked for - which is the force-pushed-away case, and the
+    one where a 404 is genuinely about the pin rather than about a file.
+    """
+    name = type(error).__name__.lower()
+    if any(marker in name for marker in _MISSING_REVISION_TYPES):
+        return True
+
+    text = str(error).lower()
+    pinned = str(revision or "").lower()
+    if pinned and (pinned in text or pinned[:12] in text) and ("404" in text or "not found" in text):
+        return True
+
+    return "revision" in text and any(word in text for word in _MISSING_REVISION_WORDS)
+
+
+def cached_commit(
+    repo: str,
+    ref: str = "main",
+    *,
+    root: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """
+    The commit the hub wrote for ``ref`` of this repository, read off this machine, or ``None``.
+
+    What this is for: a run that could not have its pinned commit loads the hub's ``main``,
+    and "whatever main was on that afternoon" is not an answer anybody can compare two
+    machines with. The hub records the commit it resolved a ref to in ``refs/<ref>``, so the
+    fact is already on disk by the time anyone asks - no second request, and no guessing.
+
+    ``None`` covers every way there is no answer: the model is not here, the fetch that
+    would have written the ref failed, or the file holds something that is not a commit.
+    """
+    directory = Path(root) if root else cache_dir(env)
+    try:
+        value = (directory / repo_cache_name(repo) / "refs" / str(ref)).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value if _COMMIT.match(value) else None
+
+
 def describe(
     model_id: str,
     *,
@@ -323,6 +403,7 @@ __all__ = [
     "MODELS",
     "PRESET_NOTES",
     "cache_dir",
+    "cached_commit",
     "catalog",
     "describe",
     "describe_model",
@@ -332,4 +413,5 @@ __all__ = [
     "repo_cache_name",
     "repo_dir",
     "revision_for",
+    "revision_unavailable",
 ]

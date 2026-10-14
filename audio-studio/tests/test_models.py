@@ -193,3 +193,79 @@ def test_describe_and_preset_details_report_the_pin(tmp_path):
     rows = {row["id"]: row for row in models.preset_details(PRESETS)}
     assert rows["balanced"]["revision"] == models.MODELS["small"]["revision"]
     assert rows["accurate"]["revision"] == models.MODELS["medium"]["revision"]
+
+
+# --------------------------------------------------------------------------- #
+# a pin the hub no longer has
+# --------------------------------------------------------------------------- #
+
+PIN = models.MODELS["small"]["revision"]
+
+
+class RevisionNotFoundError(Exception):
+    """What huggingface_hub raises for a commit that is not there, by name and by class."""
+
+
+class RepositoryNotFoundError(Exception):
+    """And for a repository that is not there at all - which is a different repair."""
+
+
+def test_a_commit_the_hub_no_longer_has_is_recognised():
+    """
+    This is the one failure falling forward to ``main`` repairs, so it has to be told apart
+    from the two that look like it in a log.
+    """
+    assert models.revision_unavailable(RevisionNotFoundError(f"Revision {PIN} not found"))
+    assert models.revision_unavailable(Exception(f"Revision '{PIN[:12]}' does not exist"))
+    # A force-pushed-away commit 404s on the resolve url, which names the commit we asked for -
+    # that is about the pin, and it is the shape the hub actually answers with.
+    assert models.revision_unavailable(
+        Exception(f"404 Client Error: Not Found for url: https://huggingface.co/Systran/faster-whisper-small/resolve/{PIN}/model.bin"),
+        PIN,
+    )
+
+
+def test_every_other_failure_is_left_alone():
+    """
+    A retry that cannot succeed is worse than none: it replaces one clear error with a second,
+    more confusing one, and hides the fact that nothing about the weights is wrong.
+    """
+    # The repository is gone, or the machine is offline: `main` fails exactly the same way.
+    assert not models.revision_unavailable(RepositoryNotFoundError("404 Client Error: Not Found for url: https://huggingface.co/Systran/faster-whisper-small"))
+    assert not models.revision_unavailable(ConnectionError("HTTPSConnectionPool(host='huggingface.co'): Max retries exceeded"))
+    assert not models.revision_unavailable(TimeoutError("timed out"))
+    # A file missing from a revision the hub *does* have is the download's problem, not the pin's.
+    assert not models.revision_unavailable(Exception("EntryNotFoundError: model.bin not found at this path"))
+    # And a bare 404 with no commit named in it is not enough to blame the pin for.
+    assert not models.revision_unavailable(Exception(f"404 Client Error: Not Found for url: https://huggingface.co/api/models/Systran/faster-whisper-small"), PIN)
+
+
+def test_the_commit_a_fetch_resolved_main_to_is_read_off_the_cache(tmp_path):
+    """
+    A run that fell forward loaded ``main``, and "main, whatever it was that afternoon" is not
+    something two machines can be compared with. The hub writes the commit it resolved the ref
+    to, so the answer is already on disk - and the only honest alternative is to say nothing.
+    """
+    repo = models.MODELS["small"]["repo"]
+    refs = tmp_path / models.repo_cache_name(repo) / "refs"
+    refs.mkdir(parents=True)
+    (refs / "main").write_text("c" * 40 + "\n")
+    assert models.cached_commit(repo, root=tmp_path) == "c" * 40
+
+    assert models.cached_commit(repo, root=tmp_path, ref="other") is None
+    assert models.cached_commit("some-org/their-whisper", root=tmp_path) is None
+
+    # A ref file holding anything that is not a commit is not a commit: this is the field that
+    # gets written into a transcript, so a tag name must not arrive there looking like one.
+    (refs / "main").write_text("main\n")
+    assert models.cached_commit(repo, root=tmp_path) is None
+
+
+def test_the_cache_the_fetch_wrote_is_where_the_commit_is_read_from(tmp_path):
+    """``HF_HOME`` moves the cache, and a commit read from the wrong place is worse than none."""
+    repo = models.MODELS["small"]["repo"]
+    refs = tmp_path / "hub" / models.repo_cache_name(repo) / "refs"
+    refs.mkdir(parents=True)
+    (refs / "main").write_text("d" * 40)
+    assert models.cached_commit(repo, env={"HF_HOME": str(tmp_path)}) == "d" * 40
+    assert models.cached_commit(repo, root=tmp_path) is None

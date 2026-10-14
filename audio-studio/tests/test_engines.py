@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -165,6 +166,165 @@ def test_a_model_nothing_verified_is_planned_without_a_pin(tmp_path):
 
     assert load_plan("some-org/their-whisper", root=tmp_path)["revision"] is None
     assert load_plan("medium", root=tmp_path)["revision"] is not None
+
+
+# --------------------------------------------------------------------------- #
+# a pin the hub no longer has
+# --------------------------------------------------------------------------- #
+
+PIN = "536b0662742c02347bc0e980a01041f333bce120"
+
+
+class RevisionNotFoundError(Exception):
+    """The hub's own name for "that commit is not there any more"."""
+
+
+def _stub_faster_whisper(monkeypatch, construct):
+    """
+    A ``faster_whisper`` whose ``WhisperModel`` is ours, so the loader's decisions are testable.
+
+    The library is imported *inside* the loader - that is what keeps an optional backend out of
+    `import audio_studio` - so it is the import that has to be answered, and a `sys.modules`
+    entry is the only way to answer it from a test.
+    """
+    module = types.ModuleType("faster_whisper")
+    module.WhisperModel = construct  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+    return module
+
+
+def _plan(**overrides) -> dict:
+    """The plan `load_plan` would return for a model this machine does not have yet."""
+    plan = {
+        "name": "small",
+        "family": "Whisper small",
+        "repo": "Systran/faster-whisper-small",
+        "params": "244 M",
+        "downloaded": False,
+        "localOnly": False,
+        "revision": PIN,
+        "message": "fetching Whisper small once",
+    }
+    plan.update(overrides)
+    return plan
+
+
+def test_the_loader_is_handed_the_verified_commit(monkeypatch):
+    """A plan that named the model but not the weights would leave the hub to choose them."""
+    from audio_studio.engines import whisper as backend
+
+    calls: list[dict] = []
+    _stub_faster_whisper(monkeypatch, lambda name, **kwargs: calls.append(kwargs) or object())
+    monkeypatch.setattr(backend, "load_plan", lambda name: _plan())
+    backend.clear_cache()
+
+    backend._load_model(TranscribeOptions(model="small"))
+    assert calls == [{"device": "cpu", "compute_type": "int8", "revision": PIN}]
+
+
+def test_a_pin_the_hub_no_longer_has_falls_forward_to_main(monkeypatch):
+    """
+    The pin is a preference for the weights this project measured, not a promise that the hub
+    keeps them. A commit that is gone costs one retry - and the run has to say which weights it
+    ended up with, because loading different ones is exactly the thing the pin exists to notice.
+    """
+    from audio_studio.engines import whisper as backend
+
+    asked: list[dict] = []
+
+    def construct(name, **kwargs):
+        asked.append(kwargs)
+        if kwargs.get("revision"):
+            raise RevisionNotFoundError(f"Revision {PIN} not found in Systran/faster-whisper-small")
+        return object()
+
+    _stub_faster_whisper(monkeypatch, construct)
+    monkeypatch.setattr(backend, "load_plan", lambda name: _plan())
+    # What the fetch wrote: the commit `main` resolved to. Read from the cache in a real run.
+    monkeypatch.setattr(backend.models, "cached_commit", lambda repo, *args, **kwargs: "c" * 40)
+    backend.clear_cache()
+
+    said: list[str] = []
+    backend._load_model(TranscribeOptions(model="small"), lambda fraction, message: said.append(message))
+
+    assert ["revision" in kwargs for kwargs in asked] == [True, False], "the pin, then main - once"
+    assert any("not on the hub any more" in message for message in said), said
+    note = backend.loaded_state()[0]
+    assert note["revision"] == "c" * 40, "the artifact names the weights that were actually used"
+    assert PIN[:8] in note["revisionNote"], "and the pin it could not have is still on record"
+
+
+def test_a_failure_that_is_not_about_the_pin_is_not_retried(monkeypatch):
+    """A retry that cannot succeed turns one clear error into two, and hides the real one."""
+    from audio_studio.engines import whisper as backend
+
+    asked: list[dict] = []
+
+    def construct(name, **kwargs):
+        asked.append(kwargs)
+        raise ConnectionError("HTTPSConnectionPool(host='huggingface.co'): Max retries exceeded")
+
+    _stub_faster_whisper(monkeypatch, construct)
+    monkeypatch.setattr(backend, "load_plan", lambda name: _plan())
+    backend.clear_cache()
+
+    with pytest.raises(ConnectionError):
+        backend._load_model(TranscribeOptions(model="small"))
+    assert len(asked) == 1
+
+
+def test_an_unpinned_model_is_never_retried_either(monkeypatch):
+    """There is no pin to lose, so a failure is the failure - even one that mentions a revision."""
+    from audio_studio.engines import whisper as backend
+
+    asked: list[dict] = []
+
+    def construct(name, **kwargs):
+        asked.append(kwargs)
+        raise RevisionNotFoundError("Revision not found")
+
+    _stub_faster_whisper(monkeypatch, construct)
+    monkeypatch.setattr(backend, "load_plan", lambda name: _plan(revision=None))
+    backend.clear_cache()
+
+    with pytest.raises(RevisionNotFoundError):
+        backend._load_model(TranscribeOptions(model="some-org/their-whisper"))
+    assert len(asked) == 1
+
+
+def test_a_fallback_run_says_so_in_the_transcript_it_produces(monkeypatch):
+    """
+    A warning rather than a log line: these words did not come out of the measured weights, and a
+    transcript has to carry that with it - the terminal of the run that made it is long gone by
+    the time somebody asks why two machines disagree.
+    """
+    from audio_studio.engines import whisper as backend
+
+    class Segment:
+        start, end, text, words = 0.0, 1.0, " hi", []
+
+    class Info:
+        language, duration, language_probability = "en", 5.0, 1.0
+
+    class Model:
+        def transcribe(self, source, **kwargs):
+            return [Segment()], Info()
+
+    def construct(name, **kwargs):
+        if kwargs.get("revision"):
+            raise RevisionNotFoundError(f"Revision {PIN} not found")
+        return Model()
+
+    _stub_faster_whisper(monkeypatch, construct)
+    monkeypatch.setattr(backend, "load_plan", lambda name: _plan())
+    monkeypatch.setattr(backend.models, "cached_commit", lambda repo, *args, **kwargs: "c" * 40)
+    backend.clear_cache()
+
+    transcript = backend.WhisperEngine().transcribe(silent_audio(5.0), TranscribeOptions(model="small"))
+    assert transcript.engine["modelRevision"] == "c" * 40
+    assert "not on the hub any more" in transcript.engine["modelRevisionFallback"]
+    assert any("may not reproduce" in warning for warning in transcript.warnings), transcript.warnings
+    backend.clear_cache()
 
 
 # --------------------------------------------------------------------------- #
