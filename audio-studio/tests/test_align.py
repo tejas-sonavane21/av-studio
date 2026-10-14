@@ -10,8 +10,12 @@ tests.
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
+from audio_studio import models as catalogue
 from audio_studio import pipeline
 from audio_studio.align import align_transcript, available_aligners, get_aligner
 from audio_studio.align.apply import apply_alignment, limits_for
@@ -375,6 +379,128 @@ def test_the_new_envelope_always_contains_its_words():
 # --------------------------------------------------------------------------- #
 # the real backend, against a synthetic acoustic model
 # --------------------------------------------------------------------------- #
+
+
+class RevisionNotFoundError(Exception):
+    """The hub's own name for "that commit is not there any more"."""
+
+
+def _stub_transformers(monkeypatch, asked: list[dict], *, pin_missing: bool = False):
+    """
+    A ``transformers`` whose two entry points are ours, so the aligner's pin is testable.
+
+    Both are imported inside ``_load_pair``, so a `sys.modules` entry is the only way to answer
+    the import from a test - the same trick the transcriber's tests use for ``faster_whisper``.
+
+    Every load is recorded as the kwargs it was asked for, which is what makes "at the pin, then
+    at main, once" a readable assertion rather than a claim.
+    """
+    pin = catalogue.ALIGN_REVISION
+
+    def refuse_if_the_pin_is_gone(name: str, kwargs: dict) -> None:
+        if pin_missing and kwargs.get("revision"):
+            raise RevisionNotFoundError(f"Revision {pin} not found in {name}")
+
+    class Tokenizer:
+        @classmethod
+        def from_pretrained(cls, name, **kwargs):
+            asked.append(kwargs)
+            refuse_if_the_pin_is_gone(name, kwargs)
+            return cls()
+
+        def get_vocab(self):
+            return {"<pad>": 0, "|": 1, "A": 2, "B": 3}
+
+    class Model:
+        config = types.SimpleNamespace(conv_stride=(4, 2, 2, 2, 2), sample_rate=16000)
+
+        @classmethod
+        def from_pretrained(cls, name, **kwargs):
+            refuse_if_the_pin_is_gone(name, kwargs)
+            return cls()
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+    module = types.ModuleType("transformers")
+    module.AutoTokenizer = Tokenizer  # type: ignore[attr-defined]
+    module.Wav2Vec2ForCTC = Model  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", module)
+
+
+def test_the_aligner_is_handed_the_pinned_checkpoint(monkeypatch):
+    """
+    A re-timing pass is only reproducible if the acoustic model that produced the timings is the
+    same one, so the pin is not decoration: it is what the timings mean.
+    """
+    from audio_studio.align import wav2vec
+
+    asked: list[dict] = []
+    _stub_transformers(monkeypatch, asked)
+    wav2vec.clear_cache()
+
+    wav2vec._load(catalogue.ALIGN_MODEL, "cpu")
+    assert asked == [{"revision": catalogue.ALIGN_REVISION}]
+    assert wav2vec.load_note(catalogue.ALIGN_MODEL, "cpu") == {
+        "revision": catalogue.ALIGN_REVISION,
+        "pinned": catalogue.ALIGN_REVISION,
+        "note": "",
+    }
+
+
+def test_a_pin_the_hub_no_longer_has_aligns_at_main_instead_of_failing(monkeypatch):
+    """
+    The aligner moves the words, so failing forward silently would be the worst outcome: the
+    timings would be real, and nobody would know which checkpoint measured them.
+    """
+    from audio_studio.align import wav2vec
+
+    asked: list[dict] = []
+    _stub_transformers(monkeypatch, asked, pin_missing=True)
+    monkeypatch.setattr(wav2vec, "cached_commit", lambda repo, *args, **kwargs: "c" * 40)
+    wav2vec.clear_cache()
+
+    wav2vec._load(catalogue.ALIGN_MODEL, "cpu")
+    assert ["revision" in kwargs for kwargs in asked] == [True, False], "the pin, then main - once"
+    note = wav2vec.load_note(catalogue.ALIGN_MODEL, "cpu")
+    assert note["revision"] == "c" * 40, "what the timings are made of, not what was asked for"
+    assert catalogue.ALIGN_REVISION[:8] in note["note"]
+
+
+def test_a_failure_that_is_not_about_the_pin_is_not_retried_here_either(monkeypatch):
+    """No network fails the same way at ``main``: a retry would only add a second error."""
+    from audio_studio.align import wav2vec
+
+    attempted: list[dict] = []
+
+    class Tokenizer:
+        @classmethod
+        def from_pretrained(cls, name, **kwargs):
+            return cls()
+
+        def get_vocab(self):
+            return {"<pad>": 0, "|": 1, "A": 2}
+
+    class Model:
+        config = types.SimpleNamespace(conv_stride=(4, 2, 2, 2, 2), sample_rate=16000)
+
+        @classmethod
+        def from_pretrained(cls, name, **kwargs):
+            attempted.append(kwargs)
+            raise ConnectionError("HTTPSConnectionPool(host='huggingface.co'): Max retries exceeded")
+
+    module = types.ModuleType("transformers")
+    module.AutoTokenizer = Tokenizer  # type: ignore[attr-defined]
+    module.Wav2Vec2ForCTC = Model  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", module)
+    wav2vec.clear_cache()
+
+    with pytest.raises(ConnectionError):
+        wav2vec._load(catalogue.ALIGN_MODEL, "cpu")
+    assert attempted == [{"revision": catalogue.ALIGN_REVISION}], "asked once, at the pin, and not again"
 
 
 def test_the_backend_aligns_a_synthetic_model_and_builds_its_provenance(monkeypatch):
