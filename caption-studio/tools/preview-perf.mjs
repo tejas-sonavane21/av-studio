@@ -379,7 +379,7 @@ async function main() {
       `\n  the copy: the decoder presented ${copy.presented.toFixed(1)}/s of it against ${editor.presented.toFixed(1)}/s ` +
         `of the original (${gained.toFixed(1)}x) — ` +
         (gained >= 1.5
-          ? 'the copy is carrying the motion the original could not'
+          ? 'the copy is being presented at the display\u2019s own rate, where the original was starved by its decode'
           : 'no real gain here; this file did not need a copy'),
     );
   }
