@@ -23,6 +23,7 @@ import {
   pickAudioCodec,
   pickCodec,
   pickVideoCodec,
+  rangeWindows,
   resolutionFor,
   resolveAudioBitrate,
 } from '../../src/io/webcodecs-export.js';
@@ -74,6 +75,69 @@ test('frameCount is the document length at the chosen rate, and never zero', () 
   assert.equal(frameCount(0, 30), 1, 'an empty document still gets one frame, not an empty file');
   assert.equal(frameCount(NaN, 30), 1);
   assert.equal(frameCount(5, 30.4), 150);
+});
+
+// ---------------------------------------------------------------------------
+// how the frames are walked: the reason a 4K export stopped costing 1448 ms a frame
+// ---------------------------------------------------------------------------
+//
+// The picture is decoded **in order**, one pass per kept range, instead of being seeked once per
+// output frame. That means the export's frame list has to be divided among the ranges, and the one
+// thing that must never happen is a frame that no range claims (a hole in the file) or that two
+// ranges claim (a frame written twice). These are the arithmetic of that division.
+
+test('the frames are divided among the kept ranges in order, with none lost or repeated', () => {
+  const ranges = [
+    { id: 'a', srcIn: 0, srcOut: 1 },
+    { id: 'b', srcIn: 2, srcOut: 3 },
+  ];
+  const windows = rangeWindows(ranges, 30, 60);
+  assert.deepEqual(
+    windows.map((w) => [w.range.id, w.startIndex, w.count]),
+    [
+      ['a', 0, 30],
+      ['b', 30, 30],
+    ],
+  );
+  assert.equal(
+    windows.reduce((sum, w) => sum + w.count, 0),
+    60,
+    'every output frame belongs to exactly one range',
+  );
+});
+
+test('rounding goes to the last range, so the file is exactly as long as it was asked to be', () => {
+  // 1.5 s + 1.5 s at 30 fps is 45 + 45 = 90 frames, but 0.98 s rounds down — the total still has to
+  // come out at `frameCount(seconds, rate)`, or the export's own frame counter disagrees with itself.
+  const ranges = [
+    { id: 'a', srcIn: 0, srcOut: 0.98 },
+    { id: 'b', srcIn: 5, srcOut: 6.5 },
+  ];
+  const windows = rangeWindows(ranges, 30, 74);
+  assert.equal(windows[0].count, 29, '0.98 s is 29 frames, not 30');
+  assert.equal(
+    windows.reduce((sum, w) => sum + w.count, 0),
+    74,
+    'the leftover frames go to the last range rather than disappearing',
+  );
+  assert.equal(windows[1].startIndex, 29, 'and the second run starts where the first stopped');
+});
+
+test('a range too short for a single frame is skipped, and the frames it would have had are not', () => {
+  const ranges = [
+    { id: 'tiny', srcIn: 0, srcOut: 0.01 },
+    { id: 'real', srcIn: 1, srcOut: 2 },
+  ];
+  const windows = rangeWindows(ranges, 30, 30);
+  assert.deepEqual(windows.map((w) => w.range.id), ['real']);
+  assert.equal(windows[0].count, 30);
+});
+
+test('a total of zero frames, or no ranges at all, is an empty walk rather than a crash', () => {
+  assert.deepEqual(rangeWindows([{ id: 'a', srcIn: 0, srcOut: 1 }], 30, 0), []);
+  assert.deepEqual(rangeWindows([], 30, 90), []);
+  assert.deepEqual(rangeWindows(null, 30, 90), []);
+  assert.deepEqual(rangeWindows([{ id: 'a', srcIn: 5, srcOut: 5 }], 30, 30), []);
 });
 
 test('lastCaptionEnd is the document clock when the container will not report one', () => {

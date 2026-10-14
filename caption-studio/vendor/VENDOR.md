@@ -53,6 +53,9 @@ it in one pass that takes as long as decoding takes instead of as long as the cl
 | File | Package | Version | Licence | Source |
 |---|---|---|---|---|
 | `mediabunny/mediabunny.min.mjs` | `mediabunny` | 1.61.4 | MPL-2.0 | https://unpkg.com/mediabunny@1.61.4/dist/bundles/mediabunny.min.mjs |
+
+Two callers now: `src/io/preview-proxy.js` (which converts, and writes a copy) and
+`src/io/webcodecs-export.js` (which only reads frames - the export keeps its own encoder and muxer).
 | `mediabunny/LICENSE` | - | - | MPL-2.0 | https://github.com/Vanilagy/mediabunny/blob/main/LICENSE |
 
 The bundle is the published one, byte for byte: sha256 `y8ddp0nWhHibLs2Iv8z1UHavHtPGZeFjHbFc+Mh2V0I=`
@@ -71,12 +74,20 @@ silently lost a soundtrack. Mediabunny is the muxers above grown into a complete
 author (Vanilagy, who wrote `mp4-muxer` and `webm-muxer` and now recommends this instead of them), and
 it is what the *preview copy* uses.
 
-**The export does not use it.** `src/io/webcodecs-export.js` still drives `VideoEncoder`/
-`AudioEncoder` and the vendored muxers directly, because the export has requirements a general-purpose
-converter does not meet: the caption canvas is composited into every frame (clips, logos, cut
-boundaries), the resolution and bitrate come from the export window's own ladder, and the file has to
-be written at the user's chosen container and quality. A preview copy has none of that - it is the same
-picture, smaller - and that is exactly the kind of job a library should own.
+**The export uses it to read, and not to write.** `src/io/webcodecs-export.js` now decodes its picture
+through this library too (`openPictureStream()`), which is a measurement rather than a preference: the
+export used to seek a `<video>` once per output frame, and on this project's 2160p AV1 capture that was
+**1448 ms a frame and 98.5% of the whole export** - a seek on a paused element is a decoder flush plus a
+decode from the previous keyframe, paid again for every frame. Reading through Mediabunny decodes the
+range in order, off any clock, and took the same window from 264.6 s to 19.0-19.6 s (`tools/export-perf.mjs`).
+Overlay clips are read the same way, for the same reason.
+
+What the export does **not** hand over is the writing. It still drives `VideoEncoder`/`AudioEncoder` and
+the muxers above directly, because the export has requirements a general-purpose converter does not meet:
+the caption canvas is composited into every frame (clips, logos, cut boundaries), the resolution and
+bitrate come from the export window's own ladder, and the file has to be written at the user's chosen
+container and quality. A preview copy has none of that - it is the same picture, smaller - and that is
+exactly the kind of job a library should own.
 
 **MPL-2.0, not MIT like the rest of this directory.** MPL-2.0 is *file-level* copyleft: it applies to
 the file it came in (`mediabunny.min.mjs`) and not to the project that includes it, so an MIT project

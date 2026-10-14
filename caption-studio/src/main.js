@@ -1680,6 +1680,11 @@ async function runExport(settings) {
     const name = `${exportStem(doc)}.${result.format}`;
     downloadBlob(name, result.blob);
     setExportProgress(1);
+    // Which of the two decode paths the export actually got. It is one line, and it is the difference
+    // between "this file is slow to export" being a mystery and being a fact about the file.
+    log(`  the picture was ${result.picture}`);
+    if (result.pictureNote) log(`  note: ${result.pictureNote}`);
+    if (result.blankFrames) log(`  ⚠ ${result.blankFrames} frame(s) had no picture to draw — they are black`);
     if (result.audioSkipped) log(`  ⚠ ${result.audioSkipped}`);
     else if (result.audioNote) log(`  note: ${result.audioNote}`);
     if (result.clips) log(`  ${result.clips} overlay clip(s) rendered into the frames`);

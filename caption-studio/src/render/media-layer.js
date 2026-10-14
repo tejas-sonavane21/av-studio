@@ -16,12 +16,28 @@
 
 import { clipDrawRect, clipsAt } from '../model/media.js';
 
-/** An element's own pixel size, whichever kind of element it is — 0×0 until it has one. */
+/**
+ * A media's own pixel size, whichever kind of drawing source it is — 0×0 until it has one.
+ *
+ * Three sources reach this, and the third is why it is not two lines:
+ *
+ * * an `<img>` reports `naturalWidth`/`naturalHeight`;
+ * * a `<video>` reports `videoWidth`/`videoHeight`;
+ * * a **canvas** — which is what the export's own decoder hands over when a clip is decoded in order
+ *   rather than seeked (`io/webcodecs-export.js`) — reports neither, because those properties are about
+ *   a file and a canvas is already pixels. Its `width`/`height` are its own size, and they are read
+ *   only for a canvas: an element with a `width` *attribute* but no metadata yet must still measure as
+ *   0×0 and draw nothing, rather than being painted into a box on the strength of a layout number.
+ */
 export function mediaSizeOf(element) {
-  return {
-    width: element?.naturalWidth || element?.videoWidth || 0,
-    height: element?.naturalHeight || element?.videoHeight || 0,
-  };
+  const own = element?.naturalWidth || element?.videoWidth;
+  if (own) {
+    return { width: own, height: element.naturalHeight || element.videoHeight || 0 };
+  }
+  if (typeof element?.getContext === 'function') {
+    return { width: element.width || 0, height: element.height || 0 };
+  }
+  return { width: 0, height: 0 };
 }
 
 /**

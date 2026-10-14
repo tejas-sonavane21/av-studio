@@ -46,6 +46,7 @@
 
 import { Muxer as WebmMuxer, ArrayBufferTarget as WebmTarget } from '../../vendor/muxers/webm-muxer.mjs';
 import { Muxer as Mp4Muxer, ArrayBufferTarget as Mp4Target } from '../../vendor/muxers/mp4-muxer.mjs';
+import { ALL_FORMATS, BlobSource, CanvasSink, Input } from '../../vendor/mediabunny/mediabunny.min.mjs';
 import { createRenderer } from '../render/renderer.js';
 import { drawMediaClips } from '../render/media-layer.js';
 import { fitRect } from '../util/math.js';
@@ -281,6 +282,120 @@ function destroyDecodeElement(element) {
 }
 
 /**
+ * The picture as a stream of frames, decoded in order and off any clock, by Mediabunny.
+ *
+ * This is the difference between an export that takes as long as decoding takes and one that takes
+ * 1448 ms per frame. The element path below (*and* the path this export shipped with) steps a paused
+ * `<video>` with `currentTime`, and a seek on a paused element is a decoder flush plus a decode from
+ * the previous keyframe — paid again for every single output frame, however close together those
+ * frames are. Mediabunny drives the decoder itself and hands the frames over in sequence, so a kept
+ * range of the file is **one pass** from the keyframe before it to its end, and no frame costs a
+ * seek. It also decodes on no clock at all, so nothing is dropped to keep up with one.
+ *
+ * The frames arrive as canvases already at the output's size with the picture fitted inside them
+ * (`fit: 'contain'` — the same arithmetic as `fitRect`), which is why the streaming path draws 1:1
+ * and needs no rectangle of its own.
+ *
+ * Returns `null` — never throws — when this file is not one it can read and decode: an exotic
+ * container, or a codec this browser has no decoder for. The caller then falls back to stepping a
+ * `<video>` element, which handles anything the browser itself can play. The fallback is kept
+ * deliberately runnable rather than theoretical; a path nobody exercises is a path that rots.
+ *
+ * @param {string} url
+ * @returns {Promise<null | {mode: string, sourceSeconds: number, sourceSize: {width:number,height:number},
+ *   frames: (options: {range: object, width: number, height: number}) => AsyncIterable<{canvas: HTMLCanvasElement, timestamp: number, duration: number}>,
+ *   dispose: () => void}>}
+ */
+async function openPictureStream(url) {
+  if (typeof fetch !== 'function' || typeof VideoDecoder === 'undefined') return null;
+  let input = null;
+  try {
+    const blob = await (await fetch(url)).blob();
+    input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
+    if (!(await input.canRead())) throw new Error('unreadable container');
+    const track = await input.getPrimaryVideoTrack();
+    if (!track) throw new Error('no video track');
+    if (!(await track.canDecode())) throw new Error('no decoder for this codec');
+    const sourceSeconds = await input.computeDuration();
+    const sourceSize = {
+      width: await track.getDisplayWidth(),
+      height: await track.getDisplayHeight(),
+    };
+    if (!(sourceSeconds > 0) || !(sourceSize.width > 0) || !(sourceSize.height > 0)) {
+      throw new Error('no usable length or size');
+    }
+    // One sink for the whole export, built the first time a range asks for frames: the size it wants
+    // is the export's own, which is not known until the bitrate and the probe have been settled.
+    // `poolSize: 2` rather than 0 — each canvas is drawn and released immediately, so two in flight
+    // is already generous, and a new 1080p canvas per frame for five thousand frames is churn.
+    //
+    // Two kinds of frame come out of this: the picture is asked for *at the output's size with the
+    // picture fitted inside it* (drawn 1:1 by the export), and an overlay clip is asked for at its own
+    // size, because a clip is fitted into its box by `clipDrawRect`, which needs the media's real
+    // shape to do it.
+    const sinks = new Map();
+    return {
+      mode: 'decoded in order, off the clock',
+      sourceSeconds,
+      sourceSize,
+      frames({ range, width = null, height = null }) {
+        const key = width && height ? `${width}x${height}` : 'natural';
+        if (!sinks.has(key)) {
+          sinks.set(
+            key,
+            width && height
+              ? new CanvasSink(track, { width, height, fit: 'contain', poolSize: 2 })
+              : new CanvasSink(track, { poolSize: 2 }),
+          );
+        }
+        return sinks.get(key).canvases(range.srcIn, Math.min(range.srcOut, sourceSeconds));
+      },
+      dispose() {
+        try {
+          input?.dispose?.();
+        } catch {
+          /* already disposed */
+        }
+      },
+    };
+  } catch {
+    try {
+      input?.dispose?.();
+    } catch {
+      /* nothing to release */
+    }
+    return null;
+  }
+}
+
+/**
+ * How many output frames each kept range supplies, and where each run starts. Pure.
+ *
+ * The export walks the ranges rather than the frames because the streaming decoder walks them: one
+ * pass per kept range, and a cut is a *different pass*, not a rewind. Rounding is settled here so
+ * that every output frame belongs to exactly one range — the leftover frames go to the last range,
+ * which is what keeps the file's length equal to `frameCount(seconds, rate)` however the cut was
+ * placed.
+ *
+ * @returns {Array<{range: object, startIndex: number, count: number}>}
+ */
+export function rangeWindows(ranges, rate, totalFrames) {
+  const list = Array.isArray(ranges) ? ranges : [];
+  const total = Math.max(0, Math.round(Number(totalFrames) || 0));
+  const windows = [];
+  let index = 0;
+  for (const range of list) {
+    const seconds = Math.max(0, (Number(range?.srcOut) || 0) - (Number(range?.srcIn) || 0));
+    const count = Math.max(0, Math.min(total - index, Math.round(seconds * (Number(rate) || 0))));
+    if (count <= 0) continue;
+    windows.push({ range, startIndex: index, count });
+    index += count;
+  }
+  if (windows.length && index < total) windows[windows.length - 1].count += total - index;
+  return windows;
+}
+
+/**
  * Seek the video to a frame's time and wait until that frame is the one it will draw.
  *
  * `seeked` is the contract: when it fires, the element's current frame *is* the one at the new
@@ -288,8 +403,14 @@ function destroyDecodeElement(element) {
  * certainly presented it; no `requestVideoFrameCallback` is used, because on a *paused* video it can
  * simply never fire and each frame would then cost its whole timeout — which is how an offline encode
  * ends up slower than the real-time recording it replaced.
+ *
+ * @param {HTMLVideoElement} video
+ * @param {number} t                             seconds in the source file
+ * @param {{waitForPaint?:boolean, paintTimeout?:number}} [options]
+ *   `waitForPaint` is off only in `tools/export-perf.mjs`, which measures what that wait costs and
+ *   whether the frame is any different without it.
  */
-async function seekToFrame(video, t) {
+export async function seekToFrame(video, t, { waitForPaint = true, paintTimeout = 32 } = {}) {
   if (Math.abs(video.currentTime - t) <= 1e-4) return;
   const seeked = once(video, 'seeked', 3000);
   try {
@@ -298,6 +419,7 @@ async function seekToFrame(video, t) {
     /* not seekable — the current frame stands */
   }
   await seeked;
+  if (!waitForPaint) return;
   // One paint, but *bounded*. `requestAnimationFrame` is the right wait in a visible tab and is
   // throttled to nothing in a hidden one — and an export that only works while you watch it would be
   // no better than the recording this replaced. Once `seeked` has fired the decoded frame is what
@@ -305,7 +427,7 @@ async function seekToFrame(video, t) {
   // moving.
   await Promise.race([
     new Promise((resolve) => requestAnimationFrame(resolve)),
-    new Promise((resolve) => setTimeout(resolve, 32)),
+    new Promise((resolve) => setTimeout(resolve, paintTimeout)),
   ]);
 }
 
@@ -393,8 +515,60 @@ function planarChunk(channelData, offset, frames, channels) {
   return out;
 }
 
-/** Wait until the encoder's queue is short again, so a long export does not pile up in memory. */
-async function drain(encoder, threshold) {
+/**
+ * A stopwatch for the export's phases, off unless asked for.
+ *
+ * The export was reported as slow and the useful answer to "why" is a number per phase rather than
+ * a theory, so every phase can be timed: the element seeks, the clip seeks, the compositing, the
+ * caption rasterisation, the encode submission and the drains. Nothing is measured when `enabled` is
+ * false - that is the whole point of the guard, because this runs once per output frame and a
+ * stopwatch on the hot path would be measuring itself.
+ *
+ * One mark at a time, which is enough: the phases below are sequential, and the encoder runs on its
+ * own thread while the next frame is being sought, so what this reports is *wall clock* - what the
+ * user waits - not a CPU profile.
+ */
+function createTimings(enabled) {
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : 0);
+  const phase = {
+    load: 0,
+    clips: 0,
+    duration: 0,
+    setup: 0,
+    seek: 0,
+    clipSeek: 0,
+    composite: 0,
+    captions: 0,
+    encode: 0,
+    flush: 0,
+    audioDecode: 0,
+    audioEncode: 0,
+    mux: 0,
+  };
+  let mark = 0;
+  return {
+    enabled: Boolean(enabled),
+    get phase() {
+      return phase;
+    },
+    start() {
+      if (enabled) mark = now();
+    },
+    stop(name) {
+      if (!enabled) return;
+      phase[name] += now() - mark;
+    },
+  };
+}
+
+/**
+ * Wait until the encoder's queue is short again, so a long export does not pile up in memory.
+ *
+ * Exported because a measurement of "how fast could this export go if decoding were free" has to
+ * drain the queue the same way the export does; a harness with a drain of its own would measure a
+ * throughput this pipeline never reaches.
+ */
+export async function drainEncoder(encoder, threshold) {
   let spins = 0;
   while (encoder.encodeQueueSize > threshold && spins < 6000) {
     await new Promise((resolve) => setTimeout(resolve, 4));
@@ -426,6 +600,11 @@ async function drain(encoder, threshold) {
  * @param {AbortSignal} [options.signal]
  * @param {Record<string,string>} [options.clipUrls]  the file behind each overlay clip, by clip id
  * @param {typeof createRenderer} [options.createRendererImpl]
+ * @param {boolean} [options.instrument=false]        time each phase and hand the totals back on the
+ *                                                     result as `timings` (see `tools/export-perf.mjs`)
+ * @param {'auto'|'element'} [options.pictureDecoder='auto']  `'element'` forces the seek-per-frame
+ *                                                     path, which is what `tools/export-perf.mjs`
+ *                                                     compares the streaming one against
  * @returns {Promise<{blob: Blob, mimeType: string, format: string, seconds: number, sourceSeconds: number, width: number, height: number, frames: number, fps: number, audio: boolean, audioSkipped: string|null, audioNote: string|null, audioBitrate: number, videoCodec: string, audioCodec: string, videoBitsPerSecond: number, trimmed: boolean, clips: number, clipsMissing: string[]}>}
  */
 export async function exportDocumentToVideo({
@@ -443,6 +622,8 @@ export async function exportDocumentToVideo({
   signal = null,
   clipUrls = null,
   createRendererImpl = createRenderer,
+  instrument = false,
+  pictureDecoder = 'auto',
 } = {}) {
   if (!doc?.blocks?.length) {
     throw new Error('there are no captions to burn in — load a source or open the demo first');
@@ -452,32 +633,56 @@ export async function exportDocumentToVideo({
   }
 
   const container = format === 'webm' ? 'webm' : 'mp4';
+  // Off unless asked for: a stopwatch per frame is a cost of its own.
+  const clock = createTimings(instrument);
 
   // Overlay clips are decoded from elements of the export's own (see the note in `editor/media-library.js`
   // — the preview's elements are being played and scrubbed, and a seek on one of those would jump the
   // preview under the user while the export ran). `clipsMissing` is what could not be loaded, so the
   // caller can say so instead of shipping a file that quietly lost a logo.
   const clipElements = new Map();
+  const clipStreams = new Map();
   const clipsMissing = [];
   let mediaCanvas = null;
   let mediaCtx = null;
   let drawClipLayer = null;
 
-  // ---- the decode surface -------------------------------------------------
-  // Never the element on screen. `sourceUrl` gives the export its own, so the preview keeps whatever
-  // state the user left it in — including playing.
+  // ---- the picture ---------------------------------------------------------
+  //
+  // Two ways to get a frame out of the file, and the export takes the first one it can:
+  //
+  // * **decoded in order, off the clock**, by Mediabunny — the library the preview's copy is made
+  //   with. Frames arrive in sequence, so no frame costs a seek. On this project's 2160p AV1 capture
+  //   this is the difference between 1448 ms a frame and about 90 (`tools/export-perf.mjs`).
+  // * **seeked frame by frame**, through an off-screen `<video>` — what this export shipped with,
+  //   and what it still falls back to for a file Mediabunny cannot read or decode. Never the element
+  //   on screen: the export's own, so the preview keeps whatever state the user left it in.
   let owned = null;
   let source = video;
-  if (sourceUrl) {
+  let picture = null;
+  let pictureNote = null;
+
+  if (sourceUrl && pictureDecoder !== 'element') {
+    clock.start();
+    picture = await openPictureStream(sourceUrl);
+    clock.stop('load');
+    if (!picture) {
+      pictureNote =
+        'this file could not be decoded frame by frame, so the export is stepping it through the browser instead';
+    }
+  }
+  if (!picture && sourceUrl) {
+    clock.start();
     owned = createDecodeElement(sourceUrl);
     source = owned;
     const ready = await readyMedia(owned);
+    clock.stop('load');
     if (!ready && !(owned.videoWidth > 0 || owned.duration > 0)) {
       destroyDecodeElement(owned);
       throw new Error('the picture could not be loaded for the export');
     }
   }
-  if (!source || !(source.videoWidth > 0 || (Number.isFinite(source.duration) && source.duration > 0))) {
+  if (!picture && (!source || !(source.videoWidth > 0 || (Number.isFinite(source.duration) && source.duration > 0)))) {
     destroyDecodeElement(owned);
     throw new Error(
       'burning the captions into a video needs a loaded video — add one under Sources, or download the caption files instead',
@@ -485,7 +690,9 @@ export async function exportDocumentToVideo({
   }
 
   try {
-    const sourceSeconds = await resolveDuration(source, lastCaptionEnd(doc));
+    clock.start();
+    const sourceSeconds = picture ? picture.sourceSeconds : await resolveDuration(source, lastCaptionEnd(doc));
+    clock.stop('duration');
     const videoRanges = trackRanges(doc, 'video', sourceSeconds);
     if (!videoRanges.length) {
       throw new Error('the video track has been cut away entirely — reset the track to export');
@@ -495,7 +702,15 @@ export async function exportDocumentToVideo({
       throw new Error('the kept part of the video is too short to export — undo a cut and try again');
     }
 
-    const fallbackSize = evenSize(doc.canvas?.width || source.videoWidth || 1280, doc.canvas?.height || source.videoHeight || 720);
+    // The picture's own size, from whichever path is reading it — never the preview's, which may be
+    // a smaller copy of it (see `io/preview-source.js`).
+    const pictureSize = picture
+      ? picture.sourceSize
+      : { width: Number(source.videoWidth) || 0, height: Number(source.videoHeight) || 0 };
+    const fallbackSize = evenSize(
+      doc.canvas?.width || pictureSize.width || 1280,
+      doc.canvas?.height || pictureSize.height || 720,
+    );
     const target = size ? evenSize(size.width, size.height) : fallbackSize;
     const { width, height } = target;
     const rate = Math.min(60, Math.max(1, Math.round(Number(fps) || doc.canvas?.fps || 30)));
@@ -516,12 +731,17 @@ export async function exportDocumentToVideo({
     const videoCodec = probe.codec;
 
     const frameDurUs = Math.round(1e6 / rate);
-    const fit = fitRect(
-      { width: source.videoWidth || width, height: source.videoHeight || height },
-      { width, height },
-    );
+    // Where the picture sits inside the frame. The streaming path needs no rectangle: its frames are
+    // already the output's size with the picture fitted inside them, by the same arithmetic.
+    const fit = picture
+      ? null
+      : fitRect(
+          { width: pictureSize.width || width, height: pictureSize.height || height },
+          { width, height },
+        );
 
     // ---- offline render surfaces -----------------------------------------
+    clock.start();
     const composite = document.createElement('canvas');
     composite.width = width;
     composite.height = height;
@@ -534,6 +754,7 @@ export async function exportDocumentToVideo({
     renderer.attach(captionCanvas);
     renderer.resize({ width, height, devicePixelRatio: 1, applyCssSize: false });
     await renderer.ensureFonts(doc);
+    clock.stop('setup');
 
     // ---- the clip layer ----------------------------------------------------
     // A canvas of the same size as the frame, drawn between the picture and the captions. One size, one
@@ -551,10 +772,21 @@ export async function exportDocumentToVideo({
        * head trim advanced (`sourceIn`), and therefore what makes a clip trimmed at the front show the
        * frames it was trimmed *to* rather than the ones it began with. Images need none of this: their
        * single frame is the element.
+       *
+       * A video clip gets the same treatment as the picture, and for the same measured reason: stepping
+       * one with `currentTime` costs about 1.2 s a frame on a 4K overlay — 88% of an export that had
+       * already stopped seeking its own picture (`tools/export-perf.mjs --clip`). So it is decoded in
+       * order too, one pass over the clip's own window, and the element remains the fallback for a file
+       * the streaming decoder cannot read.
        */
       drawClipLayer = async (t) => {
         for (const clip of clips) {
           if (clip.kind !== 'video') continue;
+          const stream = clipStreams.get(clip.id);
+          if (stream) {
+            await advanceClipStream(stream, t);
+            continue;
+          }
           const element = clipElements.get(clip.id);
           const duration = Number(element?.duration);
           if (!element || !(duration > 0)) continue;
@@ -564,9 +796,42 @@ export async function exportDocumentToVideo({
           clips,
           size: { width, height },
           time: t,
-          resolve: (id) => clipElements.get(id) ?? null,
+          resolve: (id) => clipStreams.get(id)?.current?.canvas ?? clipElements.get(id) ?? null,
         });
       };
+
+      /**
+       * Move one clip's own decoder to the frame its window wants at source time `t`.
+       *
+       * The pass is built the first time the clip is on screen (a clip decoded from its own start when
+       * it first appears at `t > start` would show the wrong frames, so the window is `[sourceIn,
+       * sourceIn + length]` and every frame in it is decoded in order, which is the point), and it is
+       * advanced frame by frame after that: the frame a time wants is the last one that started at or
+       * before it.
+       */
+      const advanceClipStream = async (stream, t) => {
+        const clip = stream.clip;
+        if (!(t >= clip.start - 1e-6) || !(t <= clip.end + 1e-6)) return;
+        const want = clipSourceTime(clip, t);
+        if (!stream.iterator) {
+          // From *here*, not from the clip's own first frame: the first frame this is called for is the
+          // first one the clip is on screen at, and a pass built from the clip's start would decode
+          // everything between it and the export's own beginning — which after a cut can be minutes of
+          // frames nobody will ever see.
+          const from = Math.max(0, want);
+          const to = Math.min(stream.stream.sourceSeconds, clipSourceTime(clip, clip.end));
+          if (!(to > from)) return;
+          stream.iterator = stream.stream.frames({ range: { srcIn: from, srcOut: to } })[Symbol.asyncIterator]();
+          const first = await stream.iterator.next();
+          stream.current = first.done ? null : first.value;
+          stream.peek = first.done ? { done: true } : await stream.iterator.next();
+        }
+        while (!stream.peek.done && stream.peek.value.timestamp <= want + 1e-6) {
+          stream.current = stream.peek.value;
+          stream.peek = await stream.iterator.next();
+        }
+      };
+      clock.start();
       for (const clip of clips) {
         const url = clipUrls?.[clip.id];
         if (!url) {
@@ -575,10 +840,15 @@ export async function exportDocumentToVideo({
         }
         try {
           if (clip.kind === 'video') {
-            const element = createDecodeElement(url);
-            await readyMedia(element);
-            element.pause?.();
-            clipElements.set(clip.id, element);
+            const stream = await openPictureStream(url);
+            if (stream) {
+              clipStreams.set(clip.id, { clip, stream, iterator: null, peek: { done: true }, current: null });
+            } else {
+              const element = createDecodeElement(url);
+              await readyMedia(element);
+              element.pause?.();
+              clipElements.set(clip.id, element);
+            }
           } else {
             clipElements.set(clip.id, await loadClipImage(url));
           }
@@ -586,6 +856,7 @@ export async function exportDocumentToVideo({
           clipsMissing.push(clip.name || clip.id);
         }
       }
+      clock.stop('clips');
     }
 
     // ---- audio, decided before a single frame is encoded -------------------
@@ -607,7 +878,9 @@ export async function exportDocumentToVideo({
     let chosenAudioBitrate = 0;
     if (audioCodec && audioBlob) {
       try {
+        clock.start();
         audioBuffer = await decodeAudio(audioBlob, 48000);
+        clock.stop('audioDecode');
         const support = (rate) =>
           AudioEncoderApi.isConfigSupported({
             codec: audioCodec,
@@ -652,82 +925,128 @@ export async function exportDocumentToVideo({
           });
 
     let encodeError = null;
-    const videoEncoder = new VideoEncoder({
-      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-      error: (err) => {
-        encodeError = err;
-      },
-    });
-    videoEncoder.configure({
+    const videoEncoder = createVideoEncoder({
+      container,
       codec: videoCodec,
       width,
       height,
+      rate,
       bitrate: videoBits,
-      framerate: rate,
-      // `realtime` is not "record in real time" — it is the encoder's *rate control*. The default
-      // (`quality`) makes Chrome ignore `bitrate` almost entirely on hard content (noise went out at
-      // 14 Mbps against a 0.4 Mbps target), which would make the quality picker a lie: 'balanced' and
-      // 'best' produced the same file. `realtime` turns the bitrate into an actual budget, so the
-      // setting means what it says. The frames are still stepped offline either way.
-      latencyMode: 'realtime',
-      ...(container === 'mp4' ? { avc: { format: 'avc' } } : {}),
+      onChunk: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      onError: (err) => {
+        encodeError = err;
+      },
     });
 
     // Save the element's state, but only for an element we did not create — ours came in muted and
-    // paused and goes out of the document when we are done.
-    const saved = owned
-      ? null
-      : { currentTime: source.currentTime, muted: source.muted, volume: source.volume, paused: source.paused };
-    if (!owned) source.muted = true; // no monitoring while stepping frames
+    // paused and goes out of the document when we are done. The streaming path has no element at all.
+    const saved =
+      owned || !source
+        ? null
+        : { currentTime: source.currentTime, muted: source.muted, volume: source.volume, paused: source.paused };
+    if (!owned && source) source.muted = true; // no monitoring while stepping frames
 
     const total = frameCount(seconds, rate);
     const keyEvery = Math.max(1, Math.round(rate * 2));
     const dropped = doc.blocks.filter((block) => sourceToOutputSafe(videoRanges, block) === false);
+    // Output frames that had no picture to draw. Almost always zero; a number here is the honest
+    // answer to "the end of my export is black" instead of a shrug.
+    let blankFrames = 0;
+    // How many frames actually got an overlay clip painted on them. `clipElements.size` counts the
+    // files that were *loaded*, which is not the same question and was reported as if it were: a clip
+    // decoded in order is not an element at all, so a working export read as "0 clips rendered".
+    let clipFrames = 0;
 
     try {
-      await source.pause?.();
+      await source?.pause?.();
       const audioRanges = trackRanges(doc, 'audio', sourceSeconds);
-      for (let i = 0; i < total; i += 1) {
-        if (signal?.aborted) throw new DOMException('export cancelled', 'AbortError');
-        if (encodeError) throw encodeError;
-        const outputTime = i / rate;
-        // Where this output frame came from. Captions are drawn at the *source* time, not the output
-        // time, because that is the clock they were timed against — which is what keeps a caption on
-        // the right frame even when everything before it was cut away.
-        const sourceTime = outputToSource(videoRanges, outputTime) ?? sourceSeconds;
-        await seekToFrame(source, Math.min(sourceTime, Math.max(0, sourceSeconds - 1e-3)));
-
-        cctx.clearRect(0, 0, width, height);
+      let i = 0;
+      for (const window of rangeWindows(videoRanges, rate, total)) {
+        // One decoder pass per kept range. The frames come in order, so the frame an output frame
+        // wants is *the last one that started at or before it* — carried forward, never searched for.
+        const iterator = picture
+          ? picture.frames({ range: window.range, width, height })[Symbol.asyncIterator]()
+          : null;
+        let peek = iterator ? await iterator.next() : null;
+        let current = peek && !peek.done ? peek.value : null;
+        if (peek && !peek.done) peek = await iterator.next();
         try {
-          cctx.drawImage(source, fit.x, fit.y, fit.width, fit.height);
-        } catch {
-          /* a frame not yet decodable — the next one draws */
-        }
-        // ...then the clips, *under* the captions: the same stacking the preview shows, because the
-        // export is meant to be what the preview showed.
-        if (mediaCtx) {
+          for (let k = 0; k < window.count; k += 1, i += 1) {
+            if (signal?.aborted) throw new DOMException('export cancelled', 'AbortError');
+            if (encodeError) throw encodeError;
+            const outputTime = i / rate;
+            // Where this output frame came from. Captions are drawn at the *source* time, not the
+            // output time, because that is the clock they were timed against — which is what keeps a
+            // caption on the right frame even when everything before it was cut away.
+            const sourceTime = outputToSource(videoRanges, outputTime) ?? sourceSeconds;
+            clock.start();
+            if (iterator) {
+              while (peek && !peek.done && peek.value.timestamp <= sourceTime + 1e-6) {
+                current = peek.value;
+                peek = await iterator.next();
+              }
+              if (!current) blankFrames += 1;
+            } else {
+              await seekToFrame(source, Math.min(sourceTime, Math.max(0, sourceSeconds - 1e-3)));
+            }
+            clock.stop('seek');
+
+            clock.start();
+            cctx.clearRect(0, 0, width, height);
+            try {
+              if (current) cctx.drawImage(current.canvas, 0, 0, width, height);
+              else if (!iterator) cctx.drawImage(source, fit.x, fit.y, fit.width, fit.height);
+            } catch {
+              /* a frame not yet decodable — the next one draws */
+            }
+            clock.stop('composite');
+            // ...then the clips, *under* the captions: the same stacking the preview shows, because
+            // the export is meant to be what the preview showed.
+            if (mediaCtx) {
+              clock.start();
+              try {
+                const drawn = await drawClipLayer(sourceTime);
+                if (drawn > 0) {
+                  cctx.drawImage(mediaCanvas, 0, 0);
+                  clipFrames += 1;
+                }
+              } catch {
+                /* the overlay must never abort the export */
+              }
+              clock.stop('clipSeek');
+            }
+            clock.start();
+            try {
+              renderer.draw(doc, sourceTime, {});
+              cctx.drawImage(captionCanvas, 0, 0, width, height);
+            } catch {
+              /* drawing must never abort the export */
+            }
+            clock.stop('captions');
+
+            clock.start();
+            const frame = new VideoFrame(composite, { timestamp: i * frameDurUs, duration: frameDurUs });
+            videoEncoder.encode(frame, { keyFrame: i % keyEvery === 0 });
+            frame.close();
+
+            if (videoEncoder.encodeQueueSize > 6) await drainEncoder(videoEncoder, 3);
+            clock.stop('encode');
+            onProgress?.(total > 0 ? (i + 1) / total : 0, `rendering ${i + 1} / ${total} frames`);
+          }
+        } finally {
+          // Let this pass go as soon as the range is done with it, rather than when the garbage
+          // collector gets to it: a decoder running on behind the encoder is CPU the encoder is
+          // waiting for.
           try {
-            const drawn = await drawClipLayer(sourceTime);
-            if (drawn > 0) cctx.drawImage(mediaCanvas, 0, 0);
+            await iterator?.return?.();
           } catch {
-            /* the overlay must never abort the export */
+            /* the pass is over, or the input is already gone */
           }
         }
-        try {
-          renderer.draw(doc, sourceTime, {});
-          cctx.drawImage(captionCanvas, 0, 0, width, height);
-        } catch {
-          /* drawing must never abort the export */
-        }
-
-        const frame = new VideoFrame(composite, { timestamp: i * frameDurUs, duration: frameDurUs });
-        videoEncoder.encode(frame, { keyFrame: i % keyEvery === 0 });
-        frame.close();
-
-        if (videoEncoder.encodeQueueSize > 6) await drain(videoEncoder, 3);
-        onProgress?.(total > 0 ? (i + 1) / total : 0, `rendering ${i + 1} / ${total} frames`);
       }
+      clock.start();
       await videoEncoder.flush();
+      clock.stop('flush');
       if (encodeError) throw encodeError;
 
       // ---- audio, one pass -------------------------------------------------
@@ -750,6 +1069,7 @@ export async function exportDocumentToVideo({
         const channelData = mapAudioToRanges(audioBuffer, audioRanges, 48000, outFrames, 2);
         audioShort = outputDuration(audioRanges) < seconds - 1e-3;
         const CHUNK = 1024;
+        clock.start();
         for (let offset = 0; offset < outFrames; offset += CHUNK) {
           if (signal?.aborted) throw new DOMException('export cancelled', 'AbortError');
           const frames = Math.min(CHUNK, outFrames - offset);
@@ -763,14 +1083,17 @@ export async function exportDocumentToVideo({
           });
           audioEncoder.encode(data);
           data.close();
-          if (audioEncoder.encodeQueueSize > 24) await drain(audioEncoder, 8);
+          if (audioEncoder.encodeQueueSize > 24) await drainEncoder(audioEncoder, 8);
         }
         await audioEncoder.flush();
+        clock.stop('audioEncode');
         if (encodeError) throw encodeError;
       }
       onProgress?.(1, 'muxing the file');
 
+      clock.start();
       muxer.finalize();
+      clock.stop('mux');
       const { buffer } = muxTarget;
       const meta = EXPORT_FORMATS[container];
       const blob = new Blob([buffer], { type: meta.mime });
@@ -797,6 +1120,15 @@ export async function exportDocumentToVideo({
         trimmed: dropped.length > 0 || outputDuration(videoRanges) < sourceSeconds - 1e-3,
         clips: clipElements.size,
         clipsMissing,
+        // How the picture was read, and what it cost in honesty: a stream that quietly left frames
+        // blank is the one thing this must never do without saying so.
+        picture: picture ? picture.mode : 'seeked frame by frame',
+        pictureNote,
+        blankFrames,
+        clipFrames,
+        // Wall clock per phase, and only when the caller asked for it. `frames` and `seconds` are
+        // repeated here so a reader of the breakdown does not have to hold two objects.
+        timings: instrument ? { ...clock.phase, frames: total, seconds } : null,
       };
     } finally {
       try {
@@ -804,6 +1136,7 @@ export async function exportDocumentToVideo({
       } catch {
         /* already closed */
       }
+      picture?.dispose();
       if (saved) {
         source.muted = saved.muted;
         source.volume = saved.volume;
@@ -821,8 +1154,15 @@ export async function exportDocumentToVideo({
     for (const clip of doc.media ?? []) {
       const element = clipElements.get(clip.id);
       if (element) destroyDecodeElement(element);
+      try {
+        await clipStreams.get(clip.id)?.iterator?.return?.();
+      } catch {
+        /* the pass is over, or the input is already gone */
+      }
+      clipStreams.get(clip.id)?.stream?.dispose?.();
     }
     clipElements.clear();
+    clipStreams.clear();
   }
 }
 
@@ -839,6 +1179,48 @@ function sourceToOutputSafe(ranges, block) {
 /** The last caption's end, used when a container refuses to report a duration. Pure. */
 export function lastCaptionEnd(doc) {
   return (doc?.blocks ?? []).reduce((max, block) => (Number.isFinite(block.end) ? Math.max(max, block.end) : max), 0);
+}
+
+/**
+ * Build and configure the `VideoEncoder` this export encodes through.
+ *
+ * Two things are decided here and nowhere else:
+ *
+ * * **`latencyMode: 'realtime'` is the rate control, not a clock.** The default (`quality`) makes
+ *   Chrome ignore `bitrate` almost entirely on hard content (noise went out at 14 Mbps against a
+ *   0.4 Mbps target), which would make the quality picker a lie: 'balanced' and 'best' produced the
+ *   same file. `realtime` turns the bitrate into an actual budget, so the setting means what it says.
+ *   The frames are still stepped offline either way.
+ * * **`avc: { format: 'avc' }`** puts H.264 in the length-prefixed layout `mp4-muxer` expects.
+ *
+ * Exported because `tools/export-perf.mjs` measures the ceiling - what this pipeline could do if
+ * decoding were free - by feeding frames straight to *this* encoder, and a harness that configured
+ * one of its own would drift from the export the first time either changed.
+ *
+ * @param {{container?:string, codec:string, width:number, height:number, rate:number, bitrate:number,
+ *          onChunk:Function, onError:Function}} options
+ */
+export function createVideoEncoder({
+  container = 'mp4',
+  codec,
+  width,
+  height,
+  rate,
+  bitrate,
+  onChunk,
+  onError,
+}) {
+  const encoder = new VideoEncoder({ output: onChunk, error: onError });
+  encoder.configure({
+    codec,
+    width,
+    height,
+    bitrate,
+    framerate: rate,
+    latencyMode: 'realtime',
+    ...(container === 'mp4' ? { avc: { format: 'avc' } } : {}),
+  });
+  return encoder;
 }
 
 /**
