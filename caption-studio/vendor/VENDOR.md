@@ -45,7 +45,7 @@ before anything is constructed (see `src/io/webcodecs-export.js`).
 `src/io/preview-proxy.js` makes the preview's smaller copy with this library, and that is a
 measurement rather than a preference. The version it replaced played the picture through a hidden
 `<video>` and encoded the frames it presented - and a `<video>` presents frames on the wall clock, so a
-4K file whose decoder manages 15.9 frames a second offered 15.9 frames a second and the copy came out
+4K file whose decoder manages 18.5 frames a second offered 18.5 frames a second and the copy came out
 as choppy as the original. Mediabunny drives the decoder itself (`VideoDecoder`, off any clock,
 hardware-accelerated where the machine has it), so the copy holds the file's real motion, and it does
 it in one pass that takes as long as decoding takes instead of as long as the clip runs.

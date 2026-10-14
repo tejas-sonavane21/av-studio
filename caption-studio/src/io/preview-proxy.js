@@ -11,7 +11,7 @@
  * The copy is made by **Mediabunny** (`vendor/mediabunny/`), and that is the second attempt at this
  * module. The first one played the picture through a hidden `<video>` and encoded the frames it
  * presented, and the copy it produced was *as choppy as the original*: a `<video>` element presents
- * frames on the wall clock, so a 4K file whose decoder manages 15.9 frames a second offers 15.9
+ * frames on the wall clock, so a 4K file whose decoder manages 18.5 frames a second offers 18.5
  * frames a second to whoever is watching — the copy inherited exactly the stutter it existed to
  * remove, and no amount of care in an encoder could undo it. Mediabunny drives the decoder itself
  * (`VideoDecoder`, hardware-accelerated where the machine has it, and on no clock at all) and writes
