@@ -545,11 +545,12 @@ function usePictureUrl(url, { restore = null, label = '' } = {}) {
 }
 
 /**
- * Re-encode a smaller copy of the picture, in the browser, for the preview to play.
+ * Make a smaller copy of the picture, in the browser, for the preview to play.
  *
- * Explicitly a user action and not something that happens on load: on a three-minute 4K file it takes
- * about as long as the clip plays, which is a cost nobody should pay without asking. What it fixes is
- * measured, not asserted — the transport's frame rate against the decoder's, in `tools/preview-perf.mjs`.
+ * Explicitly a user action and not something that happens on load: even off the clock, a three-minute
+ * 4K file takes tens of seconds to decode and re-encode, which is a cost nobody should pay without
+ * asking. What it fixes is measured, not asserted — the copy's frame rate against the source's, in
+ * `tools/ui-smoke.mjs` and `tools/preview-perf.mjs`.
  */
 async function onBuildProxy() {
   const picture = previewSource.original;
@@ -565,11 +566,12 @@ async function onBuildProxy() {
   const controller = new AbortController();
   proxyController = controller;
   refreshProxyControls();
-  setProxyNote('copying — this plays the clip through once, with the sound off');
+  setProxyNote('copying — decoding the picture off the clock');
   log(
-    `preview copy: re-encoding ${picture.width}×${picture.height} → ${size.width}×${size.height} in this browser ` +
-      `(${(picture.duration || 0).toFixed(1)}s — one pass over the clip; the encoding itself is not on the clock, ` +
-      'so no frames are dropped to keep up). The export is untouched.',
+    `preview copy: converting ${picture.width}×${picture.height} → ${size.width}×${size.height} in this browser ` +
+      `(${(picture.duration || 0).toFixed(1)}s of picture — decoded off the clock, so the pass takes what the ` +
+      'decoding takes rather than what the clip runs, and no frames are dropped to keep up). ' +
+      'The export is untouched.',
   );
   stateOf('sources', 'busy', 'copying…', `Making a ${size.width}×${size.height} copy of the picture for the preview.`);
 
@@ -599,11 +601,12 @@ async function onBuildProxy() {
     });
     log(
       `preview copy: ready — ${result.width}×${result.height}, ${(result.blob.size / 1e6).toFixed(1)} MB, ` +
-        `${result.codec}${result.audio ? ' + opus' : ' (no sound captured)'}, ${result.encodeSeconds}s to encode`,
+        `${result.codec}${result.audio ? ` + ${result.audioCodec || 'audio'}` : ' (no sound in the copy)'}, ` +
+        `${result.encodeSeconds}s to convert`,
     );
-    // The frames the copy holds, against the frames the picture presented. This is the number that
-    // separates a stutter that came with the file from one the copy introduced — the two used to be
-    // indistinguishable, which is how a copy *choppier* than the original went unnoticed.
+    // The frames the copy holds, measured off the copy itself. It is the number that separates a copy
+    // that carries the file's motion from one that quietly threw half of it away - which is what the
+    // wall-clock version of this did, and what made a "smoother" copy look choppier than the original.
     if (result.summary) log(`  ${result.summary}`);
     if (!result.audio && result.audioError) log(`  ⚠ the copy has no sound: ${result.audioError}`);
     if (result.drift) log(`  ⚠ ${result.drift}`);

@@ -19,8 +19,15 @@
  * actually presented* (`requestVideoFrameCallback`). When the video presents 30/s and rAF is at 12/s,
  * the app is the problem; when the video presents 6/s, no amount of app-side work will help.
  *
+ * `--proxy` adds a third arm, and it is the one that answers "is the preview copy worth making?": the
+ * copy is built through the editor's own button (the real module, the real decoder, the real encoder),
+ * and then the same editor is measured again playing *that* file. The number to read is the middle
+ * column - frames presented a second - against the editor arm's, because a copy that presents more of
+ * the picture's motion per second than the original is the entire point of the feature, and a copy
+ * that presents no more than the original is a feature that should be deleted.
+ *
  * Usage:
- *   node tools/preview-perf.mjs --video <path> [--audio <path>] [--seconds 5] [--label baseline]
+ *   node tools/preview-perf.mjs --video <path> [--audio <path>] [--seconds 5] [--label baseline] [--proxy]
  *
  * `--video` is relative to the **workspace** (the folder above this project), because the only
  * large pictures on this machine are the gitignored reference captures — and a harness that needs a
@@ -50,6 +57,7 @@ for (let i = 2; i < process.argv.length; i++) {
   else if (a === '--port') args.port = Number(process.argv[++i]);
   else if (a === '--cdpport') args.cdpport = Number(process.argv[++i]);
   else if (a === '--label') args.label = process.argv[++i];
+  else if (a === '--proxy') args.proxy = true;
 }
 if (!args.video) {
   console.error('usage: node tools/preview-perf.mjs --video <path relative to the workspace> [--audio <path>]');
@@ -311,6 +319,47 @@ async function main() {
   await delay(args.seconds * 1000);
   const editor = report('editor', await evaluate(cdp, READ_COUNTERS));
 
+  // ---- arm 3: the same editor, playing a copy of the same file ----------------
+  let copy = null;
+  if (args.proxy) {
+    // The copy is built the way a person builds one - through the button, in this page - because a
+    // harness that reached past the UI would measure the module and not the feature. The picture is
+    // stopped first: the conversion is not supposed to need the transport, and this way it cannot be
+    // said to have ridden on it.
+    await evaluate(cdp, 'document.querySelector("#play-btn").click()');
+    await delay(400);
+    const built = await evaluate(
+      cdp,
+      `(async () => {
+        const build = document.querySelector('#proxy-build');
+        const note = document.querySelector('#proxy-note');
+        if (build.disabled) return { error: 'this picture is not offered a copy' };
+        const started = performance.now();
+        build.click();
+        while (performance.now() - started < 900000) {
+          await new Promise((r) => setTimeout(r, 400));
+          const text = note.textContent;
+          if (/could not be made|was stopped/.test(text)) return { error: text };
+          if (/Export still encodes the original/.test(text)) {
+            return { seconds: (performance.now() - started) / 1000, note: text };
+          }
+        }
+        return { error: 'the copy never finished' };
+      })()`,
+      { awaitPromise: true },
+    );
+    if (built?.error) {
+      console.log(`  copy      could not be built: ${built.error}`);
+    } else {
+      console.log(`  copy      built in ${built.seconds.toFixed(1)}s — ${built.note}`);
+      await evaluate(cdp, 'document.querySelector("#play-btn").click()');
+      await delay(700);
+      await evaluate(cdp, START_COUNTERS);
+      await delay(args.seconds * 1000);
+      copy = report('copy', await evaluate(cdp, READ_COUNTERS));
+    }
+  }
+
   // ---- the comparison ---------------------------------------------------------
   const overhead = control.raf > 0 ? (1 - editor.raf / control.raf) * 100 : 0;
   const decodeBound = editor.presented < editor.raf * 0.9;
@@ -324,6 +373,16 @@ async function main() {
         ? 'the limit is the decode, not the app'
         : 'the decoder kept up, so anything felt here is app-side'),
   );
+  if (copy) {
+    const gained = editor.presented > 0 ? copy.presented / editor.presented : 0;
+    console.log(
+      `\n  the copy: the decoder presented ${copy.presented.toFixed(1)}/s of it against ${editor.presented.toFixed(1)}/s ` +
+        `of the original (${gained.toFixed(1)}x) — ` +
+        (gained >= 1.5
+          ? 'the copy is carrying the motion the original could not'
+          : 'no real gain here; this file did not need a copy'),
+    );
+  }
 
   cdp.close();
   stopAll();

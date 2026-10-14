@@ -1,0 +1,10 @@
+# Vendored third-party code is byte-for-byte what upstream serves, so git must not rewrite it.
+#
+# This matters for exactly one file: `mediabunny.min.mjs` is minified, and a carriage return
+# inserted inside one of its string literals would be a different program. With
+# `core.autocrlf=true` (this machine's setting) a fresh clone would otherwise check it out as
+# CRLF while a Linux clone gets it as LF - the same commit, two different files.
+#
+# Everything else keeps the behaviour AGENTS.md describes: stored as CRLF, checked out as CRLF.
+caption-studio/vendor/mediabunny/mediabunny.min.mjs -text
+caption-studio/vendor/mediabunny/LICENSE -text

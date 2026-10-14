@@ -1,34 +1,34 @@
 /**
  * preview-proxy.test.js — the two modules that make the preview lighter without touching the export.
  *
- * `io/preview-proxy.js` re-encodes a smaller copy of the picture for the preview, and
- * `io/preview-source.js` decides which picture each side gets. The rules that matter cannot be
- * eyeballed in a browser — "the copy is never exported", "a 1080p file is left alone", "a copy is
- * never upscaled" — so they are pinned down here, where they run in milliseconds.
+ * `io/preview-proxy.js` makes a smaller copy of the picture for the preview, and `io/preview-source.js`
+ * decides which picture each side gets. The rules that matter cannot be eyeballed in a browser — "the
+ * copy is never exported", "a 1080p file is left alone", "a copy is never upscaled", "the frame rate is
+ * capped but never raised" — so they are pinned down here, where they run in milliseconds.
  *
- * The recording itself needs MediaRecorder and a canvas, so it is exercised through the UI smoke run;
+ * The conversion itself needs a decoder and an encoder, so it is exercised through the UI smoke run;
  * everything that can be decided without one is decided here.
  */
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { Quality } from '../../vendor/mediabunny/mediabunny.min.mjs';
 import {
-  PROXY_AUDIO_CODEC,
+  DEFAULT_PROXY_FPS,
   PROXY_CONTAINER,
-  PROXY_KEYFRAME_EVERY,
+  PROXY_KEYFRAME_SECONDS,
   PROXY_LONG_EDGE,
-  PROXY_QUEUE_HIGH,
-  PROXY_QUEUE_LOW,
+  PROXY_MIME_TYPE,
+  PROXY_RATE_TOLERANCE,
+  describeDiscards,
   describeDrift,
   describeFrames,
-  mergeChunks,
   needsProxy,
-  proxyAudioConfig,
   proxyBitrate,
   proxySize,
   proxySupported,
-  proxyVideoConfig,
+  proxyVideoOptions,
 } from '../../src/io/preview-proxy.js';
 import { createPreviewSource } from '../../src/io/preview-source.js';
 
@@ -82,64 +82,57 @@ test('the copy is given a modest bitrate, however big the tool gets', () => {
 // how the copy is encoded
 // --------------------------------------------------------------------------- //
 
-test('the copy is written as WebM, which every Chrome can encode', () => {
+test('the copy is written as WebM, which every Chrome can encode and contain', () => {
   assert.equal(PROXY_CONTAINER, 'webm');
-  assert.equal(PROXY_AUDIO_CODEC, 'opus');
+  assert.equal(PROXY_MIME_TYPE, 'video/webm');
 });
 
-test('the encoder is configured for the copy, at an even size and a real bitrate', () => {
-  const config = proxyVideoConfig({ codec: 'vp09.00.10.08', width: 1281, height: 721 });
-  assert.equal(config.codec, 'vp09.00.10.08');
-  assert.equal(config.width % 2, 0);
-  assert.equal(config.height % 2, 0);
-  assert.equal(config.bitrate, proxyBitrate(config.width, config.height, 30));
-  assert.equal(config.framerate, 30);
-  // `realtime` is the encoder's rate control, not a claim that frames arrive in real time — the
-  // project measured that `quality` makes Chrome ignore the bitrate on hard content, which for a
-  // preview copy would mean a *bigger* file than the one it is meant to lighten.
-  assert.equal(config.latencyMode, 'realtime');
+test('the converter is asked for the copy at an even size, with an explicit bitrate', () => {
+  const options = proxyVideoOptions({ width: 1281, height: 721 });
+  assert.equal(options.width % 2, 0);
+  assert.equal(options.height % 2, 0);
+  assert.equal(options.fit, 'contain', 'rounding an edge must not stretch the picture');
+  assert.equal(options.keyFrameInterval, PROXY_KEYFRAME_SECONDS);
+  assert.ok(options.quality instanceof Quality);
+  // The private field, read on purpose: a `Quality` exposes nothing else to ask, and this number
+  // *is* the point — a copy whose bitrate is not the one this module measured is a copy that is
+  // bigger or blurrier than the thing it was meant to lighten. `proxyBitrate` is where it comes from.
+  assert.equal(options.quality._bitrate, proxyBitrate(options.width, options.height, DEFAULT_PROXY_FPS));
 });
 
-test('an asked-for bitrate is used rather than the default, and the shape is clamped', () => {
-  assert.equal(proxyVideoConfig({ codec: 'vp8', width: 320, height: 180, bitsPerSecond: 400_000 }).bitrate, 400_000);
-  const audio = proxyAudioConfig({ codec: 'opus', sampleRate: 44100, channels: 6 });
-  assert.equal(audio.sampleRate, 44100);
-  assert.equal(audio.numberOfChannels, 2, 'a WebM copy carries at most stereo');
-  assert.ok(audio.bitrate > 0);
+test('an asked-for bitrate is used rather than the computed one', () => {
+  assert.equal(proxyVideoOptions({ width: 320, height: 180, bitsPerSecond: 400_000 }).quality._bitrate, 400_000);
+  assert.equal(proxyVideoOptions({ width: 320, height: 180, fps: 24 }).quality._bitrate, proxyBitrate(320, 180, 24));
 });
 
-test('both tracks are written in timestamp order, whatever order they were encoded in', () => {
-  // The picture is encoded as fast as the decoder gives frames up while the sound arrives as it
-  // plays, and both muxers refuse a timestamp that goes backwards — so the merge is a guarantee, not
-  // a tidiness. A video frame and an audio frame at the same instant keep the picture first.
-  const merged = mergeChunks([
-    { kind: 'audio', timestamp: 20 },
-    { kind: 'video', timestamp: 0 },
-    { kind: 'audio', timestamp: 10 },
-    { kind: 'video', timestamp: 10 },
-  ]);
-  assert.deepEqual(
-    merged.map((entry) => `${entry.kind}@${entry.timestamp}`),
-    ['video@0', 'video@10', 'audio@10', 'audio@20'],
-  );
-  assert.deepEqual(mergeChunks(null), []);
+test('the frame rate is a ceiling the caller applies, never something this module imposes', () => {
+  // Asking a conversion for a rate on a source that is *slower* is asking it to invent frames that
+  // were never in the file, so `proxyVideoOptions` does not set the field at all: the caller sets it
+  // from a measured source rate, and only when the source is genuinely faster than the cap.
+  assert.equal('frameRate' in proxyVideoOptions({ width: 1280, height: 720, fps: 30 }), false);
+  assert.ok(PROXY_RATE_TOLERANCE > 0 && PROXY_RATE_TOLERANCE < 1, '29.97 frames a second is not 30');
 });
 
-test('the queue never holds more than a few frames, and drains to almost nothing', () => {
-  // A bound on memory, not a performance knob: every queued frame is a full-size bitmap.
-  assert.ok(PROXY_QUEUE_LOW < PROXY_QUEUE_HIGH);
-  assert.ok(PROXY_QUEUE_HIGH <= 12);
-  assert.ok(PROXY_KEYFRAME_EVERY >= 30, 'the copy is scrubbable — a keyframe every couple of seconds');
+test('a track the converter could not carry is named, with the reason it gave', () => {
+  // Mediabunny drops what it cannot carry instead of failing the conversion, which is right and
+  // would be a terrible thing to hide: "the copy has no sound" is a bug report, and "no encodable
+  // target codec" is one somebody can act on.
+  assert.equal(describeDiscards([]), '');
+  assert.equal(describeDiscards(null), '');
+  const text = describeDiscards([{ track: { type: 'audio' }, reason: 'no_encodable_target_codec' }]);
+  assert.match(text, /audio/);
+  assert.match(text, /no_encodable_target_codec/);
+  assert.match(describeDiscards([{ track: { type: 'video' }, reason: 'undecodable_source_codec' }]), /video/);
 });
 
-test('what the copy holds is stated against what the decoder offered', () => {
-  const text = describeFrames({ frames: 214, presented: 216, seconds: 9 });
-  assert.match(text, /214 frame\(s\) encoded/);
-  assert.match(text, /216 the decoder presented/);
-  assert.match(text, /24\.0 frames a second/);
-  assert.match(text, /2 could not be encoded/);
+test('what the copy holds is reported as the copy holds it, not as it was asked for', () => {
+  const text = describeFrames({ frames: 214, seconds: 9 });
+  assert.match(text, /214 frame\(s\)/);
+  assert.match(text, /23\.8 a second/);
+  assert.match(text, /nothing here waits for a clock/);
   // Nothing is claimed about a copy with no frames in it — the caller reports that as a failure.
-  assert.equal(describeFrames({ frames: 0, presented: 0 }), '');
+  assert.equal(describeFrames({ frames: 0, seconds: 9 }), '');
+  assert.equal(describeFrames(), '');
 });
 
 // --------------------------------------------------------------------------- //
@@ -165,10 +158,6 @@ test('a copy that came out measurably long or short says so, and says the export
 test('a browser without WebCodecs cannot make a copy, and says so by refusing the feature', () => {
   assert.equal(proxySupported({}), false);
   assert.equal(proxySupported({ VideoEncoder: function () {}, requestAnimationFrame: () => {} }), false, 'a frame needs VideoFrame');
-  assert.equal(
-    proxySupported({ VideoEncoder: function () {}, requestAnimationFrame: () => {} }),
-    false,
-  );
   assert.equal(
     proxySupported({
       VideoEncoder: function () {},

@@ -58,7 +58,7 @@ so this folder is self-contained.
 | Cuts — trim edges, split, cut left / cut right, delete, honoured by the preview *and* the export | ✅ `src/model/timeline.js`, `src/editor/preview.js` |
 | Playback that respects the cut — a gap is jumped, and the programme ends only when no lane has material left | ✅ `playbackTarget` in `src/model/timeline.js` |
 | A picture shorter than the track — the sound carries the programme on, and the picture layer goes blank rather than freezing | ✅ `hasMaterial()` in `src/editor/preview.js` |
-| A preview copy of a heavy picture — re-encoded smaller *in the browser* for the transport, frame-stamped from the source and encoded off the wall clock, with the export still encoding the original file | ✅ `src/io/preview-proxy.js`, `src/io/preview-source.js` |
+| A preview copy of a heavy picture — converted smaller *in the browser* for the transport, decoded off the wall clock so it holds the file's real motion, with the export still encoding the original file | ✅ `src/io/preview-proxy.js` (Mediabunny), `src/io/preview-source.js` |
 | Imported pictures and logos as *clips* — a window on the clock, on their own lane, over the caption layer in both the preview and the export | ✅ `src/model/media.js`, `src/editor/media-library.js`, `src/render/media-layer.js` |
 | Presets that name their model — repository, parameter count and whether it is already downloaded here | ✅ `GET /health` → `presetDetails` (`audio_studio/models.py`) |
 | A finished run fills in Sources — its Veed master and its own SRT, instead of leaving them in a job folder | ✅ `reflectRunInSources()` in `src/main.js` |
@@ -215,36 +215,41 @@ began at 140.12 s now begins at 154.52 s, beside the word it belongs to.
 
 Decoding 4K is what stalls the transport, and no care taken in this app's frame loop can lift it.
 `tools/preview-perf.mjs` measures the two separately — a bare `<video>` on an empty page against the
-real editor, same file, same browser — and on this project's 4K fixture the decoder presents **15.9**
-frames a second while the editor's own loop holds **60.0**. The decoder is the limit, so the only thing
-that helps is asking it for less: **Build smooth preview copy** re-encodes the file smaller, in the
-browser, from the file you already have. The export is untouched — `src/io/preview-source.js` keeps the
-two apart, and the encoder is handed the *original* URL and resolution, never the copy.
+real editor, same file, same browser — and on this project's 2160p fixture the decoder presents **18.5**
+frames a second while the editor's own loop holds **59.7**. The decoder is the limit, so the only thing
+that helps is asking it for less: **Build smooth preview copy** converts the file smaller, in the browser,
+from the file you already have. The export is untouched — `src/io/preview-source.js` keeps the two apart,
+and the encoder is handed the *original* URL and resolution, never the copy.
 
-How the copy is made is the whole story of this module, because the obvious way to make one is wrong:
+The copy is made by **Mediabunny** (`vendor/mediabunny`, MPL-2.0), and that is the second attempt at this
+feature. The first one encoded the frames a hidden `<video>` presented, which produced a copy as choppy as
+the original — because a `<video>` presents frames on the wall clock, so a 4K file whose decoder manages
+18.5 frames a second *offers* 18.5 frames a second to whatever is watching it. A copy made that way is
+smaller and still stutters, which is worse than useless: it looks like a fix.
 
-- **The frames are stamped with their own times.** Each frame the decoder presents is handed to a
-  `VideoEncoder` carrying the *media* time it had in the source (`requestVideoFrameCallback`'s
-  `mediaTime`), so the copy runs at the speed of the picture it came from. Recording the canvas with
-  `MediaRecorder` — the first version of this — stamps every frame with the time it was handed over,
-  which turns a source presenting 16 frames a second into a 30 fps file with the stutter baked in.
-- **Nothing is dropped to keep up with a clock.** A `MediaRecorder` competes with the 4K decoder for
-the same cores and drops frames under the load, which is a copy *choppier* than the original and
-invisible until it is played. Here the encode is allowed to take longer than playback did; when its
-queue gets deep the *source* is paused for a moment instead, because dropping a frame is the stutter
-this exists to remove. The result is reported against what was available: "119 frame(s) encoded of the
-119 the decoder presented — the picture had 29.8 frames a second to give".
-- **The sound comes along.** The element's own audio track is captured (never decoded twice) and
-  encoded alongside, with its configuration taken from the first buffer rather than from the track's
-  reported settings — the two disagree, and an encoder configured for stereo that is fed mono fails
-  with "Input audio buffer is incompatible with codec parameters", which is a copy that silently loses
-  its soundtrack. Whether the copy really carries sound is *measured*: the smoke run decodes the copy
-  back and asserts the result is not silence.
+- **The frames are decoded off the clock.** Mediabunny drives the decoder itself (`VideoDecoder`, off any
+  clock, hardware-accelerated where the machine has it) and writes every frame it gets, so the copy carries
+  the picture's real motion. On the 2160p fixture the copy holds **4827 frames at 30.01/s** — every frame of
+  the file, at the file's own rate — and under the same harness the transport presents **60.1 frames a
+  second** of the copy against **18.5** of the original: 3.2x the motion, because the decode is no longer
+  the thing being measured.
+- **The length is the file's length.** Nothing is trimmed and nothing is time-stretched. The frame rate is
+  capped at 30 a second and **never raised** — a 24 fps film is copied at 24 rather than padded to 30 — and
+  the sound is carried over, copied where the container allows it and re-encoded where it does not. The
+  copy's own duration, frame count and rate are then read back *out of the finished file* and compared with
+  the original's, so a copy that drifted says so instead of quietly shifting every caption against the
+  picture.
+- **A conversion, not a playback.** `npm run ui` builds one in real Chrome from a 4 s, 30 fps fixture: all
+  **120** frames, sound present and not silent, converted in **0.5-0.6 s** over two runs — a fraction of the
+  4 s the clip itself runs for, and the number the implementation this replaced could not have beaten, because
+  it was on the clip's clock. A 161 s 2160p AV1 file is a different proposition: **7.4 minutes** in headless
+  Chrome on this machine, which decodes AV1 in software. That is the trade, stated rather than buried: one
+  longer wait for a preview that is smooth from then on, and a machine with a hardware AV1 decoder pays far
+  less of it.
 
-Every number above is from `npm run ui`, which builds a copy in real Chrome, plays it back and counts
-what the browser presents: 119 of 119 frames kept, sound present, **29.0 fps played back over 4.1 s**.
-What the copy can never fix is what the file itself never had — a source that only decodes 16 frames a
-second still has 16 frames a second of motion, and the panel says so rather than blaming itself.
+What a copy cannot change is the motion the file actually has. The decode has no deadline now, so a heavy
+file gives up all of its frames — but a file that really was recorded at 16 frames a second is still a 16 fps
+preview, and the panel reports the rate it measured rather than blaming itself.
 
 ## Imported clips — pictures and logos over the captions
 
