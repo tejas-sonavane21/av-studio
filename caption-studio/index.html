@@ -268,10 +268,12 @@
             <input type="file" id="video-in" accept="video/*" />
             <div class="hint" id="video-note">No picture loaded.</div>
             <!--
-              The editor decodes the picture on every frame it draws, so a 4K file can be a
-              decode limit rather than a rendering cost — and a smaller copy of the same picture
-              removes it. This is *preview only*: the export always encodes from the file you
-              loaded, at its own resolution, with every cut applied.
+              The editor decodes the picture on every frame it draws, so a big file can be a decode
+              limit rather than a rendering cost — and a 720p copy of the same picture removes it. One
+              is made for you, by itself, as soon as a picture bigger than 720p is loaded; these two
+              buttons are for building another and for stopping or undoing that. This is *preview
+              only*: the export always encodes from the file you loaded, at its own resolution, with
+              every cut applied.
             -->
             <div class="style-bar">
               <button
@@ -279,16 +281,17 @@
                 id="proxy-build"
                 type="button"
                 disabled
-                title="Convert a smaller copy of the picture for the preview only — the export is untouched"
+                title="Convert a 720p copy of the picture for the preview only — the export is untouched"
               >
                 Build smooth preview copy
               </button>
               <button class="ghost" id="proxy-clear" type="button" disabled>Preview the original</button>
             </div>
             <div class="hint" id="proxy-note">
-              A large picture (4K, or a heavy codec) can be limited by decoding rather than by this
-              app. A smoother copy is smaller, made here in the browser, and used <b>only</b> in the
-              preview — Export always encodes the original file.
+              A picture bigger than 720p is copied to 720p for the preview as soon as it is loaded —
+              decoding the master is what makes a transport stutter, and the copy is a quarter of the
+              pixels to push. The copy is made here in the browser and used <b>only</b> in the preview.
+              Export always encodes the original file.
             </div>
           </div>
 

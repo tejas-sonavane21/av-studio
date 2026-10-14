@@ -3,8 +3,10 @@
  *
  * `io/preview-proxy.js` makes a smaller copy of the picture for the preview, and `io/preview-source.js`
  * decides which picture each side gets. The rules that matter cannot be eyeballed in a browser — "the
- * copy is never exported", "a 1080p file is left alone", "a copy is never upscaled", "the frame rate is
- * capped but never raised" — so they are pinned down here, where they run in milliseconds.
+ * copy is never exported", "anything bigger than a 720p picture gets a 720p copy", "a copy is never
+ * upscaled", "the frame rate is capped but never raised", "a copy is built without being asked for, but
+ * not for a picture the user has already sent back to the original by hand" — so they are pinned down
+ * here, where they run in milliseconds.
  *
  * The conversion itself needs a decoder and an encoder, so it is exercised through the UI smoke run;
  * everything that can be decided without one is decided here.
@@ -16,11 +18,16 @@ import assert from 'node:assert/strict';
 import { Quality } from '../../vendor/mediabunny/mediabunny.min.mjs';
 import {
   DEFAULT_PROXY_FPS,
+  PROXY_BITS_PER_PIXEL,
   PROXY_CONTAINER,
   PROXY_KEYFRAME_SECONDS,
   PROXY_LONG_EDGE,
+  PROXY_MAX_BITRATE,
   PROXY_MIME_TYPE,
+  PROXY_MIN_BITRATE,
   PROXY_RATE_TOLERANCE,
+  PROXY_THRESHOLD,
+  autoProxyDecision,
   describeDiscards,
   describeDrift,
   describeFrames,
@@ -36,13 +43,21 @@ import { createPreviewSource } from '../../src/io/preview-source.js';
 // what is worth copying, and how big the copy is
 // --------------------------------------------------------------------------- //
 
-test('a picture is copied only when it is big enough to be worth it', () => {
-  assert.equal(needsProxy(1920, 1080), false, '1080p decodes fine — copying it would be busywork');
+test('a picture is copied when it is bigger than the copy would be', () => {
+  assert.equal(PROXY_THRESHOLD, PROXY_LONG_EDGE, 'the bar and the cap are the same picture: 720p');
+  assert.equal(needsProxy(1920, 1080), true, '1080p is copied — 720p is what the preview is for');
   assert.equal(needsProxy(3840, 2160), true);
-  assert.equal(needsProxy(1080, 1920), false, 'the long edge decides, not the width');
   assert.equal(needsProxy(2160, 3840), true, 'a portrait 4K clip counts the same');
+  assert.equal(needsProxy(1280, 720), false, 'a 720p picture is already the size a copy would be');
+  assert.equal(needsProxy(1080, 1920), true, 'the long edge decides, not the width');
+  assert.equal(needsProxy(720, 1280), false, 'and a portrait picture at the cap is left alone');
   assert.equal(needsProxy(0, 0), false);
   assert.equal(needsProxy(undefined, undefined), false);
+});
+
+test('a 1080p picture is copied to 720p, which is the size the preview is for', () => {
+  assert.deepEqual(proxySize(1920, 1080), { width: 1280, height: 720 });
+  assert.deepEqual(proxySize(1080, 1920), { width: 720, height: 1280 }, 'and portrait keeps its shape');
 });
 
 test('a copy is scaled to the long-edge cap, portrait or landscape', () => {
@@ -73,9 +88,39 @@ test('the copy is given a modest bitrate, however big the tool gets', () => {
   const small = proxyBitrate(640, 360, 30);
   const hd = proxyBitrate(1280, 720, 30);
   assert.ok(hd > small, 'a bigger frame gets more bits');
-  assert.ok(hd < 4_000_000, `720p30 should stay cheap to decode, got ${hd}`);
-  assert.equal(proxyBitrate(7680, 4320, 60), 6_000_000, 'and the clamp holds at the top');
-  assert.ok(proxyBitrate(2, 2, 1) >= 600_000, 'and at the bottom');
+  // The number that matters, and the reason the factor moved from 0.1 to 0.06: a 720p30 copy of a 4K
+  // master should cost about 1.7 Mbps, so that the preview is cheap to *decode* as well as to look at.
+  assert.equal(hd, Math.round(1280 * 720 * 30 * PROXY_BITS_PER_PIXEL));
+  assert.ok(hd > 1_500_000 && hd < 1_800_000, `720p30 should stay cheap to decode, got ${hd}`);
+  assert.equal(proxyBitrate(7680, 4320, 60), PROXY_MAX_BITRATE, 'and the clamp holds at the top');
+  assert.equal(proxyBitrate(2, 2, 1), PROXY_MIN_BITRATE, 'and at the bottom');
+});
+
+// --------------------------------------------------------------------------- //
+// building one without being asked
+// --------------------------------------------------------------------------- //
+
+test('a copy is built by itself for any picture bigger than the preview it would replace', () => {
+  assert.deepEqual(autoProxyDecision({ width: 3840, height: 2160 }), { build: true });
+  assert.deepEqual(autoProxyDecision({ width: 1920, height: 1080 }), { build: true });
+});
+
+test('and is left alone when there is a reason to leave it alone, with the reason said out loud', () => {
+  const why = (extra) => autoProxyDecision({ width: 3840, height: 2160 }, extra)?.reason ?? '';
+  assert.match(autoProxyDecision(undefined).reason, /no picture/);
+  assert.match(why({ building: true }), /already being built/);
+  assert.match(why({ proxied: true }), /already playing a copy/);
+  assert.match(why({ declined: true }), /by hand/, 'the user said "preview the original" about this very file');
+  assert.match(why({ supported: false }), /WebCodecs/);
+  // A picture the copy would not shrink is not a picture to copy: 1080p is the smallest one that is.
+  assert.match(autoProxyDecision({ width: 1280, height: 720 }).reason, /no bigger than the copy/);
+  assert.match(autoProxyDecision({ width: 640, height: 360 }).reason, /no bigger than the copy/);
+});
+
+test('the automatic decision has no way to touch the export', () => {
+  // It takes a size and four flags and returns a verdict: there is no URL in it, no file, and no
+  // "which picture" — so the rule that the export always encodes the original cannot be broken here.
+  assert.deepEqual(Object.keys(autoProxyDecision({ width: 3840, height: 2160 })), ['build']);
 });
 
 // --------------------------------------------------------------------------- //
