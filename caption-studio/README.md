@@ -9,7 +9,7 @@ This is a **fresh project**. The previous subtitle-replication work (versions 1�
 Everything learned there is distilled into [`docs/KNOWLEDGE-BASE.md`](docs/KNOWLEDGE-BASE.md)
 so this folder is self-contained.
 
-> **Status: Phases 0–4 complete and verified.** All engines are built and **448/448 tests pass**:
+> **Status: Phases 0–4 complete and verified.** All engines are built and **476/476 tests pass**:
 > the caption document model, the format I/O (SRT/VTT/Veed JSON/project), the
 > **quality-correction engine** (rolling-cue resolution → anchors → banded DTW → typed, auditable
 > corrections), the **Canvas2D renderer with the Veed parity template**, and the **Phase 4 editing
@@ -51,6 +51,7 @@ so this folder is self-contained.
 | Split a long caption in two / join it back (the line breaks) | ✅ `src/model/edit.js`, `src/main.js` |
 | Transcribe on the sibling studio (upload → poll → import) | ✅ `src/io/audio-studio-client.js` |
 | Real offline export — WebCodecs + vendored muxer, `.mp4` / `.webm`, decodes from its own off-screen copy so the preview is never disturbed | ✅ `src/io/webcodecs-export.js` |
+| An export that decodes in order instead of seeking per frame — **13x** on a 2160p source, with the seek path kept as the fallback | ✅ `openPictureStream()` in `src/io/webcodecs-export.js`, measured by `tools/export-perf.mjs` |
 | Audio that survives the bitrate — the encoder's accepted rate is searched for, not assumed | ✅ `resolveAudioBitrate` in `src/io/webcodecs-export.js` |
 | Professional export window — resolution, ratio, fps, quality, bitrates, preset auto-tune | ✅ `src/io/export-settings.js`, `src/editor/export-dialog.js` |
 | An export you can watch and a state you can read — visible track, percentage, and the saved file named | ✅ `describeExportResult` in `src/io/export-settings.js` |
@@ -264,6 +265,74 @@ What a copy cannot change is the motion the file actually has. The decode has no
 file gives up all of its frames — but a file that really was recorded at 16 frames a second is still a 16 fps
 preview, and the panel reports the rate it measured rather than blaming itself.
 
+## The export, and the 13x that was hiding in it
+
+The export renders every frame and encodes it; it never records the screen. What it *did* do, until
+now, was **seek the source once per output frame** — and that is what made a long export cost longer
+than the film it was writing. `tools/export-perf.mjs` times each phase of the real export, in real
+Chrome, on a real file; against this project's 2160p AV1 capture (161 s, decoded in software here) a
+6 s window came out like this:
+
+| phase | wall clock | share |
+|---|---|---|
+| stepping the picture — one seek per output frame | **260.6 s** | 98.5% |
+| everything else — composite, captions, encode, audio, mux | 3.9 s | 1.5% |
+
+**1448 ms per frame**, and not because the encoder is slow: the encode, the compositing and the
+caption rasterisation together are **0.7 s** of that run, and most of the remaining "everything else"
+is the uploaded audio file being decoded (2.4 s). A seek on a paused element is a decoder flush plus a
+decode from the previous keyframe, and it was paid again for every frame — including for frames that
+sit immediately next to each other.
+
+The picture is now **decoded in order, off any clock**, by the same library the preview's copy is made
+with (Mediabunny, `vendor/mediabunny`): one pass per kept range, from the keyframe before it to its
+end, and the frame an output frame wants is simply the last one that started at or before it. Nothing
+is seeked, and nothing is dropped to keep up with a clock. Same file, same window, same settings:
+
+| | seeked frame by frame | decoded in order |
+|---|---|---|
+| 180 output frames | 264.6 s | 19.0–27.1 s |
+| per frame | 1469.8 ms | 105.8–150.7 ms |
+| at that rate, the whole 161 s file | 118.3 min | 8.5–12.1 min |
+
+Those are four runs on one machine, and the spread between them is the machine rather than the code —
+the phases that move together across those runs (reading the file, decoding the audio) are the ones
+that move when something else on the box wants the CPU. Even the slowest of the four is **ten times**
+what the seek path cost, and the phase that dominates what is left is the decode of the file itself.
+
+What is left is mostly the decode itself (63% of the run): this machine decodes AV1 in software, and
+that is the file's own cost rather than the app's. Two of the remaining costs are in the breakdown
+and stated rather than buried — the uploaded audio file is decoded whole before it is laid out along
+the cuts (**2.4 s** for a four-minute track, and it does not grow with the export), and the rest is
+the encoder doing the work an encoder does.
+
+Two things this deliberately does **not** do. It does not encode from the preview's copy: the export
+still reads the original file at its original resolution (see `io/preview-source.js`), because a
+finished file must not come out of a 720p preview aid. And it does not quietly change the picture. The
+two decoders were compared frame by frame in the same browser (`--compare`), and what comes back is a
+mean difference of **0.32/255** per channel, **90.6%** of channels identical, **99.3%** within 8/255 —
+a different resampling filter at exactly the same geometry (moving the frame one pixel sideways makes
+the difference *worse*: 2.19 against 0.46). The control arm of that comparison — the old path drawn
+and read twice — comes back 100% identical, so those numbers are a difference between two decoders and
+not noise. The one thing it does change is the filter: a large downscale is resampled by the sink with
+`imageSmoothingQuality: 'high'` where the element path used the browser's default.
+
+**The overlay clips had the same disease.** A clip is stepped per output frame too, and with a 4K
+video overlay the clip layer was **88.3%** of a 3 s export (106.7 s of 120.8 s, 1186 ms a frame). It
+now gets the same treatment — one pass per clip over its own window, decoded in order — and the same
+measurement reads **120.8 s → 26.8 s** (4.5x), the clip layer's own share falling from 106.7 s to
+14.4 s.
+
+**The seek-per-frame path still exists**, as the fallback for a file Mediabunny cannot read or this
+browser has no decoder for, and it is one flag away from being measured (`--decoder element`). A file
+that falls back says so in the log, and the export reports how the picture was read (`result.picture`)
+so that "this file is slow to export" can be a fact rather than a mystery. It also reports
+`blankFrames` — output frames that had no picture to draw — rather than writing black frames in
+silence.
+
+The UI smoke run sees the same thing end to end, on its own 5 s fixture: the MP4 export went 2.8 s →
+2.2 s and the two WebM exports 10.6 s / 9.8 s → 6.8 s / 6.8 s, what is left being the VP9 encoder.
+
 ## Imported clips — pictures and logos over the captions
 
 A caption-only editor cannot put a logo in the corner or a second shot in the middle, so the media
@@ -372,8 +441,8 @@ with the server staying up (`/%zz` gives `400`).
 
 ```bash
 cd caption-studio
-npm test          # node --test "tests/unit/*.test.js" → 468 tests
-npm run ui        # headless-Chrome smoke test of the editor page (262 checks)
+npm test          # node --test "tests/unit/*.test.js" → 476 tests
+npm run ui        # headless-Chrome smoke test of the editor page (270 checks)
 npm run e2e       # the two studios on the real song — needs the Python venv (see below)
 npm run quality   # the whole pass through the real UI, scored against the reference lyrics
 ```
@@ -388,7 +457,7 @@ calculated by hand rather than mirrored from the implementation.
 
 ```bash
 cd caption-studio
-npm run ui        # → headless Chrome over CDP, 262 checks, exits non-zero on failure
+npm run ui        # → headless Chrome over CDP, 270 checks, exits non-zero on failure
 ```
 
 `src/main.js` is the one module no unit test can reach — it exists only as browser side effects on
@@ -411,6 +480,29 @@ any change to the editor wiring — the two bugs it caught were both invisible i
   rather than the page has its own `assert()` — `check()` evaluates its expression **inside the
   page**, so passing it a value instead of an expression silently sends that value as JavaScript
   (it did: the string `recording.wav` reached the browser as an expression and threw).
+
+### Where an export's time actually goes
+
+```bash
+cd caption-studio
+# a 6 s window of the real 2160p capture, timed phase by phase (--skip-seek, or it also measures the
+# seek path for you)
+node tools/export-perf.mjs --video "new_test_material/<capture>.mp4" --audio "<track>.mp3" \
+  --start 15 --seconds 6 --skip-seek
+# the two decoders, frame for frame, in one browser
+node tools/export-perf.mjs --video "<capture>.mp4" --start 15 --seconds 6 --compare 6 --skip-seek
+# the seek-per-frame fallback, and the old numbers it still produces
+node tools/export-perf.mjs --video "<capture>.mp4" --start 15 --seconds 1 --size 640x360 --skip-seek --decoder element
+# an overlay clip, which has a decode path of its own
+node tools/export-perf.mjs --video "<capture>.mp4" --clip "<capture>.mp4" --start 15 --seconds 3 --skip-seek
+```
+
+`--video` and `--audio` are relative to the **workspace** (the folder above this project), because the
+large captures are gitignored — same rule as `preview-perf.mjs`, whose caveat applies here too: this
+drives headless Chrome on a machine that decodes AV1 in software, so the absolute numbers are a worst
+case and what transfers is the *shape* of the breakdown. `--instrument` on `exportDocumentToVideo` is
+what makes it possible: the phase stopwatch is off unless asked for, because a stopwatch on the hot
+path would be measuring itself.
 
 ### The quality pass, scored
 

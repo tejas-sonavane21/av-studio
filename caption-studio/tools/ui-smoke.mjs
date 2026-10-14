@@ -2214,9 +2214,12 @@ async function main() {
   // Build a two-second 640×360 MP4 in the page — WebCodecs plus the vendored MP4 muxer — and hand
   // it to #video-in, so the smoke test needs no (gitignored) fixture.
   //
-  // An **indexed MP4** rather than the old recorded WebM, on purpose. The exporter seeks every frame,
-  // and a MediaRecorder WebM carries no seek index: pointing this section at one measures the worst
-  // case and takes minutes, not the file a user actually loads (a phone/camera MP4).
+  // An **indexed MP4** rather than the old recorded WebM, on purpose, and it is the file a user
+  // actually loads (a phone/camera capture). It was chosen when the export seeked every frame and a
+  // MediaRecorder WebM's missing seek index made this section take minutes; the export now decodes
+  // the picture in order (`openPictureStream`), so the choice no longer decides whether this runs —
+  // but the *fallback* path still seeks, and pointing this at a file with no index would exercise it
+  // in its worst case rather than its normal one.
   //
   // The content is *noise* on purpose too — a tidy moving square gives the encoder almost nothing to
   // spend its bitrate on, so two quality settings would produce the same file and the measurement
@@ -2598,6 +2601,22 @@ async function main() {
       'and the log names the container it wrote',
       'document.querySelector("#log").textContent.includes("into a .mp4")',
       (v) => v === true,
+    );
+    // How the picture was read, which is the difference between an export that takes as long as
+    // decoding takes and one that takes 1448 ms per frame. Both are real paths and either *works* —
+    // but only one of them is the fast one, and a silent fall back to the other is exactly the kind
+    // of regression an export that has already been made 13x faster is going to suffer.
+    await check(
+      cdp,
+      'the picture is decoded in order rather than seeked once per frame',
+      'document.querySelector("#log").textContent.includes("decoded in order")',
+      (v) => v === true,
+    );
+    await check(
+      cdp,
+      'and nothing fell back to stepping the picture through the browser',
+      'document.querySelector("#log").textContent.includes("stepping it through the browser")',
+      (v) => v === false,
     );
     await check(
       cdp,

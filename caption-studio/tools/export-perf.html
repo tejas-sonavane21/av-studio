@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>export-perf harness page</title>
+  <!--
+    The page `tools/export-perf.mjs` drives, and nothing else on it.
+
+    It exists as a file rather than as `about:blank` for the same reason
+    `preview-perf-control.html` does: a page with an opaque origin cannot `import()` the modules (and
+    a `data:` page has no origin to be same-origin with the media), while this is served by
+    `tools/serve.mjs` beside the app, so `../src/...` resolves and the video element is same-origin
+    with the harness and with the picture.
+
+    There is no UI here on purpose. Every arm is a function this page exposes, called over CDP by the
+    harness, so what is measured is the real module and never a copy of it.
+  -->
+</head>
+<body style="margin:0;background:#000;color:#000">
+  <script type="module">
+    /*
+     * The harness's own surface, built here rather than injected per arm: `window.__exp` is the real
+     * export module, and the arms below are the four questions the measurement has to answer.
+     */
+    window.__exp = await import('../src/io/webcodecs-export.js');
+    const demo = await import('../src/model/demo.js');
+    window.__ready = true;
+
+    /**
+     * Load the picture and the document window, once.
+     *
+     * The window is a *cut* of the real file — `timeline.video.ranges` — which is how an export of a
+     * 5 s slice of a 161 s 4K capture is asked for without a second fixture and without a knob in the
+     * export itself. The captions are the demo document's, which sit at 15.2-23.2 s of the source, so
+     * the window is placed over them and the caption layer is exercised as well.
+     */
+    window.__prep = async (params) => {
+      window.__params = params;
+      window.__doc = demo.createDemoDocument();
+      const el = window.__exp.createDecodeElement(params.url);
+      window.__el = el;
+      const ready = await new Promise((ok) => {
+        if (el.readyState >= 1) ok(true);
+        else {
+          el.addEventListener('loadedmetadata', () => ok(true), { once: true });
+          setTimeout(() => ok(false), 30000);
+        }
+      });
+      const duration = Number(el.duration);
+      if (!ready || !(duration > 0)) {
+        return { error: 'the picture never reported a duration', ready: ready, duration: duration, error_code: el.error ? el.error.code : 0 };
+      }
+      const end = Math.min(duration, params.start + params.seconds);
+      const ranges = [{ id: 'perf', srcIn: params.start, srcOut: end }];
+      window.__doc.timeline = {
+        video: { sourceDuration: duration, ranges: ranges },
+        audio: { sourceDuration: duration, ranges: ranges },
+      };
+      window.__doc.canvas = { width: params.size.width, height: params.size.height, fps: params.rate };
+      // An optional *overlay clip* over the same window, because that layer has a decode path of its
+      // own: it steps each clip file with `currentTime` per output frame, exactly as the picture used
+      // to. A measurement of the picture alone would not say whether that one is worth fixing too.
+      if (params.clipUrl) {
+        const media = await import('../src/model/media.js');
+        const entry = { kind: 'video', name: 'overlay.mp4', duration: 20, width: 3840, height: 2160 };
+        const clip = media.planClip({
+          entry: entry,
+          at: params.start,
+          canvas: window.__doc.canvas,
+          limit: 0,
+        });
+        media.addMediaClip(window.__doc, clip);
+        window.__clipId = clip.id;
+      }
+      window.__url = params.url;
+      window.__start = params.start;
+      window.__rate = params.rate;
+      window.__end = end;
+      return {
+        ready: ready,
+        width: el.videoWidth,
+        height: el.videoHeight,
+        duration: duration,
+        window: { start: params.start, end: end, seconds: end - params.start },
+        captions: window.__doc.blocks.length,
+      };
+    };
+
+    /**
+     * Step `n` frames through the export's own seek, and keep a hash of each frame it produced.
+     *
+     * The hash is of a 480x270 copy and not of the full frame: it is here to answer "is the frame the
+     * same one" between the two arms, and a stale frame differs grossly rather than subtly. Both arms
+     * pay the same read-back, so the comparison between them is unaffected by it.
+     */
+    window.__seekArm = async (waitForPaint) => {
+      const exp = window.__exp;
+      const el = window.__el;
+      const p = window.__params;
+      const W = 480;
+      const H = Math.round((W * (el.videoHeight || 9)) / (el.videoWidth || 16));
+      const canvas = document.createElement('canvas');
+      canvas.width = W;
+      canvas.height = H;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      const hashes = [];
+      const started = performance.now();
+      for (let i = 0; i < p.frames; i++) {
+        const t = window.__start + i / window.__rate;
+        await exp.seekToFrame(el, t, { waitForPaint: waitForPaint });
+        ctx.drawImage(el, 0, 0, W, H);
+        const bytes = ctx.getImageData(0, 0, W, H).data;
+        let hash = 2166136261;
+        for (let k = 0; k < bytes.length; k += 13) {
+          hash ^= bytes[k];
+          hash = Math.imul(hash, 16777619) >>> 0;
+        }
+        hashes.push(hash);
+      }
+      return { ms: performance.now() - started, frames: p.frames, hashes: hashes };
+    };
+
+    /**
+     * The real export, over the same window, instrumented.
+     *
+     * Nothing here re-implements anything: `exportDocumentToVideo` is the function the Export button
+     * calls, and `instrument: true` is what turns the per-phase stopwatch on.
+     */
+    window.__exportArm = async () => {
+      const p = window.__params;
+      const audioBlob = p.audioUrl ? await (await fetch(p.audioUrl)).blob() : null;
+      let lastMessage = '';
+      const started = performance.now();
+      const result = await window.__exp.exportDocumentToVideo({
+        doc: window.__doc,
+        sourceUrl: window.__url,
+        audioBlob: audioBlob,
+        format: p.format,
+        fps: p.rate,
+        quality: p.quality,
+        size: p.size,
+        videoBitsPerSecond: p.bitrate || null,
+        pictureDecoder: p.pictureDecoder || 'auto',
+        clipUrls: window.__clipId ? { [window.__clipId]: p.clipUrl } : null,
+        instrument: true,
+        onProgress: (fraction, message) => {
+          lastMessage = message;
+        },
+      });
+      const wall = performance.now() - started;
+      return {
+        wall: wall,
+        timings: result.timings,
+        bytes: result.blob.size,
+        frames: result.frames,
+        seconds: result.seconds,
+        size: { width: result.width, height: result.height },
+        fps: result.fps,
+        videoCodec: result.videoCodec,
+        audioCodec: result.audioCodec,
+        audio: result.audio,
+        audioSkipped: result.audioSkipped,
+        videoBitsPerSecond: result.videoBitsPerSecond,
+        picture: result.picture,
+        pictureNote: result.pictureNote,
+        blankFrames: result.blankFrames,
+        clips: result.clips,
+        clipFrames: result.clipFrames,
+        clipsMissing: result.clipsMissing,
+        lastMessage: lastMessage,
+      };
+    };
+
+    /**
+     * Are the two ways of reading the picture the *same picture*?
+     *
+     * The streaming decoder is a substitution, and a substitution that quietly changed the pixels
+     * would be a worse bug than the slowness it fixes. So both are decoded here, at the export's own
+     * geometry - the element through `fitRect` and `drawImage`, the stream through the sink's own
+     * `fit: 'contain'` frames - then downscaled to a common 480-wide copy and compared pixel by
+     * pixel. What comes back is the mean and the worst difference in 0-255 units, and how many
+     * pixels differ by more than 8, which is the level a person could see.
+     *
+     * The sink below is built the way `openPictureStream()` builds the export's own: same library,
+     * same options. If those options change, this arm has to change with them - and that is the
+     * price of comparing a module's output rather than the module's private parts.
+     */
+    window.__compareArm = async (count) => {
+      const exp = window.__exp;
+      const math = await import('../src/util/math.js');
+      const mb = await import('../vendor/mediabunny/mediabunny.min.mjs');
+      const p = window.__params;
+      const width = p.size.width;
+      const height = p.size.height;
+
+      const blob = await (await fetch(p.url)).blob();
+      const input = new mb.Input({ source: new mb.BlobSource(blob), formats: mb.ALL_FORMATS });
+      const track = await input.getPrimaryVideoTrack();
+      // Two ways to use the sink, because they are not the same picture and the cheaper one is not
+      // obviously the right one: the frames can be fitted *by the sink* at the output's size (one
+      // scale, mipmapped, drawn 1:1 by the export) or handed over at the source's own size and fitted
+      // by the export's own `drawImage` — which is what the element path does.
+      const atOutput = new mb.CanvasSink(track, { width: width, height: height, fit: 'contain', poolSize: 2 });
+      const atSource = new mb.CanvasSink(track, { poolSize: 2 });
+      const sourceSize = { width: await track.getDisplayWidth(), height: await track.getDisplayHeight() };
+      const fit = math.fitRect(sourceSize, { width: width, height: height });
+
+      const composite = document.createElement('canvas');
+      composite.width = width;
+      composite.height = height;
+      const cctx = composite.getContext('2d', { willReadFrequently: true });
+
+      const W = 480;
+      const H = Math.max(2, Math.round((W * height) / width));
+      const read = document.createElement('canvas');
+      read.width = W;
+      read.height = H;
+      const rctx = read.getContext('2d', { willReadFrequently: true });
+
+      // The first variant is the *control*: the element path drawn and read twice in a row. It is here
+      // to give the comparison a noise floor - if re-reading the same frame through the same path does
+      // not come back identical, then nothing else measured here can be read as a difference between
+      // decoders.
+      const names = ['control: the element path, drawn and read twice', 'sink, fitted at the output size', 'sink, fitted by drawImage like the element path'];
+      const sizes = [];
+      const totals = names.map(() => ({
+        sum: 0,
+        samples: 0,
+        worst: 0,
+        red: 0,
+        buckets: [0, 0, 0, 0, 0],
+        shifted: 0,
+        shiftSamples: 0,
+      }));
+      const perFrame = [];
+
+      const sample = () => {
+        rctx.clearRect(0, 0, W, H);
+        rctx.drawImage(composite, 0, 0, W, H);
+        return rctx.getImageData(0, 0, W, H).data;
+      };
+
+      for (let i = 0; i < count; i++) {
+        const t = p.start + i / p.rate;
+
+        const drawElement = async () => {
+          await exp.seekToFrame(window.__el, t, { waitForPaint: true });
+          cctx.clearRect(0, 0, width, height);
+          cctx.drawImage(window.__el, fit.x, fit.y, fit.width, fit.height);
+          return sample();
+        };
+
+        // The reference: the element, sought, then fitted by the export's own drawImage.
+        const reference = Uint8Array.from(await drawElement());
+
+        const candidates = [
+          () => drawElement(),
+          async () => {
+            const frame = await atOutput.getCanvas(t);
+            if (!sizes[1]) sizes[1] = frame.canvas.width + 'x' + frame.canvas.height;
+            cctx.clearRect(0, 0, width, height);
+            cctx.drawImage(frame.canvas, 0, 0, width, height);
+            return sample();
+          },
+          async () => {
+            const frame = await atSource.getCanvas(t);
+            if (!sizes[2]) sizes[2] = frame.canvas.width + 'x' + frame.canvas.height;
+            cctx.clearRect(0, 0, width, height);
+            cctx.drawImage(frame.canvas, fit.x, fit.y, fit.width, fit.height);
+            return sample();
+          },
+        ];
+
+        const row = { t: t, means: [], worsts: [] };
+        for (let v = 0; v < candidates.length; v++) {
+          const left = reference;
+          const right = await candidates[v]();
+          let sum = 0;
+          let worst = 0;
+          let redHere = 0;
+          let redShifted = 0;
+          let redSamples = 0;
+          for (let k = 0; k < left.length; k++) {
+            const diff = Math.abs(left[k] - right[k]);
+            sum += diff;
+            totals[v].samples += 1;
+            if (diff > worst) worst = diff;
+            totals[v].buckets[diff === 0 ? 0 : diff <= 2 ? 1 : diff <= 8 ? 2 : diff <= 32 ? 3 : 4] += 1;
+          }
+          // Would a one-pixel offset explain it? If moving the frame sideways matched *better* than
+          // leaving it where it is, the difference is a geometry change and not a filter. Red channel
+          // only, same sampled pixels both ways, so the two numbers are comparable.
+          for (let y = 0; y < H; y++) {
+            for (let x = 1; x < W; x += 3) {
+              const here = (y * W + x) * 4;
+              const before = (y * W + (x - 1)) * 4;
+              redHere += Math.abs(left[here] - right[here]);
+              redShifted += Math.abs(left[before] - right[here]);
+              redSamples += 1;
+            }
+          }
+          totals[v].sum += sum;
+          totals[v].red += redHere;
+          totals[v].shifted += redShifted;
+          totals[v].shiftSamples += redSamples;
+          if (worst > totals[v].worst) totals[v].worst = worst;
+          row.means.push(sum / left.length);
+          row.worsts.push(worst);
+        }
+        perFrame.push(row);
+      }
+      input.dispose?.();
+      return {
+        width: W,
+        height: H,
+        sourceSize: sourceSize,
+        frames: count,
+        variants: names.map((name, v) => ({
+          name: name,
+          canvas: v === 0 ? 'the element, fitted' : sizes[v],
+          mean: totals[v].sum / totals[v].samples,
+          worst: totals[v].worst,
+          exact: totals[v].buckets[0] / totals[v].samples,
+          within2: (totals[v].buckets[0] + totals[v].buckets[1]) / totals[v].samples,
+          within8: (totals[v].buckets[0] + totals[v].buckets[1] + totals[v].buckets[2]) / totals[v].samples,
+          past8: totals[v].buckets[3] / totals[v].samples,
+          past32: totals[v].buckets[4] / totals[v].samples,
+          // Red-channel means, on the same sampled pixels: shorter is better than shifted if the
+          // frame is where it should be.
+          alignedRed: totals[v].red / totals[v].shiftSamples,
+          shiftedRed: totals[v].shifted / totals[v].shiftSamples,
+        })),
+      };
+    };
+  </script>
+</body>
+</html>
