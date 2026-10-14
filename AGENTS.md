@@ -1,5 +1,30 @@
 # Working on this repository — conventions for agents
 
+## Branches
+
+- **Every change gets its own branch, the branch is tested, and both refs are pushed.**
+  Create `type/scope-subject` off `main`, do the work there, run the checks, merge it
+  into `main` with `--no-ff`, and push `main` **and** the branch:
+
+  ```
+  git checkout -b fix/audio-studio-pin-fallback
+  # ... the change, and the checks that cover it ...
+  git checkout main
+  git merge --no-ff fix/audio-studio-pin-fallback
+  git push origin main fix/audio-studio-pin-fallback
+  ```
+
+  A branch is not scratch to be thrown away once `main` has the commit: it is the
+  record of *what the change was*, and `main` should keep the shape of the work,
+  which is also why the merge is `--no-ff` - a fast-forward erases the fact that a
+  branch ever existed. Committing straight onto `main` and pushing it alone loses
+  both. The user has asked for this more than once; treat it as a hard rule.
+- **The test step is the checks that cover the change**, run *before* the merge:
+  `pytest` for `audio-studio`, `npm test` for `caption-studio`, and the browser runs
+  (`npm run ui`, `tools/preview-perf.mjs`) when the change is one only a browser can
+  exercise. A branch whose checks were not run is not ready to merge.
+- Never force-push `main`, and never delete a branch that has been pushed.
+
 ## Commit messages
 
 - **No generated-by trailer and no co-author line. Ever.** A commit message ends
