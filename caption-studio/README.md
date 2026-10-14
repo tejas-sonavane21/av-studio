@@ -230,9 +230,10 @@ smaller and still stutters, which is worse than useless: it looks like a fix.
 - **The frames are decoded off the clock.** Mediabunny drives the decoder itself (`VideoDecoder`, off any
   clock, hardware-accelerated where the machine has it) and writes every frame it gets, so the copy carries
   the picture's real motion. On the 2160p fixture the copy holds **4827 frames at 30.01/s** — every frame of
-  the file, at the file's own rate — and under the same harness the transport presents **60.1 frames a
-  second** of the copy against **18.5** of the original: 3.2x the motion, because the decode is no longer
-  the thing being measured.
+  the file, at the file's own rate — and under the same harness the browser had a frame to present **60.1**
+  times a second from the copy against **18.5** from the original. That is the difference between a screen
+  that is fed and one that is starved: 18.5 times a second is a new picture every 54 ms, which is the
+  stutter this feature exists to remove.
 - **The length is the file's length.** Nothing is trimmed and nothing is time-stretched. The frame rate is
   capped at 30 a second and **never raised** — a 24 fps film is copied at 24 rather than padded to 30 — and
   the sound is carried over, copied where the container allows it and re-encoded where it does not. The
