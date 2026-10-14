@@ -240,11 +240,12 @@ smaller and still stutters, which is worse than useless: it looks like a fix.
   the original's, so a copy that drifted says so instead of quietly shifting every caption against the
   picture.
 - **A conversion, not a playback.** `npm run ui` builds one in real Chrome from a 4 s, 30 fps fixture: all
-  **120** frames, sound present and not silent, converted in **0.49 s**. That last number is the check, not a
-  boast — the implementation this replaced could never have been faster than the clip it was copying. A 161 s
-  2160p AV1 file is a different proposition: **7.4 minutes** in headless Chrome on this machine, which decodes
-  AV1 in software. That is the trade, stated rather than buried: one longer wait for a preview that is smooth
-  from then on, and a machine with a hardware AV1 decoder pays far less of it.
+  **120** frames, sound present and not silent, converted in **0.5-0.6 s** over two runs — a fraction of the
+  4 s the clip itself runs for, and the number the implementation this replaced could not have beaten, because
+  it was on the clip's clock. A 161 s 2160p AV1 file is a different proposition: **7.4 minutes** in headless
+  Chrome on this machine, which decodes AV1 in software. That is the trade, stated rather than buried: one
+  longer wait for a preview that is smooth from then on, and a machine with a hardware AV1 decoder pays far
+  less of it.
 
 What a copy cannot change is the motion the file actually has. The decode has no deadline now, so a heavy
 file gives up all of its frames — but a file that really was recorded at 16 frames a second is still a 16 fps
