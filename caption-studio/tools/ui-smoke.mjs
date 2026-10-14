@@ -2854,10 +2854,13 @@ async function main() {
           audio: result.audio,
           audioError: result.audioError,
           mimeType: result.mimeType,
-          codec: result.codec,
           frames: result.frames,
-          decoderFrames: result.presented,
+          sourceFrames: FPS * SECONDS,
           averageFps: result.averageFps,
+          videoBitrate: result.videoBitrate,
+          audioCodec: result.audioCodec,
+          codec: result.codec,
+          sourceCodec: result.sourceCodec,
           summary: result.summary,
           copySeconds: Number(copySeconds.toFixed(2)),
           rms: Number(rms.toFixed(4)),
@@ -2885,10 +2888,19 @@ async function main() {
       proxyRun.sourceSeconds > 3.5 && Math.abs(proxyRun.seconds - proxyRun.sourceSeconds) < 0.5,
       `the copy is ${proxyRun.seconds}s of a ${proxyRun.sourceSeconds}s picture`,
     );
+    // The fixture is exactly `FPS * SECONDS` frames long, and every one of them has to be in the
+    // copy. This is the check the wall-clock version of this feature could not pass: it wrote the
+    // frames a hidden <video> happened to present on the way past, which on a heavy file is a
+    // fraction of them - a "smoother" copy that had thrown away half the motion.
     assert(
-      'the copy holds the frames the decoder gave up, not the ones a clock asked for',
-      proxyRun.frames >= 100 && proxyRun.frames <= proxyRun.decoderFrames && proxyRun.decoderFrames > 0,
-      `${proxyRun.frames} frame(s) encoded of ${proxyRun.decoderFrames} presented`,
+      'every frame of the picture is in the copy, not just the ones a clock had time for',
+      proxyRun.frames === proxyRun.sourceFrames,
+      `the copy holds ${proxyRun.frames} frame(s) of the ${proxyRun.sourceFrames} in the picture it was made from`,
+    );
+    assert(
+      'and the copy is made without playing the picture through',
+      proxyRun.copySeconds < proxyRun.sourceSeconds - 1,
+      `a copy of a ${proxyRun.sourceSeconds}s picture took ${proxyRun.copySeconds}s to make`,
     );
     assert(
       'the copy carries the picture\u2019s own soundtrack, and it is not silence',
@@ -2904,7 +2916,7 @@ async function main() {
       `  \u2022 the copy: ${proxyRun.width}\u00d7${proxyRun.height} ${proxyRun.codec}, ${proxyRun.bytes} bytes, ` +
         `${proxyRun.seconds}s of ${proxyRun.sourceSeconds}s, sound ${proxyRun.audio ? `captured (rms ${proxyRun.rms})` : 'not captured'}, ${proxyRun.mimeType}`,
     );
-    console.log(`  \u2022 ${proxyRun.summary}; encoded in ${proxyRun.copySeconds}s`);
+    console.log(`  \u2022 ${proxyRun.summary}; converted in ${proxyRun.copySeconds}s`);
     console.log(
       `  \u2022 played back: ${proxyRun.playedFrames} frames over ${proxyRun.playedFor}s ` +
         `(${(proxyRun.playedFrames / Math.max(0.01, proxyRun.playedFor)).toFixed(1)} fps)`,

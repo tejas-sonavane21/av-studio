@@ -233,8 +233,8 @@ async function readyMedia(element, timeout = 20000) {
  * The point is that the preview keeps working: the user can scrub, or leave it playing, and the
  * export is unaffected because it never touches that element.
  *
- * Exported because `io/preview-proxy.js` needs the same thing for the same reason: copying the picture
- * has to decode it, and decoding it must not disturb the element on screen.
+ * Exported because the export needs one in more than one place - the picture and the audio are pulled
+ * from different passes - and because an element with this contract is worth being able to name.
  */
 export function createDecodeElement(url) {
   const element = document.createElement('video');
@@ -847,8 +847,7 @@ export function lastCaptionEnd(doc) {
  *
  * Asynchronous on purpose, and that is why it exists at all: `pickVideoCodec` takes a *synchronous*
  * probe, and a `Promise` is always truthy, so a caller that passed `isConfigSupported(...)` directly
- * would silently pick the first candidate the browser cannot encode. The preview copy
- * (`io/preview-proxy.js`) goes through here for exactly this reason.
+ * would silently pick the first candidate the browser cannot encode.
  */
 export async function probeVideoConfig(format, width, height, fps, bitrate) {
   if (typeof VideoEncoder?.isConfigSupported !== 'function') {
