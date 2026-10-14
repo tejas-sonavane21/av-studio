@@ -295,10 +295,11 @@ is seeked, and nothing is dropped to keep up with a clock. Same file, same windo
 | per frame | 1469.8 ms | 105.8–150.7 ms |
 | at that rate, the whole 161 s file | 118.3 min | 8.5–12.1 min |
 
-Those are four runs on one machine, and the spread between them is the machine rather than the code —
-the phases that move together across those runs (reading the file, decoding the audio) are the ones
-that move when something else on the box wants the CPU. Even the slowest of the four is **ten times**
-what the seek path cost, and the phase that dominates what is left is the decode of the file itself.
+Those are five runs on one machine — 19.0, 19.6, 24.7, 27.0 and 27.1 s — and the spread between them is
+the machine rather than the code: the phases that move together across those runs (reading the file,
+decoding the audio) are the ones that move when something else on the box wants the CPU. Even the
+slowest of the five is **ten times** what the seek path cost, and what dominates what is left is the
+decode of the file itself.
 
 What is left is mostly the decode itself (63% of the run): this machine decodes AV1 in software, and
 that is the file's own cost rather than the app's. Two of the remaining costs are in the breakdown
