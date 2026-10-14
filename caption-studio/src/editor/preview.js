@@ -29,6 +29,19 @@ import { outputToSource, playbackTarget, sourceToOutput, totalSourceEnd, trackRa
 
 const log = createLogger('preview');
 
+/**
+ * The preview canvas is backed at the display's own device pixel ratio, and that was measured rather
+ * than assumed.
+ *
+ * The suspicion was that a 200% display doubles the app's per-frame cost — the canvas is fitted to the
+ * stage, so a 1400px stage asks for a 2800x1575 backing store to clear and composite sixty times a
+ * second next to a decoder that wants the same CPU. `tools/preview-perf.mjs` at `--dpr 2` says no:
+ * with the canvas in the document the editor presented 9.0–14.0 frames a second of a 4K fixture, with
+ * it removed from the document 14.0, and with its backing store capped at 1x 12.4 — the spread across
+ * repeated runs of *one* setting is as wide as the spread between settings. Capping it would have cost
+ * the sharpness of every caption on every high-DPI display and bought nothing, so it is not capped.
+ * `--hide-canvas` is the flag that shows it, and the negative result is the useful half of it.
+ */
 export function createPreview({
   canvas,
   video = null,

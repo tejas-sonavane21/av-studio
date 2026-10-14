@@ -2929,6 +2929,108 @@ async function main() {
     (v) => v === sourceSrcBefore,
   );
 
+  console.log('\n■ a copy builds itself');
+  // The picture this run has been using is 640x360, which is *not* offered a copy — so this section
+  // brings its own: a second of 1080p, encoded here, loaded through the panel's own file input. 1080p
+  // on purpose, because it is the size that used to be waved through ("1080p decodes fine") and is now
+  // the size the preview is copied down to 720p for. Nothing is clicked: whether a copy appears without
+  // being asked for is the whole question.
+  const auto = await evaluate(
+    cdp,
+    `(async () => {
+      try {
+        const mod = await import('./src/io/preview-proxy.js');
+        if (!mod.proxySupported()) return { skipped: true };
+        const { Muxer, ArrayBufferTarget } = await import('./vendor/muxers/webm-muxer.mjs');
+
+        // ---- a one-second 1080p picture, made with the same WebCodecs the feature uses
+        const W = 1920, H = 1080, FPS = 30, SECONDS = 1;
+        const canvas = document.createElement('canvas');
+        canvas.width = W; canvas.height = H;
+        const g = canvas.getContext('2d');
+        const chunks = [];
+        const enc = new VideoEncoder({ output: (c, m) => chunks.push({ c, m }), error: () => {} });
+        enc.configure({ codec: 'vp09.00.10.08', width: W, height: H, bitrate: 1000000, framerate: FPS });
+        for (let i = 0; i < FPS * SECONDS; i++) {
+          g.fillStyle = 'hsl(' + ((i * 11) % 360) + ' 70% 40%)';
+          g.fillRect(0, 0, W, H);
+          g.fillStyle = '#fff';
+          g.fillRect((i * 20) % W, 400, 60, 60);
+          const frame = new VideoFrame(canvas, { timestamp: Math.round((i / FPS) * 1e6), duration: Math.round(1e6 / FPS) });
+          enc.encode(frame, { keyFrame: i % 15 === 0 });
+          frame.close();
+        }
+        await enc.flush();
+        enc.close();
+        const target = new ArrayBufferTarget();
+        const muxer = new Muxer({ target, video: { codec: 'V_VP9', width: W, height: H, frameRate: FPS } });
+        for (const entry of chunks) muxer.addVideoChunk(entry.c, entry.m);
+        muxer.finalize();
+        const blob = new Blob([target.buffer], { type: 'video/webm' });
+
+        // ---- loaded the way a person loads one
+        const dt = new DataTransfer();
+        dt.items.add(new File([blob], 'big-picture.webm', { type: 'video/webm' }));
+        const input = document.querySelector('#video-in');
+        input.files = dt.files;
+        input.dispatchEvent(new Event('change'));
+
+        // ---- and then nobody touches anything
+        const note = document.querySelector('#proxy-note');
+        const clear = document.querySelector('#proxy-clear');
+        const started = performance.now();
+        let sawBuilding = false;
+        while (performance.now() - started < 90000) {
+          const text = note.textContent;
+          if (clear.textContent === 'Stop copying' || /copying/.test(text)) sawBuilding = true;
+          if (/Export still encodes the original 1920/.test(text)) {
+            return {
+              sawBuilding,
+              seconds: Number(((performance.now() - started) / 1000).toFixed(1)),
+              note: text,
+              src: document.querySelector('#preview-video').src,
+              clearLabel: clear.textContent,
+              size: document.querySelector('#video-note').textContent,
+            };
+          }
+          if (/could not be made/.test(text)) return { error: text };
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        return { error: 'no copy arrived: ' + note.textContent };
+      } catch (err) {
+        return { error: String((err && err.message) || err) };
+      }
+    })()`,
+    { timeout: 150 },
+  );
+  if (auto?.skipped) {
+    console.log('  \u2022 skipped — this browser has no WebCodecs VideoEncoder');
+  } else if (auto?.error) {
+    assert('a 1080p picture gets a copy without anybody pressing the button', false, auto.error);
+  } else {
+    assert(
+      'a 1080p picture bigger than the preview gets a copy with nobody having asked',
+      auto.sawBuilding === true,
+      `the panel never showed a copy being built: ${JSON.stringify(auto)}`,
+    );
+    assert(
+      'and it is a 720p copy — a quarter of the pixels of the 1080p file, for the preview only',
+      /1280\u00d7720/.test(auto.note),
+      `the note said ${JSON.stringify(auto.note)}`,
+    );
+    assert(
+      'the preview moves onto the copy, and the export stays on the original 1080p picture',
+      String(auto.src).startsWith('blob:') && /Export still encodes the original 1920\u00d71080/.test(auto.note),
+      `src ${JSON.stringify(auto.src)} with the note ${JSON.stringify(auto.note)}`,
+    );
+    assert(
+      'and the picture itself is untouched — the copy is not what the export would encode',
+      /1920\u00d71080/.test(auto.size),
+      `the panel says ${JSON.stringify(auto.size)}`,
+    );
+    console.log(`  \u2022 it built itself in ${auto.seconds}s: ${auto.note}`);
+  }
+
   console.log('\n■ console health');
   await check(cdp, 'the font-size readout resolved to pixels', '/\\d+px/.test(document.querySelector("#size-out").textContent)');
   const clean = cdp.problems.length === 0;

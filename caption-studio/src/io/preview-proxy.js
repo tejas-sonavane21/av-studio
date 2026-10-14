@@ -1,17 +1,25 @@
 /**
  * io/preview-proxy.js — a smaller copy of the picture, for the *preview* only.
  *
- * The problem this solves is not rendering. Measured with `tools/preview-perf.mjs`, the editor's own
- * frame loop holds 59.7 fps against a bare `<video>`'s 60.1 while the browser presents **18.5** frames a
- * second of a 4K AV1 file (24.4 on the same page with nothing else on it): the decoder is the limit, and
- * no care taken in this app's frame loop can lift it. The only thing that helps is asking the decoder for
- * less, which means a smaller file — so one is made here, in the browser, from the file the user already
- * has. Against that same harness the copy is presented at **60.1** frames a second.
+ * The problem this solves is not rendering. Measured with `tools/preview-perf.mjs`, a 3840x2160 AV1
+ * capture — a 30 fps file — is presented **16.3** times a second inside the editor, against **19.3** on
+ * an otherwise empty page and the 30 frames a second the file actually holds: the decoder is the limit,
+ * and no care taken in this app's frame loop lifts it (the loop holds 59.8 fps in both arms, and taking
+ * the caption canvas out of the document altogether does not move the number). The only thing that helps
+ * is asking the decoder for less, which means a smaller file — so one is made here, in the browser, from
+ * the file the user already has. Under the same harness the copy is presented **58.0** times a second:
+ * a 30 fps copy cannot have more than 30 frames in a second, so what that number says is that every one
+ * of them arrives on time.
+ *
+ * Nobody has to be told about it, either. A copy is built **by itself** as soon as a picture bigger than
+ * the copy would be is loaded (`autoProxyDecision`), at 720p and about 1.7 Mbps, because the version of
+ * this feature that waited to be asked for was a feature the preview still stuttered without. The panel
+ * counts the pass out, one line goes in the log, and the stop button cancels it.
  *
  * The copy is made by **Mediabunny** (`vendor/mediabunny/`), and that is the second attempt at this
  * module. The first one played the picture through a hidden `<video>` and encoded the frames it
  * presented, and the copy it produced was *as choppy as the original*: a `<video>` element presents
- * frames on the wall clock, so a 4K file whose decoder manages 18.5 frames a second offers 18.5
+ * frames on the wall clock, so a 4K file whose decoder manages 16 frames a second offers 16
  * frames a second to whoever is watching — the copy inherited exactly the stutter it existed to
  * remove, and no amount of care in an encoder could undo it. Mediabunny drives the decoder itself
  * (`VideoDecoder`, hardware-accelerated where the machine has it, and on no clock at all) and writes
@@ -52,12 +60,17 @@ import { evenSize } from './webcodecs-export.js';
 export const PROXY_LONG_EDGE = 1280;
 
 /**
- * Above this long edge, a picture is worth copying.
+ * Above this long edge, a picture is copied.
  *
- * 1920, so 1080p is left alone — it decodes fine, and a copy of it would only be a second thing to
- * keep in step. 1440p and 4K are the sizes that actually stall a transport on a CPU.
+ * **1280 — the same number as the cap itself**, and that is the whole policy in one line: the preview
+ * is a 720p picture, and anything bigger than a 720p picture is given a 720p one. It was 1920 on the
+ * reasoning that "1080p decodes fine, so a copy of it would only be a second thing to keep in step",
+ * and that was a guess about the *file* rather than about the machine: 1080p is exactly the size a
+ * laptop with a high-DPI display, a busy CPU and a couple of other tabs does **not** decode in real
+ * time, and the copy that would have fixed it was never offered. A picture at or below the cap is left
+ * alone, because a copy of it would be no smaller than what is already playing.
  */
-export const PROXY_THRESHOLD = 1920;
+export const PROXY_THRESHOLD = 1280;
 
 /** The copy's frame rate ceiling. The preview is for judging timing, not for grading colour. */
 export const DEFAULT_PROXY_FPS = 30;
@@ -91,7 +104,8 @@ export const PROXY_RATE_TOLERANCE = 0.5;
  * Would this picture benefit from a smaller copy?
  *
  * By long edge, which is the thing that decides how many pixels the decoder has to push out per
- * second. A 1080p file is left alone; anything above it is a candidate.
+ * second. A picture at or below the cap is left alone; anything above it is a candidate, which with
+ * `PROXY_THRESHOLD` at 1280 means **every 1080p and 4K file** — the two sizes this feature exists for.
  */
 export function needsProxy(width, height, { threshold = PROXY_THRESHOLD } = {}) {
   const long = Math.max(Number(width) || 0, Number(height) || 0);
@@ -115,17 +129,63 @@ export function proxySize(width, height, { longEdge = PROXY_LONG_EDGE, threshold
 }
 
 /**
+ * The bits a copy spends per pixel per frame.
+ *
+ * **0.06.** One twentieth of a bit per pixel is not a number anybody would film with; it is the number
+ * that keeps a 720p30 copy near 1.7 Mbps, which is a quarter of what the same picture costs as 1080p
+ * in a typical H.264 master and an eighth of a 4K one. It was 0.1, and the copies are the same picture
+ * either way — what changes is how much of the CPU the *entropy decoding* of the copy takes, which is
+ * the part of the work a bitrate actually buys. The preview exists to judge whether a caption lands on
+ * the beat, not to grade colour.
+ */
+export const PROXY_BITS_PER_PIXEL = 0.06;
+
+/** The floor and ceiling on a copy's bitrate, so a tiny or a silly size cannot set it. */
+export const PROXY_MIN_BITRATE = 500_000;
+export const PROXY_MAX_BITRATE = 4_000_000;
+
+/**
  * The video bitrate to spend on the copy. Pure.
  *
  * Deliberately modest and clamped: this file exists to be *decoded* quickly, and a generous bitrate
- * would undo the point of it. A tenth of a bit per pixel per frame puts 720p30 near 2 Mbps, which is
- * enough that a person can still judge whether a caption sits on the beat.
+ * would undo the point of it. Six hundredths of a bit per pixel per frame puts 720p30 near 1.7 Mbps,
+ * which is enough that a person can still judge whether a caption sits on the beat.
  */
 export function proxyBitrate(width, height, fps = DEFAULT_PROXY_FPS) {
   const pixels = Math.max(0, Number(width) || 0) * Math.max(0, Number(height) || 0);
   const rate = Math.min(60, Math.max(1, Math.round(Number(fps) || DEFAULT_PROXY_FPS)));
-  const bits = pixels * rate * 0.1;
-  return Math.round(Math.min(6_000_000, Math.max(600_000, bits)));
+  const bits = pixels * rate * PROXY_BITS_PER_PIXEL;
+  return Math.round(Math.min(PROXY_MAX_BITRATE, Math.max(PROXY_MIN_BITRATE, bits)));
+}
+
+/**
+ * Whether the preview should build itself a copy **without being asked**, and why not when it should not.
+ *
+ * Automatic, because a fix nobody switches on is not a fix. The button shipped, the preview was still
+ * choppy, and the reason is not that the copy does not work — it is that a copy is something the user
+ * has to *know exists* and then spend a minute of their machine on. The picture is copied when the
+ * picture is bigger than the cap and this browser can make one; it is left alone when the user has
+ * already sent this very picture back to the original (see `declined`), when one is being built or is
+ * already in use, and when WebCodecs is missing.
+ *
+ * Pure so the policy is pinned in a test rather than remembered, and so "the export is never copied"
+ * stays a rule here rather than a sentence in a comment: nothing in this function can reach the export.
+ *
+ * @returns {{build: true} | {build: false, reason: string}}
+ */
+export function autoProxyDecision(
+  picture,
+  { supported = true, building = false, proxied = false, declined = false } = {},
+) {
+  if (!picture) return { build: false, reason: 'there is no picture yet' };
+  if (building) return { build: false, reason: 'a copy is already being built' };
+  if (proxied) return { build: false, reason: 'the preview is already playing a copy' };
+  if (declined) return { build: false, reason: 'this picture was sent back to the original by hand' };
+  if (!needsProxy(picture.width, picture.height)) {
+    return { build: false, reason: 'this picture is no bigger than the copy would be' };
+  }
+  if (!supported) return { build: false, reason: 'this browser cannot make a copy (it needs WebCodecs)' };
+  return { build: true };
 }
 
 /**

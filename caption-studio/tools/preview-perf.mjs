@@ -21,13 +21,35 @@
  *
  * `--proxy` adds a third arm, and it is the one that answers "is the preview copy worth making?": the
  * copy is built through the editor's own button (the real module, the real decoder, the real encoder),
- * and then the same editor is measured again playing *that* file. The number to read is the middle
+ * and then the same editor is measured again playing *that* file.
+ *
+ * The copy builds itself on load now, which the run has to account for twice over: the automatic pass is
+ * stopped through the stop button before the editor arm — a build running underneath an arm would
+ * measure contention instead of the app — and the picture is put back on the original, so that arm still
+ * means what it always meant. The log line for it says which happened. The number to read is the middle
  * column - frames presented a second - against the editor arm's, because a copy that presents more of
  * the picture's motion per second than the original is the entire point of the feature, and a copy
  * that presents no more than the original is a feature that should be deleted.
  *
+ * `--dpr <n>` runs the whole thing at a forced device pixel ratio, which is how the *other* cost was
+ * supposed to be measured: the caption canvas is fitted to the stage and backed at `logical x DPR`, so
+ * a 1400px stage on a 200% display asks the app to clear and rasterise 2800x1575 pixels every frame.
+ * What it found instead is that the app's share of the cost does not depend on the display: the editor
+ * presents about half the frames a bare element presents here at DPR 1 *and* at DPR 2, so a high-DPI
+ * screen is not the thing to blame.
+ *
+ * `--hide-canvas` takes the caption canvas out of the document for the editor arm and leaves everything
+ * else in place. The app still draws into it (a detached canvas is still a canvas), so what is removed
+ * is the *compositing* of it and nothing else — the cost of putting that surface on screen every frame.
+ * It was written to ask whether the caption canvas was stealing the decoder's CPU, and the answer is
+ * no: at DPR 2 the editor arm presented 9.0-14.0 frames a second across runs with the canvas in place,
+ * 14.0 with it removed and 12.4 with its backing store capped at 1x. One setting spreads as wide as the
+ * difference between settings, and a flag that cannot move a number by more than the noise around it
+ * says the surface is not the limit. Read it as "how much is this one surface costing", never as a
+ * reading to chase unless a whole run moves it.
+ *
  * Usage:
- *   node tools/preview-perf.mjs --video <path> [--audio <path>] [--seconds 5] [--label baseline] [--proxy]
+ *   node tools/preview-perf.mjs --video <path> [--audio <path>] [--seconds 5] [--label baseline] [--proxy] [--dpr 2] [--hide-canvas]
  *
  * `--video` is relative to the **workspace** (the folder above this project), because the only
  * large pictures on this machine are the gitignored reference captures — and a harness that needs a
@@ -58,6 +80,8 @@ for (let i = 2; i < process.argv.length; i++) {
   else if (a === '--cdpport') args.cdpport = Number(process.argv[++i]);
   else if (a === '--label') args.label = process.argv[++i];
   else if (a === '--proxy') args.proxy = true;
+  else if (a === '--dpr') args.dpr = Number(process.argv[++i]);
+  else if (a === '--hide-canvas') args.hideCanvas = true;
 }
 if (!args.video) {
   console.error('usage: node tools/preview-perf.mjs --video <path relative to the workspace> [--audio <path>]');
@@ -211,6 +235,14 @@ const READ_COUNTERS = `(() => {
     video: v
       ? { width: v.videoWidth, height: v.videoHeight, ready: v.readyState, duration: v.duration, error: v.error ? v.error.code : 0 }
       : null,
+    // What the app has to paint every frame. It is *not* the document's resolution - the canvas is
+    // fitted to the stage - but it *is* the stage at device resolution, which on a high-DPI display
+    // is a lot of pixels to clear and rasterise sixty times a second. Printed because "the preview
+    // stutters" is answered by knowing whether the decoder or this number is the limit.
+    canvas: (() => {
+      const c = document.querySelector('#preview-canvas');
+      return c ? { width: c.width, height: c.height, css: c.clientWidth + 'x' + c.clientHeight, dpr: window.devicePixelRatio } : null;
+    })(),
   };
 })()`;
 
@@ -221,6 +253,12 @@ function report(name, counters) {
     `  ${name.padEnd(9)} rAF ${raf.toFixed(1)}/s · video presented ${presented.toFixed(1)}/s · ` +
       `${counters.gaps} frame(s) over 34 ms · widest ${counters.widestGap.toFixed(0)} ms`,
   );
+  if (counters.canvas) {
+    console.log(
+      `            the canvas drawn every frame: ${counters.canvas.width}x${counters.canvas.height} ` +
+        `backing store for ${counters.canvas.css} at DPR ${counters.canvas.dpr}`,
+    );
+  }
   // A video that presented nothing is a *failed measurement*, not a fast one: say why, rather than
   // letting a zero be read as "the app is fine here".
   if (presented === 0 && counters.video) {
@@ -250,6 +288,7 @@ async function main() {
     '--window-size=1280,800',
     '--no-first-run',
     '--no-default-browser-check',
+    ...(args.dpr ? [`--force-device-scale-factor=${args.dpr}`] : []),
     `--user-data-dir=${mkdtempSync(join(tmpdir(), 'preview-perf-'))}`,
     'about:blank',
   ]);
@@ -312,6 +351,56 @@ async function main() {
   );
   console.log(`  loaded   ${(videoBytes / 1e6).toFixed(1)} MB → ${ready.w}x${ready.h}, readyState ${ready.ready}${ready.error ? `, MediaError ${ready.error}` : ''}`);
 
+  // ---- what the picture's own copy is doing before anything is measured --------------------
+  //
+  // The copy is built automatically when a picture big enough to need one is loaded. Two things follow,
+  // and both are handled here rather than left to skew the arm that comes next: the pass is stopped (it
+  // is a heavy job sharing the CPU with the decoder), and the preview is put back on the original, so
+  // "editor" keeps meaning "the editor playing the file the user loaded". Both go through the panel's
+  // own buttons, which is also the only test the stop button gets.
+  const autoCopy = await evaluate(
+    cdp,
+    `(async () => {
+      const clear = document.querySelector('#proxy-clear');
+      const note = document.querySelector('#proxy-note');
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const started = performance.now();
+      // Up to 20s for the automatic pass to announce itself: reading a 80 MB file off a dev server is
+      // not instant, and the button is the thing that says whether it started.
+      while (performance.now() - started < 20000) {
+        if (clear.textContent === 'Stop copying') break;
+        // Nothing is being built: either this picture is not offered a copy at all, or the automatic
+        // one finished before this got a look in. Both are answered by the same button below.
+        if (/Export always encodes the original file/.test(note.textContent)) break;
+        if (/Export still encodes the original/.test(note.textContent)) break;
+        await wait(200);
+      }
+      const wasCopying = clear.textContent === 'Stop copying';
+      let clicked = false;
+      if (!clear.disabled) {
+        clear.click();
+        clicked = true;
+      }
+      const until = performance.now() + 30000;
+      while (performance.now() < until && clear.textContent === 'Stop copying') await wait(200);
+      return { wasCopying, clicked, note: note.textContent };
+    })()`,
+    { awaitPromise: true },
+  );
+  console.log(
+    `  autocopy ${autoCopy.wasCopying ? 'built itself on load and was stopped through the button' : 'not offered for this picture'}${autoCopy.clicked ? '' : ' (no button to press)'}`,
+  );
+
+  // The canvas out of the way, if asked: the app goes on drawing into it, but the browser stops
+  // compositing it, which is the half of the app's per-frame cost a HiDPI display multiplies.
+  if (args.hideCanvas) {
+    const removed = await evaluate(
+      cdp,
+      '(()=>{const c=document.querySelector("#preview-canvas");c?.remove();return Boolean(c)})()',
+    );
+    console.log(`  canvas   ${removed ? 'removed from the document for the editor arm' : 'not found'}`);
+  }
+
   // Playing for real: the transport, not a paused element, is what the measurement is about.
   await evaluate(cdp, 'document.querySelector("#play-btn").click()');
   await delay(700);
@@ -323,9 +412,10 @@ async function main() {
   let copy = null;
   if (args.proxy) {
     // The copy is built the way a person builds one - through the button, in this page - because a
-    // harness that reached past the UI would measure the module and not the feature. The picture is
-    // stopped first: the conversion is not supposed to need the transport, and this way it cannot be
-    // said to have ridden on it.
+    // harness that reached past the UI would measure the module and not the feature. This is the
+    // *rebuild* path now: the automatic pass that runs on load was stopped above, and the button is
+    // what builds one after that. The picture is stopped first: the conversion is not supposed to
+    // need the transport, and this way it cannot be said to have ridden on it.
     await evaluate(cdp, 'document.querySelector("#play-btn").click()');
     await delay(400);
     const built = await evaluate(

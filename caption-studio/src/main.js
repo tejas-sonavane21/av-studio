@@ -40,7 +40,7 @@ import {
 import { captionFiles, downloadBlob, downloadText, exportStem } from './io/download.js';
 import { exportDocumentToVideo } from './io/webcodecs-export.js';
 import { createPreviewSource } from './io/preview-source.js';
-import { buildPreviewProxy, needsProxy, proxySize, proxySupported } from './io/preview-proxy.js';
+import { autoProxyDecision, buildPreviewProxy, needsProxy, proxySize, proxySupported } from './io/preview-proxy.js';
 import { defaultExportSettings, encoderSettings, outputSize } from './io/export-settings.js';
 import { alignCaptions } from './align/aligner.js';
 import { validateDocument } from './model/document.js';
@@ -123,6 +123,11 @@ let audioUrl = null;
 let proxyUrl = null;
 let proxyBuilding = false;
 let proxyController = null;
+// The picture the user has already sent back to the original *by hand*. The automatic copy must not
+// build itself again the moment that picture comes back — and it does come back through
+// `loadedmetadata`, because pointing the element at the original is a source change like any other.
+// Null means no decision has been made about the picture that is loaded.
+let proxyDeclined = null;
 // Which picture is on screen against which one the export encodes — the two are deliberately
 // different once a preview copy exists. See `io/preview-source.js`.
 const previewSource = createPreviewSource();
@@ -240,11 +245,12 @@ function describeMediaError(error) {
  *
  * This is measured rather than guessed. `tools/preview-perf.mjs` plays a real 3840x2160 AV1 capture in
  * a bare `<video>` and in the editor, and reports both: the editor's own render loop holds a full
- * 60 fps while the *decoder* presents ~26 of the 30 frames a second the file contains. The captions,
- * the timeline and the transport cost about 1% — the decode is the rest, and a picture resampled down
- * to a 900 px stage has no decoder to spare on a machine without AV1 in hardware. So the useful thing
- * an editor can do here is say so, and say what helps: a proxy for the edit, the original for the
- * export.
+ * 59.8 fps against the bare element's 59.7, while the *decoder* presents 16.3 of the 30 frames a second
+ * the file contains, against 19.3 for the element on a page with nothing else on it. The captions, the
+ * timeline and the transport cost nothing measurable — the decode is the rest, and a picture resampled
+ * down to a 900 px stage has no decoder to spare on a machine without AV1 in hardware. So the useful
+ * thing an editor can do here is say so, and say what helps: a copy for the preview, the original for
+ * the export.
  */
 function reportPictureCost() {
   const video = $('#preview-video');
@@ -256,8 +262,8 @@ function reportPictureCost() {
     `\nNote: the picture is ${width}\u00d7${video.videoHeight} and the preview shows it about ` +
     `${Math.round(shown)}px wide, so it is being decoded at roughly ` +
     `${(width / shown).toFixed(1)}\u00d7 the size it is displayed at. That decode — not the captions — ` +
-    `is what can make a preview stutter; a smaller copy of the same picture is smoother to edit ` +
-    `against, and the export still uses the file you choose here.`
+    `is what can make a preview stutter; the 720p copy the preview builds for itself is smoother to ` +
+    `edit against, and the export still uses the file you choose here.`
   );
 }
 
@@ -434,6 +440,9 @@ async function onVideo(file) {
   // A new picture starts un-copied: the old copy is a copy of *another* file, and the export must be
   // reading this one. Its size and length are filled in when the element has read its metadata.
   previewSource.setOriginal({ name: file.name, url: videoUrl });
+  // A decision about a picture outlives that picture being picked again, and does not outlive a
+  // *different* one: sending a 4K file back to the original is a statement about that file.
+  if (proxyDeclined && proxyDeclined !== file.name) proxyDeclined = null;
   refreshProxyControls();
   preview?.setVideo(video);
   video.src = videoUrl;
@@ -477,6 +486,9 @@ async function onVideo(file) {
         refreshTimelineRanges();
         updateTimelineStatus();
       }
+      // Last, so the copy is decided on a picture the rest of the app has finished adopting: its
+      // size, its length and the document's aspect are all settled by the time this runs.
+      maybeAutoProxy();
     },
     { once: true },
   );
@@ -497,7 +509,10 @@ function refreshProxyControls() {
   const picture = previewSource.original;
   const worthwhile = Boolean(picture) && needsProxy(picture.width, picture.height) && proxySupported();
   build.disabled = proxyBuilding || !worthwhile || previewSource.proxied;
-  clear.disabled = proxyBuilding || !previewSource.proxied;
+  // The second button is the stop button while a copy is being built. A copy costs a minute of the
+  // user's machine and this one starts by itself, so it has to be stoppable by hand.
+  clear.disabled = !proxyBuilding && !previewSource.proxied;
+  clear.textContent = proxyBuilding ? 'Stop copying' : 'Preview the original';
   if (proxyBuilding) {
     build.textContent = 'Copying…';
     return;
@@ -528,7 +543,7 @@ function dropProxy() {
  * every time its picture is swapped is a preview nobody can check a cut against — so the time the user
  * was parked on is restored as soon as the new source can be seeked.
  */
-function usePictureUrl(url, { restore = null, label = '' } = {}) {
+function usePictureUrl(url, { restore = null, resume = false, label = '' } = {}) {
   const video = $('#preview-video');
   if (!video || !url) return;
   video.addEventListener(
@@ -539,6 +554,10 @@ function usePictureUrl(url, { restore = null, label = '' } = {}) {
     },
     { once: true },
   );
+  // Resuming waits for `loadeddata` rather than riding on the metadata event: `play()` on an element
+  // that has nothing decoded yet is refused, and a swap that quietly left the transport parked would
+  // be a worse interruption than the stutter it was there to fix.
+  if (resume) video.addEventListener('loadeddata', () => preview?.start(), { once: true });
   video.src = url;
   video.load();
   preview?.setVideo(video);
@@ -547,10 +566,11 @@ function usePictureUrl(url, { restore = null, label = '' } = {}) {
 /**
  * Make a smaller copy of the picture, in the browser, for the preview to play.
  *
- * Explicitly a user action and not something that happens on load: even off the clock, a three-minute
- * 4K file takes tens of seconds to decode and re-encode, which is a cost nobody should pay without
- * asking. What it fixes is measured, not asserted — the copy's frame rate against the source's, in
- * `tools/ui-smoke.mjs` and `tools/preview-perf.mjs`.
+ * Called **by itself** when a picture big enough to need one is loaded (see `maybeAutoProxy`), and by
+ * the button when the user wants one back after sending a picture to the original. Even off the clock a
+ * long 4K file takes a while to decode and re-encode, so the cost is not hidden: the panel counts it
+ * out, the log carries a line, and the stop button cancels it. What it fixes is measured, not asserted
+ * — the copy's frame rate against the source's, in `tools/ui-smoke.mjs` and `tools/preview-perf.mjs`.
  */
 async function onBuildProxy() {
   const picture = previewSource.original;
@@ -558,8 +578,8 @@ async function onBuildProxy() {
   const size = proxySize(picture.width, picture.height);
   if (!size) return;
 
-  const at = preview?.currentTime() ?? 0;
-  const wasPlaying = Boolean(preview?.playing);
+  // The transport is parked for the pass, because this is a heavy job next to the decoder that is
+  // already playing the picture. On the automatic path nothing is playing yet, so it is a no-op.
   preview?.pause();
 
   proxyBuilding = true;
@@ -596,7 +616,11 @@ async function onBuildProxy() {
       averageFps: result.averageFps,
     });
     usePictureUrl(proxyUrl, {
-      restore: at,
+      // Where the transport is *now*, not where it was when the copy started: a build that took a
+      // minute has had a minute of the user's editing in it, and a copy that arrived by itself and
+      // threw the playhead back to the second it began at would be worse than the stutter it removes.
+      restore: preview?.currentTime() ?? 0,
+      resume: Boolean(preview?.playing),
       label: `preview copy: playing the ${result.width}×${result.height} copy (${(result.blob.size / 1e6).toFixed(1)} MB)`,
     });
     log(
@@ -619,7 +643,6 @@ async function onBuildProxy() {
         `The export still encodes the original ${picture.width}×${picture.height} file, with every cut applied.` +
         (result.drift ? `\n⚠ ${result.drift}` : ''),
     );
-    if (wasPlaying) preview?.start();
   } catch (err) {
     if (err?.name === 'AbortError') {
       log('preview copy: stopped — the preview is still on the original');
@@ -639,15 +662,54 @@ async function onBuildProxy() {
 }
 
 /**
- * Go back to the original file on the preview.
+ * Build the copy without being asked — the whole reason `autoProxyDecision` exists.
+ *
+ * Called from the picture's own `loadedmetadata`, so the numbers the decision is made on are the
+ * file's real width and height rather than a guess, and so the preview is smooth from the *first*
+ * play rather than from whenever somebody notices a button. The cost is stated where it is paid, and
+ * the stop button is what keeps an automatic pass from being a surprise.
+ */
+function maybeAutoProxy() {
+  const picture = previewSource.original;
+  const decision = autoProxyDecision(picture, {
+    supported: proxySupported(),
+    building: proxyBuilding,
+    proxied: previewSource.proxied,
+    declined: Boolean(picture) && proxyDeclined === picture.name,
+  });
+  if (!decision.build) {
+    log(`preview copy: not building one automatically — ${decision.reason}`);
+    return;
+  }
+  log(
+    'preview copy: building a copy automatically, so the preview is not decoding the master; ' +
+      'the export is untouched and Stop copying cancels it',
+  );
+  setProxyNote('copying the picture for the preview — this happens by itself; Stop copying cancels it');
+  void onBuildProxy();
+}
+
+/**
+ * Go back to the original file on the preview — or stop the copy that is being built right now.
  *
  * The element is pointed at the original *first* and the copy's URL revoked after, so the browser is
  * never asked to keep playing a blob that has just been released.
  */
 function onClearProxy() {
+  // A build in flight is the first thing this button stops: `AbortSignal` is what the conversion was
+  // written against, and a minute-long automatic pass with no way out is not a feature.
+  if (proxyBuilding) {
+    proxyDeclined = previewSource.original?.name || '';
+    log('preview copy: stopping the copy that is being built — the preview stays on the original');
+    proxyController?.abort();
+    return;
+  }
   if (!previewSource.proxied) return;
   const at = preview?.currentTime() ?? 0;
   const original = previewSource.original;
+  // Told, not guessed: having chosen the original, the user is not asked again the next time this
+  // picture's metadata arrives. Loading a different picture clears it.
+  proxyDeclined = original?.name || '';
   preview?.pause();
   usePictureUrl(original?.url, { restore: at, label: 'preview copy: back on the original picture' });
   dropProxy();
