@@ -17,8 +17,8 @@ from __future__ import annotations
 from audio_studio.config import ReconcileOptions
 from audio_studio.model import Segment, Transcript, Word, validate
 from audio_studio.pipeline import PipelineOptions, post_process, summarise_passes
-from audio_studio.reconcile import INSERT_WORD_CAP, reconcile
-from audio_studio.reference import Reference
+from audio_studio.reconcile import INSERT_WORD_CAP, align_keys, reconcile
+from audio_studio.reference import Reference, match_key
 
 
 def build(lines, *, t0: float = 0.0, word: float = 0.4, gap: float = 0.5) -> Transcript:
@@ -349,3 +349,150 @@ def test_the_record_reports_what_the_file_looked_like():
     assert record["words"] == 3
     assert record["outcome"] == "applied"
     assert 0.0 <= record["matchRate"] <= 1.0
+
+
+# --------------------------------------------------------------------------- #
+# the alignment
+#
+# The mapping is what the pass stands on: one anchoring mistake moves the window of
+# every word after it, which is how a correct transcript turns into a silence with a
+# crammed line beside it. So it is solved exactly - and these are the tests that say
+# so, because "the words are close" is not the property being claimed.
+# --------------------------------------------------------------------------- #
+
+#: A repeated line with its second copy shifted a word along, which is the smallest
+#: shape where the greedy matcher and an exact one disagree. Found by searching small
+#: songs for it; ``difflib.SequenceMatcher`` - the obvious library call, and what this
+#: pass used to use - anchors "eyes curse cold" across the shift and then has to throw
+#: away three "eyes" it should have matched: 4 of the 8 words. This alignment keeps 8.
+CHORUS = "eyes curse eyes eyes eyes curse cold here"
+
+
+def test_the_matcher_keeps_the_words_a_greedy_one_throws_away():
+    heard = "eyes curse cold eyes eyes eyes here curse cold here"
+    after = reconcile(build([heard.split()]), reference(CHORUS))
+    counts = after.reference["counts"]
+
+    assert texts(after) == CHORUS.split(), "the sheet's words, in the sheet's order"
+    assert counts["kept"] + counts["rewritten"] == 8, "every lyric word was recognised"
+    assert counts["deleted"] == 2, "the two words the transcriber invented and the sheet lacks"
+
+
+def _brute_force(heard, sheet):
+    """The best (matched, edits) any alignment can reach, from the whole table."""
+    n, m = len(heard), len(sheet)
+    weight = n + m + 1
+    rows = [list(range(m + 1))]
+    for index in range(1, n + 1):
+        row = [index] + [0] * m
+        above = rows[index - 1]
+        word = heard[index - 1]
+        for position in range(1, m + 1):
+            step = -weight if word == sheet[position - 1] else 1
+            row[position] = min(above[position] + 1, row[position - 1] + 1, above[position - 1] + step)
+        rows.append(row)
+    index, position, matched, edits = n, m, 0, 0
+    while index or position:
+        step = -weight if heard[index - 1] == sheet[position - 1] else 1
+        if index and position and rows[index][position] == rows[index - 1][position - 1] + step:
+            matched += heard[index - 1] == sheet[position - 1]
+            edits += heard[index - 1] != sheet[position - 1]
+            index, position = index - 1, position - 1
+        elif position and rows[index][position] == rows[index][position - 1] + 1:
+            edits += 1
+            position -= 1
+        else:
+            edits += 1
+            index -= 1
+    return matched, edits
+
+
+def _aligned(heard, sheet):
+    keys = [match_key(word) for word in heard]
+    opcodes = align_keys(keys, [match_key(word) for word in sheet])
+    matched = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in opcodes if tag == "equal")
+    replaced = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in opcodes if tag == "replace")
+    return matched, len(keys) + len(sheet) - 2 * matched - replaced
+
+
+def test_the_alignment_is_the_best_one_there_is_not_merely_a_good_one():
+    """
+    Compared against an exhaustive search rather than against an expectation, so this
+    holds for shapes nobody thought to write down: a dropped word, a duplicated line,
+    the chorus repeated three times with the middle of it misheard. The band is what
+    makes the exact answer affordable; it may not make it approximate.
+    """
+    cases = [
+        ("eyes curse cold eyes eyes eyes here curse cold here", CHORUS),
+        ("alpha bravo charlie delta", "alpha bravo echo charlie delta"),
+        ("the the the road", "the road the road the road"),
+        ("a b c d e f g h", "a b x y c d e f g h z"),
+        ("one two three four five", "one two three four five six seven"),
+    ]
+    for heard, sheet in cases:
+        assert _aligned(heard.split(), sheet.split()) == _brute_force(
+            [match_key(word) for word in heard.split()], [match_key(word) for word in sheet.split()]
+        ), f"{heard!r} against {sheet!r}"
+
+    # A shift far enough to leave the starting band, which has to widen rather than
+    # give up: 80 words of the lyric have to be found on either side of the diagonal.
+    sheet = [f"word{index}" for index in range(200)]
+    heard = [f"noise{index}" for index in range(40)] + sheet + [f"other{index}" for index in range(40)]
+    assert _aligned(heard, sheet) == _brute_force(heard, sheet) == (200, 80)
+
+
+def test_the_band_widens_until_the_answer_is_exact(monkeypatch):
+    """
+    The band is the only approximation left in the pass, and this is what stops it being
+    one: a band that cut the path off is reported, and the search widens onto it rather
+    than answering from the part it saw. The budget is shrunk here so that the *banded*
+    path is the one taken — the same code a two-hour transcript takes, on an input small
+    enough to check exhaustively. A misheard word at either end keeps the common prefix
+    and suffix from swallowing the shift, which is what makes the band matter at all.
+    """
+    sheet = [f"word{index}" for index in range(60)]
+    heard = ["mumble"] + sheet[1:30] + [f"noise{index}" for index in range(30)] + sheet[30:59] + ["garbled"]
+    budget = 2 * len(heard) * len(sheet)
+    assert len(heard) * (2 * len(sheet) + 1) > budget, "the whole table has to be unaffordable here"
+
+    monkeypatch.setattr("audio_studio.reconcile.ALIGN_CELL_BUDGET", budget)
+    opcodes = align_keys(heard, sheet)
+
+    assert opcodes is not None, "the widening reached the full table, so this may not refuse"
+    matched = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in opcodes if tag == "equal")
+    replaced = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in opcodes if tag == "replace")
+    got = (matched, len(heard) + len(sheet) - 2 * matched - replaced)
+    assert got == _brute_force([match_key(word) for word in heard], [match_key(word) for word in sheet])
+
+
+def test_a_transcript_with_garbage_either_side_of_the_song_still_aligns():
+    sheet = [f"word{index}" for index in range(200)]
+    heard = [f"noise{index}" for index in range(40)] + sheet + [f"other{index}" for index in range(40)]
+    after = reconcile(build([heard]), reference(" ".join(sheet)))
+    counts = after.reference["counts"]
+
+    assert after.reference["outcome"] == "applied"
+    assert texts(after) == sheet
+    assert counts["kept"] == 200 and counts["deleted"] == 80
+
+
+def test_an_alignment_that_would_not_finish_in_budget_is_refused_not_guessed():
+    """
+    A transcript three thousand words long cannot be met by a hundred-word sheet for
+    less than a band the budget will not pay for, and the pass says so instead of
+    spending a minute on a table and returning an approximation. The number it refuses
+    on is the most any alignment could have matched, and the record says that too.
+    """
+    before = build([[f"heard{index}" for index in range(3000)]])
+    after = reconcile(before, reference(" ".join(f"sheet{index}" for index in range(100))))
+
+    assert after.reference["outcome"] == "refused"
+    assert after.reference["matchRateIsUpperBound"] is True
+    assert "budget" in after.reference["reason"]
+    assert texts(after) == texts(before) and timings(after) == timings(before)
+
+
+def test_an_applied_record_measures_its_match_rate_rather_than_bounding_it():
+    after = reconcile(build([["alpha", "bravo"]]), reference("alpha bravo charlie"))
+    assert after.reference["outcome"] == "applied"
+    assert "matchRateIsUpperBound" not in after.reference
