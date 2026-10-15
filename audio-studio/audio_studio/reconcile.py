@@ -14,7 +14,7 @@ So this pass keeps the transcript's clock and takes the file's spelling. Sequenc
 alignment decides which reference word is which transcript word; everything else
 follows from that mapping.
 
-## Three rules, all deliberate
+## Four rules, all deliberate
 
 **Timing is the transcript's, spelling is the file's.** A word the file and the
 transcript agree on keeps the transcriber's window and takes the file's text, so
@@ -24,6 +24,16 @@ neighbours and marked as interpolated in the record: alignment a rung later
 (``--align wav2vec``) is what re-times it against the audio, which is exactly why
 this pass runs **before** alignment in ``pipeline.py``. Run the other way round,
 inserted words would arrive after the aligner had finished and keep a made-up time.
+
+**The mapping is exact, not greedy.** Which file word is which transcript word is a
+*minimum-edit* alignment of the two word lists, solved exactly. It is the one decision
+in the pass that cannot be made a word at a time, because a single wrong anchoring
+moves every window after it. The obvious library call is not that algorithm:
+``difflib.SequenceMatcher`` takes the longest matching block first and recurses, and a
+lyric sheet is built out of a *repeated* chorus — anchor the wrong repetition and a
+whole stretch of words falls into one edit run. That is a hole in the timeline and a
+crammed segment next to it, produced from a transcript that was fine. ``align_keys``
+below solves the real thing, banded so a two-hour transcript stays affordable.
 
 **A file that is not this song is refused, not applied.** A lyric sheet for the
 wrong track would rewrite the whole transcript with confident nonsense — the worst
@@ -42,7 +52,6 @@ Everything here is pure: same transcript + same reference ⇒ byte-identical out
 
 from __future__ import annotations
 
-import difflib
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
@@ -92,6 +101,10 @@ class _Analysis:
     refusal: str = ""
     matched: int = 0
     rate: float = 0.0
+    #: ``matched`` and ``rate`` are a ceiling, not a count: the aligner ran out of
+    #: budget, so what is reported is the most that *could* have matched. The record
+    #: says so rather than passing a bound off as a measurement.
+    upper_bound: bool = False
     placed: list[_Word] = field(default_factory=list)
     segment_of: list[int] = field(default_factory=list)
     edits: list[dict] = field(default_factory=list)
@@ -178,6 +191,236 @@ def _segment_for_time(segments: Sequence[Segment], moment: float) -> int:
     return chosen
 
 
+# --------------------------------------------------------------------------- #
+# the alignment
+# --------------------------------------------------------------------------- #
+
+
+#: The banded aligner starts at this half-width and doubles until the optimal path
+#: fits inside the band.
+#:
+#: An ordinary transcript differs from the sheet by a misheard word here and there, so
+#: the path lives on the diagonal and the first attempt is the one that runs. The
+#: doubling is for the transcript that lost a whole verse: there the two word streams
+#: *slide* against each other by the length of what went missing, and the path has to be
+#: allowed that far off the diagonal before it can be found at all.
+ALIGN_BAND = 24
+
+#: The most alignment cells one attempt may fill (``len(a) * (2 * band + 1)``).
+#:
+#: A guard rail rather than an optimisation. A wrong sheet against a long transcript
+#: sends the path wandering off the diagonal, and every widening doubles the work — so
+#: without a ceiling the reference pass could become the slowest thing in the studio on
+#: the one input where its answer is *no*. The budget is a few seconds here, and what
+#: it buys is that a four-thousand-word transcript still aligns with a lyric sheet that
+#: lost a two-hundred-word verse. Inputs that reach the ceiling are refused, which is
+#: what this pass does with words it cannot confirm.
+ALIGN_CELL_BUDGET = 4_000_000
+
+#: Backtrack moves, as bytes so a table of them is a ``bytearray`` and not a list.
+_DIAGONAL, _INSERT, _DELETE = 0, 1, 2
+
+
+def align_keys(
+    transcript_keys: Sequence[str], reference_keys: Sequence[str]
+) -> Optional[list[tuple[str, int, int, int, int]]]:
+    """
+    Align two word lists, as ``difflib``-shaped opcodes — or ``None`` if too costly.
+
+    The alignment minimises ``edits - weight * matches`` with ``weight`` larger than any
+    achievable edit count, which ranks alignments by *recognised words first, edits
+    second*. That order is the whole point, and a plain unit-cost edit distance cannot
+    express it: deleting a word and inserting another costs the same two edits as
+    pairing two different words, so an edit distance is free to trade a recognised word
+    for a tidier run — and both answers look equally good to it. Here the recognised
+    word always wins, and the difference that makes is a misheard word keeping its
+    *measured* window instead of being discarded and re-invented from the silence
+    beside it.
+
+    Exact, but not by brute force. The common prefix and suffix — which no sensible
+    alignment moves, and which on a reference pass are most of the file — are peeled
+    off first, and the table is then restricted to a diagonal band - the whole table
+    when the budget affords it, which is every song this studio is aimed at, and a band
+    from ``ALIGN_BAND`` upwards otherwise. A band is only trusted once the path stops
+taking moves the band had cut off: that is the certificate that the answer is the
+unrestricted optimum and not an artefact of looking through a slot, and a band that
+never earns it is widened until it does or the ``ALIGN_CELL_BUDGET`` runs out. A
+transcript that is roughly right is therefore linear in its own length, and the
+quadratic table only appears for inputs small enough to afford it.
+    """
+    n, m = len(transcript_keys), len(reference_keys)
+    if not n:
+        return [("insert", 0, 0, 0, m)] if m else []
+    if not m:
+        return [("delete", 0, n, 0, 0)]
+
+    prefix = 0
+    while prefix < n and prefix < m and transcript_keys[prefix] == reference_keys[prefix]:
+        prefix += 1
+    suffix = 0
+    while (
+        suffix < n - prefix
+        and suffix < m - prefix
+        and transcript_keys[n - 1 - suffix] == reference_keys[m - 1 - suffix]
+    ):
+        suffix += 1
+
+    middle_a = transcript_keys[prefix : n - suffix]
+    middle_b = reference_keys[prefix : m - suffix]
+    # Bigger than any edit count, so one recognised word outweighs every edit the file
+    # could need. This single number is what makes the objective "match first, tidy
+    # second" instead of "tidy", and it is why it is computed here and not defined as a
+    # constant that a long enough file could outgrow.
+    weight = len(middle_a) + len(middle_b) + 1
+    ceiling = max(
+        ALIGN_BAND,
+        min(max(len(middle_a), len(middle_b)), ALIGN_CELL_BUDGET // (2 * max(1, len(middle_a)))),
+    )
+
+    ops: Optional[list[tuple[str, int, int, int, int]]] = None
+    # Three sizes of input, in the order they matter. When the whole table fits the
+    # budget it is used outright, because then the answer is exact *by construction*
+    # rather than exact because the path happened to stay inside its band — every song
+    # this studio is aimed at is that size, and the difference is a fifth of a second.
+    # Otherwise the search starts at the width the two lengths demand (a narrower band
+    # cannot even reach the far corner) and widens. Each retry doubles, but lands
+    # exactly on the ceiling instead of stepping over it: that width is the widest the
+    # budget allows, so skipping it would refuse a file this pass can align.
+    whole = max(len(middle_a), len(middle_b))
+    width = (
+        whole
+        if len(middle_a) * (2 * whole + 1) <= ALIGN_CELL_BUDGET
+        else max(ALIGN_BAND, abs(len(middle_a) - len(middle_b)))
+    )
+    while ops is None and width <= ceiling:
+        ops = _banded_alignment(middle_a, middle_b, width, weight)
+        width = ceiling + 1 if width >= ceiling else min(width * 2, ceiling)
+    if ops is None:
+        return None
+
+    opcodes: list[tuple[str, int, int, int, int]] = []
+    if prefix:
+        opcodes.append(("equal", 0, prefix, 0, prefix))
+    opcodes.extend(
+        (tag, i1 + prefix, i2 + prefix, j1 + prefix, j2 + prefix) for tag, i1, i2, j1, j2 in ops
+    )
+    if suffix:
+        opcodes.append(("equal", n - suffix, n, m - suffix, m))
+    return opcodes
+
+
+def _banded_alignment(
+    a: Sequence[str], b: Sequence[str], width: int, weight: int
+) -> Optional[list[tuple[str, int, int, int, int]]]:
+    """
+    The optimal alignment of ``a`` against ``b``, restricted to a diagonal band.
+
+    ``None`` means the band touched the answer: the path took a move the band had cut
+    off, so a wider band could still find something better. That is why this decides
+    nothing on its own — every ``None`` is answered by widening and asking again.
+    """
+    n, m = len(a), len(b)
+    if abs(n - m) > width:
+        return None
+
+    # The band, as the column range each row may fill.
+    low = [max(0, index - width) for index in range(n + 1)]
+    high = [min(m, index + width) for index in range(n + 1)]
+
+    far = 1 << 60
+    above = list(range(high[0] + 1))  # nothing against b[:j] costs j insertions
+    above_low = 0
+    moves: list[bytearray] = []
+
+    for index in range(1, n + 1):
+        row_low, row_high = low[index], high[index]
+        word = a[index - 1]
+        row = [far] * (row_high - row_low + 1)
+        move = bytearray(row_high - row_low + 1)
+        for position in range(row_low, row_high + 1):
+            slot = position - row_low
+            best, chosen = far, _INSERT
+            # `high[index] - 1 <= high[index - 1]` always, so only the lower edge of the
+            # row above needs testing; a recognised word is worth more than every edit
+            # in the file, so this branch wins outright whenever the keys are equal.
+            if above_low <= position - 1:
+                best = above[position - 1 - above_low] + (-weight if word == b[position - 1] else 1)
+                chosen = _DIAGONAL
+            if position > row_low:
+                candidate = row[slot - 1] + 1
+                if candidate < best:
+                    best, chosen = candidate, _INSERT
+            if position - above_low < len(above):
+                candidate = above[position - above_low] + 1
+                if candidate < best:
+                    best, chosen = candidate, _DELETE
+            row[slot] = best
+            move[slot] = chosen
+        moves.append(move)
+        above, above_low = row, row_low
+
+    if not low[n] <= m <= high[n]:
+        return None
+
+    index, position = n, m
+    steps: list[tuple[str, int, int, int, int]] = []
+    clipped = False
+    while index > 0 or position > 0:
+        if index == 0:
+            move = _INSERT
+        else:
+            if not low[index] <= position <= high[index]:
+                return None  # unreachable: the table does not describe this cell
+            move = moves[index - 1][position - low[index]]
+        if move == _DIAGONAL:
+            tag = "equal" if a[index - 1] == b[position - 1] else "replace"
+            steps.append((tag, index - 1, index, position - 1, position))
+            index, position = index - 1, position - 1
+        elif move == _DELETE:
+            steps.append(("delete", index - 1, index, position, position))
+            # On this edge the *insert* transition was cut off, so the cost recorded
+            # here may be an overestimate and the answer is not trustworthy yet.
+            clipped = clipped or (index - position == width and position > 0)
+            index -= 1
+        else:
+            steps.append(("insert", index, index, position - 1, position))
+            clipped = clipped or (position - index == width and index > 0)
+            position -= 1
+
+    if clipped:
+        return None
+
+    steps.reverse()
+    opcodes: list[tuple[str, int, int, int, int]] = []
+    for tag, i1, i2, j1, j2 in steps:
+        if opcodes and opcodes[-1][0] == tag and opcodes[-1][2] == i1 and opcodes[-1][4] == j1:
+            previous = opcodes[-1]
+            opcodes[-1] = (tag, previous[1], i2, previous[3], j2)
+        else:
+            opcodes.append((tag, i1, i2, j1, j2))
+    return opcodes
+
+
+def _agreement_bound(left: Sequence[str], right: Sequence[str]) -> int:
+    """
+    The most words any alignment could match: the size of the common multiset.
+
+    One pass over both lists, and used only where the exact answer is unavailable —
+    after the aligner has run out of budget. "At most this many" is enough to refuse on
+    and never enough to apply with, which is exactly the use it is put to.
+    """
+    remaining: dict[str, int] = {}
+    for key in left:
+        remaining[key] = remaining.get(key, 0) + 1
+    matched = 0
+    for key in right:
+        count = remaining.get(key, 0)
+        if count:
+            remaining[key] = count - 1
+            matched += 1
+    return matched
+
+
 def _analyse(transcript: Transcript, reference: Reference, options: ReconcileOptions) -> _Analysis:
     flat = _flat(transcript)
     transcript_keys = [match_key(word.text) for _, _, word in flat]
@@ -188,12 +431,28 @@ def _analyse(transcript: Transcript, reference: Reference, options: ReconcileOpt
     if not reference_keys:
         return _Analysis(refusal="the reference has no words")
 
-    # `autojunk` off: a lyric sheet is full of repeated words ("the", "I", "you"),
-    # which is exactly the input difflib's heuristic mis-handles.
-    matcher = difflib.SequenceMatcher(a=transcript_keys, b=reference_keys, autojunk=False)
-    opcodes = matcher.get_opcodes()
+    total = max(len(transcript_keys), len(reference_keys))
+    opcodes = align_keys(transcript_keys, reference_keys)
+
+    if opcodes is None:
+        # The aligner ran out of budget before it could decide. The most any alignment
+        # could have matched is still one cheap pass to compute, and that is enough to
+        # refuse on — never enough to apply with.
+        bound = _agreement_bound(transcript_keys, reference_keys)
+        return _Analysis(
+            matched=bound,
+            rate=bound / total,
+            upper_bound=True,
+            refusal=(
+                f"the lyrics and the audio could not be aligned within this pass's "
+                f"{ALIGN_CELL_BUDGET}-cell budget, so they agree on at most {bound / total:.1%} "
+                f"of words ({bound} of {total}), below the {options.min_match:.0%} floor: "
+                "this does not look like the same recording"
+            ),
+        )
+
     matched = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in opcodes if tag == "equal")
-    rate = matched / max(len(transcript_keys), len(reference_keys))
+    rate = matched / total
 
     if rate < options.min_match:
         return _Analysis(
@@ -201,8 +460,10 @@ def _analyse(transcript: Transcript, reference: Reference, options: ReconcileOpt
             rate=rate,
             refusal=(
                 f"the lyrics and the audio agree on only {rate:.1%} of words "
-                f"({matched} of {max(len(transcript_keys), len(reference_keys))}), "
-                f"below the {options.min_match:.0%} floor: this does not look like the same recording"
+                f"({matched} of {total}), below the {options.min_match:.0%} floor: this does "
+                "not look like the same recording — either the file is for a different one, "
+                "or this audio was too hard for the transcription to confirm it, and either "
+                "way the sheet is not applied"
             ),
         )
 
@@ -539,6 +800,7 @@ def _refuse(
         "minMatch": options.min_match,
         "outcome": "refused",
         "reason": analysis.refusal,
+        "matchRateIsUpperBound": analysis.upper_bound,
         "counts": {"kept": analysis.matched, "rewritten": 0, "inserted": 0, "deleted": 0},
         "indices": "relative to the transcript as it was before this pass",
         "edits": [],

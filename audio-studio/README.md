@@ -392,6 +392,25 @@ measured; run it first and `--align wav2vec` re-times every one of them. That is
 why `pipeline.py` fixes the order as
 `transcribe → reconcile → align → validate`.
 
+**The mapping is solved, not approximated.** Which file word is which transcript word
+is a minimum-edit alignment of the two word lists, decided once for the whole file,
+because one wrong anchoring moves the window of every word after it. The obvious
+library call — `difflib.SequenceMatcher` — is *not* that algorithm: it anchors on the
+longest matching block, and a lyric sheet is a repeated chorus, so anchoring the wrong
+repetition strands whole lines of a transcript that was fine. Measured on a rap track
+with a word-for-word subtitle file mirrored from the same song:
+
+| alignment | lyric words matched | worst gap in the timeline |
+|---|---|---|
+| `difflib` (longest block first) | 234 of 404 | **48.1 s** |
+| minimum-edit (this pass) | **347 of 404** | 3.1 s |
+
+That difference costs nothing to collect: the common prefix and suffix are peeled off
+first — for a reference pass they are most of the file — and the rest is solved inside a
+diagonal band wide enough to hold the answer, widened if it is not. The whole pass runs
+in **0.19 s** on that file against a **0.88** match rate, and a transcript that cannot be
+confirmed inside the budget is refused exactly like a sheet that is not this song.
+
 **A sheet that is not this song is refused, not applied.** A wrong lyric file is the
 worst failure available here, because rewriting a transcript with confident nonsense
 *looks* like success. So the pass measures how much of the audio and the file agree
