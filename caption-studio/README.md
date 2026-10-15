@@ -59,7 +59,7 @@ so this folder is self-contained.
 | Cuts — trim edges, split, cut left / cut right, delete, honoured by the preview *and* the export | ✅ `src/model/timeline.js`, `src/editor/preview.js` |
 | Playback that respects the cut — a gap is jumped, and the programme ends only when no lane has material left | ✅ `playbackTarget` in `src/model/timeline.js` |
 | A picture shorter than the track — the sound carries the programme on, and the picture layer goes blank rather than freezing | ✅ `hasMaterial()` in `src/editor/preview.js` |
-| A preview copy of a heavy picture — built *in the browser*, by itself, at 720p for anything bigger than 720p, decoded off the wall clock so it holds the file's real motion, with the export still encoding the original file | ✅ `src/io/preview-proxy.js` (Mediabunny), `src/io/preview-source.js` |
+| A preview copy of a heavy picture — built *in the browser*, by itself, at a size the user picks from a 1080p–360p ladder (720p by default) for anything bigger than that size, decoded off the wall clock so it holds the file's real motion, with the export still encoding the original file | ✅ `src/io/preview-proxy.js` (Mediabunny), `src/io/preview-source.js` |
 | Imported pictures and logos as *clips* — a window on the clock, on their own lane, over the caption layer in both the preview and the export | ✅ `src/model/media.js`, `src/editor/media-library.js`, `src/render/media-layer.js` |
 | Presets that name their model — repository, parameter count and whether it is already downloaded here | ✅ `GET /health` → `presetDetails` (`audio_studio/models.py`) |
 | A finished run fills in Sources — its Veed master and its own SRT, instead of leaving them in a job folder | ✅ `reflectRunInSources()` in `src/main.js` |
@@ -222,9 +222,11 @@ the file's own 30, and the editor is not the reason the rest are missing: its fr
 against the bare element's 59.7, taking the caption canvas out of the document entirely does not move the
 number, and neither does capping that canvas at 1x on a 200% display (`--hide-canvas`, `--dpr 2`). The
 decoder is the limit, so the only thing that helps is asking it for less — which is what happens, by
-itself: a picture bigger than 720p is copied down to 720p the moment it is loaded, in the browser, from
-the file you already have. The export is untouched — `src/io/preview-source.js` keeps the two apart, and
-the encoder is handed the *original* URL and resolution, never the copy.
+itself: a picture bigger than the picked size is copied down to it the moment it is loaded, in the browser,
+from the file you already have. The size is a **pick** (1080p to 360p, 720p by default) rather than a
+constant, because the right size depends on the machine rather than on the file — and a pick that the
+picture is not bigger than means no copy at all. The export is untouched — `src/io/preview-source.js` keeps
+the two apart, and the encoder is handed the *original* URL and resolution, never the copy.
 
 The copy is made by **Mediabunny** (`vendor/mediabunny`, MPL-2.0), and that is the second attempt at this
 feature. The first one encoded the frames a hidden `<video>` presented, which produced a copy as choppy as
@@ -239,12 +241,52 @@ still stutters, which is worse than useless: it looks like a fix.
   times a second from the copy against **16.3** from the original. A 30 fps copy cannot have more than 30
   frames in a second, so that number is not 58 *frames*: it is every frame of the copy arriving on time,
   where the original was presenting one about every 61 ms — the stutter this feature exists to remove.
-- **It is 720p, and it does not wait to be asked for.** A tenth of a bit per pixel put a 720p30 copy near
-  2.8 Mbps; six hundredths puts it near **1.7 Mbps**, and the copy on the 2160p fixture comes out at
-  **36.2 MB** for 161 s where it used to be 54.7 MB. The preview exists to judge whether a caption lands on
-  the beat, not to grade colour, and what a bitrate buys here is entropy-decoding work the preview has no
-  use for. The copy is built as soon as a picture bigger than 720p is loaded — 1080p included, which is the
-  file that used to be waved through — and it can be stopped and undone from the panel.
+- **The size is the user's, and it does not wait to be asked for.** A tenth of a bit per pixel put a
+  720p30 copy near 2.8 Mbps; six hundredths puts it near **1.7 Mbps**, and the copy on the 2160p fixture
+  comes out at **36.2 MB** for 161 s where it used to be 54.7 MB. The preview exists to judge whether a
+  caption lands on the beat, not to grade colour, and what a bitrate buys here is entropy-decoding work
+  the preview has no use for. The copy is built as soon as a picture bigger than the *picked* size is
+  loaded — 1080p included, which is the file that used to be waved through — and it can be stopped and
+  undone from the panel.
+
+  A size is not a property of a file, so the panel offers a ladder rather than fixing one: **1080p, 720p
+  (the default, and the rung every number here was taken at), 540p, 480p, 360p**. The copy's size, and the
+  bitrate that follows the pixels, come from the rung (`proxyPlan()` in `src/io/preview-proxy.js`), so the
+  option somebody chooses and the numbers the converter is given cannot drift apart. **Picking a rung the
+  picture is not bigger than means no copy at all** — a 1080p master at the 1080p rung is played as it is,
+  and the panel says so instead of leaving a button that would do nothing. Changing the rung while a copy
+  is playing rebuilds it at the new size, with the old copy staying on screen until the new one is ready,
+  and the ladder is exercised in `npm run ui` (choose 480p, watch the copy become 854×480 with the export
+  still on the 1920×1080 master; choose 1080p and the preview goes back to the file itself).
+- **A smaller rung does not make the build faster, and it is worth saying so rather than implying it.**
+  `tools/proxy-speed.mjs` measures the build against a **decode-and-scale arm with the same frames and no
+  encoder anywhere**, which is the floor the whole pass sits on. On the 2160p fixture the floor is
+  **21.3-21.7 s per ten seconds of picture** against **23.8-24.0 s** for the module's own conversion, and
+  three clean re-runs of the same two arms (strays cleared) put the floor at **19.6-20.9 s** against
+  **24.4-25.6 s**, and across those four runs the floor is **80-89%** of the module's arm — so between four
+  fifths and nine tenths of the build is decoding and resampling the *master*, and no setting of the copy
+  touches it. Every arm is printed with its own per-ten-seconds figure and with the floor's share of it,
+  so that comparison can be made from the tool's own output rather than by hand.
+  What the copy's settings did move, measured the same way: **10.7 s at the 720p rung against
+  10.8 s at 480p** for a 4 s window, and **4.5 s against 4.8 s** from a 720p master with the 4K decode
+  taken out (`--synthetic 1280x720:10`) — flat, and if anything the smaller rung pays a little more in
+  the resample. Asking for a smaller copy does make the copy itself a quarter of the pixels and half the
+  bits, which is what the preview has to decode. What the rung *is* worth having is on the other side of
+  the pass: **a copy that is never made costs nothing**, and that is exactly what picking the master's own
+  size does.
+- **The encoder is not where the seconds are.** The same harness asked for VP8, VP9, AV1 and the hardware
+  encoder by name: VP8 and VP9 land within 2% of each other, and `prefer-hardware` **fails outright** for
+  VP9 on this machine — the only hardware encoder Chrome will admit to here is H.264, which WebM cannot
+  carry — so nothing in the module asks for it on the strength of a guess. The copy is still written as
+  WebM (VP9, VP8 or AV1 with Opus), which is what every Chrome can encode and contain.
+- **Read a per-arm number with the machine in mind, and do not trust one.** Wall-clock here is not a
+  stable unit: the same 4 s window measured **4.0 s** early in a session and **12-15 s** an hour into
+  one, and the two full-file builds behind the numbers on this page came out **431.1 s and 459.8 s for
+  identical work**. One cause was caught in the act and is worth knowing before believing any figure from
+  the harness: **an interrupted probe run leaves its browser alive, still decoding 4K**, so the next run
+  measures contention rather than code (an early reading showed one path at 2.4x another; a clean re-run
+  of the same two arms showed 12.3 s against 12.1 s, which is no gap at all). The tool documents the
+  check and the fix, and says to repeat an arm and reverse the order before believing a difference.
 - **The length is the file's length.** Nothing is trimmed and nothing is time-stretched. The frame rate is
   capped at 30 a second and **never raised** — a 24 fps film is copied at 24 rather than padded to 30 — and
   the sound is carried over, copied where the container allows it and re-encoded where it does not. The
@@ -252,14 +294,14 @@ still stutters, which is worse than useless: it looks like a fix.
   the original's, so a copy that drifted says so instead of quietly shifting every caption against the
   picture.
 - **A conversion, not a playback.** `npm run ui` builds one in real Chrome from a 4 s, 30 fps fixture: all
-  **120** frames, sound present and not silent, converted in **0.5-0.6 s** over two runs — a fraction of the
+  **120** frames, sound present and not silent, converted in **0.4-0.6 s** over three runs — a fraction of the
   4 s the clip itself runs for, and the number the implementation this replaced could not have beaten, because
   it was on the clip's clock. The same run loads a one-second 1080p picture through the panel's own file
-  input and clicks nothing: the copy appears by itself in **1.3 s**, and the panel confirms the export is
-  still the 1920x1080 original. A 161 s 2160p AV1 file is a different proposition: **7.4-8.1 minutes** over
-  two runs in headless Chrome on this machine, which decodes AV1 in software. That is the trade, stated
-  rather than buried: one longer wait for a preview that is smooth from then on, and a machine with a
-  hardware AV1 decoder pays far less of it.
+  input and clicks nothing: the copy appears by itself in **1.2 s**, and the panel confirms the export is
+  still the 1920x1080 original. A 161 s 2160p AV1 file is a different proposition: **7.2 minutes** (431.1 s)
+  in headless Chrome on this machine, which decodes AV1 in software and has no hardware encoder for it. That
+  is the trade, stated rather than buried: one longer wait for a preview that is smooth from then on, and a
+  machine with a hardware AV1 decoder pays far less of it.
 
 What a copy cannot change is the motion the file actually has. The decode has no deadline now, so a heavy
 file gives up all of its frames — but a file that really was recorded at 16 frames a second is still a 16 fps
