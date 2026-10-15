@@ -276,22 +276,35 @@
               every cut applied.
             -->
             <div class="style-bar">
+              <label class="field-inline">
+                <span>Copy size</span>
+                <!--
+                  The rungs are rendered from `PROXY_LADDER` in `main.js`, so the size a person picks
+                  and the size the converter is given cannot drift apart. The default is 720p — the
+                  rung the project's own measurements are taken at.
+                -->
+                <select
+                  id="proxy-size"
+                  title="How big the preview's copy should be. Smaller is lighter for the browser to decode; the export always encodes the original file."
+                ></select>
+              </label>
               <button
                 class="ghost"
                 id="proxy-build"
                 type="button"
                 disabled
-                title="Convert a 720p copy of the picture for the preview only — the export is untouched"
+                title="Convert a copy of the picture for the preview only — the export is untouched"
               >
                 Build smooth preview copy
               </button>
               <button class="ghost" id="proxy-clear" type="button" disabled>Preview the original</button>
             </div>
             <div class="hint" id="proxy-note">
-              A picture bigger than 720p is copied to 720p for the preview as soon as it is loaded —
-              decoding the master is what makes a transport stutter, and the copy is a quarter of the
-              pixels to push. The copy is made here in the browser and used <b>only</b> in the preview.
-              Export always encodes the original file.
+              A picture bigger than the chosen size is copied down to it for the preview as soon as it
+              is loaded — decoding the master is what makes a transport stutter, and the copy is a
+              fraction of the pixels to push. Pick a smaller size on a machine that is still stuttering,
+              a bigger one when the preview has headroom. The copy is made here in the browser and used
+              <b>only</b> in the preview. Export always encodes the original file.
             </div>
           </div>
 

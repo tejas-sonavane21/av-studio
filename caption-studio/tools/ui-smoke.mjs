@@ -3050,6 +3050,91 @@ async function main() {
     console.log(`  \u2022 it built itself in ${auto.seconds}s: ${auto.note}`);
   }
 
+  console.log('\n■ the copy\u2019s resolution is the user\u2019s to pick');
+  // The 1080p picture from the section above is still loaded, with a 720p copy playing. The picker is
+  // the one control that decides how big a copy is, so it is exercised the way a person exercises it:
+  // choose a rung, and watch the copy become that rung. No button is pressed — changing the size is
+  // itself the instruction, and stopping first would be a second decision nobody asked for.
+  const picked = await evaluate(
+    cdp,
+    `(async () => {
+      const select = document.querySelector('#proxy-size');
+      if (!select) return { error: 'there is no size picker' };
+      const options = [...select.options].map((o) => o.value);
+      const note = document.querySelector('#proxy-note');
+      const video = document.querySelector('#preview-video');
+      // The element's own size, waited for rather than read once. A panel note about a copy is
+      // published as the copy is handed to the transport, and the element's load() has just taken its
+      // dimensions down to 0x0 until the new file's metadata arrives - so reading videoWidth in that
+      // window is how a correct swap reads as a 0x0 picture. It is a read of the element that is being
+      // waited for, not a weaker claim: the size is still asserted below, exactly as it was.
+      const elementPicture = async () => {
+        const until = performance.now() + 30000;
+        while (performance.now() < until) {
+          if (video.videoWidth > 0) return video.videoWidth + '\u00d7' + video.videoHeight;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return '0\u00d70';
+      };
+      const chosen = async (id, wanted) => {
+        select.value = id;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        const until = performance.now() + 60000;
+        let matched = false;
+        while (performance.now() < until) {
+          await new Promise((r) => setTimeout(r, 200));
+          const text = note.textContent;
+          if (/could not be made/.test(text)) return { id, error: text };
+          if (wanted.test(text)) {
+            matched = true;
+            break;
+          }
+        }
+        const picture = await elementPicture();
+        return { id, matched, note: note.textContent, video: picture };
+      };
+      const first = await chosen('480p', /854\u00d7480 copy/);
+      const back = await chosen('1080p', /previewing the original/i);
+      return { options, first, back };
+    })()`,
+    { timeout: 180 },
+  );
+  if (picked?.error) {
+    assert('the panel offers a copy size the user can choose', false, picked.error);
+  } else {
+    assert(
+      'the panel offers a ladder of copy sizes, biggest first, with 720p the default',
+      Array.isArray(picked.options) && picked.options.join(',') === '1080p,720p,540p,480p,360p',
+      `the picker offered ${JSON.stringify(picked.options)}`,
+    );
+    assert(
+      'choosing 480p rebuilds the copy at 480p, without anyone pressing a button',
+      picked.first.matched === true && /preview is a 854\u00d7480 copy/.test(String(picked.first.note)),
+      `the panel said ${JSON.stringify(picked.first.note)}`,
+    );
+    assert(
+      'and the preview element really is a smaller picture than the master',
+      picked.first.video === '854\u00d7480',
+      `the element reported ${picked.first.video}` +
+        `${picked.first.matched ? '' : ' and the panel never said the copy was a 854\u00d7480 one'}`,
+    );
+    assert(
+      'and the export still encodes the original 1920\u00d71080 master at 480p',
+      /Export still encodes the original 1920\u00d71080/.test(String(picked.first.note)),
+      `the panel said ${JSON.stringify(picked.first.note)}`,
+    );
+    // 1080p is the master's own size, so there is nothing to copy down to: the preview goes back to the
+    // file that was loaded rather than building a copy of equal size.
+    assert(
+      'picking a rung the picture is not bigger than sends the preview back to the original',
+      /previewing the original/i.test(String(picked.back.note)) && picked.back.video === '1920\u00d71080',
+      `the panel said ${JSON.stringify(picked.back.note)} and the element was ${picked.back.video}`,
+    );
+    console.log(
+      `  \u2022 the ladder: ${picked.options.join(' \u2192 ')}; 480p rebuilt the copy and 1080p sent the preview back to the master`,
+    );
+  }
+
   console.log('\n■ console health');
   await check(cdp, 'the font-size readout resolved to pixels', '/\\d+px/.test(document.querySelector("#size-out").textContent)');
   const clean = cdp.problems.length === 0;

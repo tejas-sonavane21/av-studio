@@ -18,9 +18,11 @@ import assert from 'node:assert/strict';
 import { Quality } from '../../vendor/mediabunny/mediabunny.min.mjs';
 import {
   DEFAULT_PROXY_FPS,
+  DEFAULT_PROXY_ID,
   PROXY_BITS_PER_PIXEL,
   PROXY_CONTAINER,
   PROXY_KEYFRAME_SECONDS,
+  PROXY_LADDER,
   PROXY_LONG_EDGE,
   PROXY_MAX_BITRATE,
   PROXY_MIME_TYPE,
@@ -33,6 +35,9 @@ import {
   describeFrames,
   needsProxy,
   proxyBitrate,
+  proxyLongEdge,
+  proxyPlan,
+  proxyRung,
   proxySize,
   proxySupported,
   proxyVideoOptions,
@@ -97,6 +102,80 @@ test('the copy is given a modest bitrate, however big the tool gets', () => {
 });
 
 // --------------------------------------------------------------------------- //
+// the size ladder the user picks from
+// --------------------------------------------------------------------------- //
+
+test('the ladder is a list of sizes, biggest first, and 720p is the default rung', () => {
+  assert.deepEqual(
+    PROXY_LADDER.map((rung) => rung.id),
+    ['1080p', '720p', '540p', '480p', '360p'],
+  );
+  for (const rung of PROXY_LADDER) {
+    assert.ok(rung.longEdge > 0 && Number.isInteger(rung.longEdge), `${rung.id} has a long edge`);
+    assert.equal(rung.label, rung.id, 'the label is the size people say out loud');
+  }
+  // Biggest first, so the list can be read off a selects and compared by size.
+  const edges = PROXY_LADDER.map((rung) => rung.longEdge);
+  assert.deepEqual(edges, [...edges].sort((a, b) => b - a));
+  // The default rung is the size this project measured everything at — the one the documented 720p
+  // means, and the one the old single-size module hard-coded.
+  assert.equal(DEFAULT_PROXY_ID, '720p');
+  assert.equal(proxyLongEdge(DEFAULT_PROXY_ID), PROXY_LONG_EDGE);
+  assert.equal(proxyLongEdge(DEFAULT_PROXY_ID), PROXY_THRESHOLD, 'the default rung *is* the old threshold');
+  assert.equal(proxyRung(DEFAULT_PROXY_ID).longEdge, 1280);
+});
+
+test('an unknown rung falls back to the default rather than leaving the panel with no size', () => {
+  assert.equal(proxyRung('1440p').id, DEFAULT_PROXY_ID, 'a rung that does not exist');
+  assert.equal(proxyRung(undefined).id, DEFAULT_PROXY_ID);
+  assert.equal(proxyRung('').longEdge, PROXY_LONG_EDGE);
+});
+
+test('a rung means a size for this picture: even, never upscaled, and never stretched', () => {
+  const fourK = { width: 3840, height: 2160 };
+  assert.deepEqual(proxyPlan(fourK, { id: '720p' }).size, { width: 1280, height: 720 });
+  assert.deepEqual(proxyPlan(fourK, { id: '480p' }).size, { width: 854, height: 480 });
+  assert.deepEqual(proxyPlan(fourK, { id: '360p' }).size, { width: 640, height: 360 });
+  assert.deepEqual(proxyPlan(fourK, { id: '1080p' }).size, { width: 1920, height: 1080 });
+  // Portrait follows the long edge, which is the number the rung is named for.
+  assert.deepEqual(proxyPlan({ width: 2160, height: 3840 }, { id: '720p' }).size, { width: 720, height: 1280 });
+});
+
+test('the rung decides whether a copy is worth making at all', () => {
+  const hd = { width: 1920, height: 1080 };
+  // The old policy in one line: a 1080p master is copied at the default rung, and left alone at 1080p.
+  assert.equal(proxyPlan(hd, { id: '720p' }).worth, true);
+  assert.equal(proxyPlan(hd, { id: '1080p' }).worth, false, 'a copy that would not shrink the picture');
+  assert.equal(proxyPlan(hd, { id: '1080p' }).size, null, 'and no size to build with');
+  assert.match(proxyPlan(hd, { id: '1080p' }).reason, /no bigger than a 1080p copy/);
+  // Below the rung, a copy is offered that the default would never have offered — which is the whole
+  // point of the picker: a machine that cannot play 720p can ask for 480p.
+  const hdReady = { width: 1280, height: 720 };
+  assert.equal(proxyPlan(hdReady).worth, false, 'at the default rung there is nothing to do');
+  assert.equal(proxyPlan(hdReady, { id: '480p' }).worth, true, 'at 480p there is');
+  assert.deepEqual(proxyPlan(hdReady, { id: '480p' }).size, { width: 854, height: 480 });
+});
+
+test('the bitrate follows the rung, because it follows the pixels', () => {
+  const fourK = { width: 3840, height: 2160 };
+  const at = (id) => proxyPlan(fourK, { id });
+  assert.equal(at('720p').bitsPerSecond, proxyBitrate(1280, 720, DEFAULT_PROXY_FPS));
+  assert.equal(at('480p').bitsPerSecond, proxyBitrate(854, 480, DEFAULT_PROXY_FPS));
+  assert.ok(at('480p').bitsPerSecond < at('720p').bitsPerSecond, 'a smaller copy costs fewer bits');
+  assert.ok(at('1080p').bitsPerSecond > at('720p').bitsPerSecond, 'and a bigger one costs more');
+  assert.equal(at('1080p').worth && at('1080p').bitsPerSecond, proxyBitrate(1920, 1080, DEFAULT_PROXY_FPS));
+  assert.equal(proxyPlan({ width: 0, height: 0 }, { id: '480p' }).bitsPerSecond, 0, 'and a picture with no size costs nothing');
+});
+
+test('a picture with no usable size has no plan, and says so', () => {
+  const plan = proxyPlan(null, { id: '480p' });
+  assert.equal(plan.worth, false);
+  assert.equal(plan.size, null);
+  assert.match(plan.reason, /no size/);
+  assert.equal(proxyPlan({ width: 'wide', height: 'tall' }).worth, false);
+});
+
+// --------------------------------------------------------------------------- //
 // building one without being asked
 // --------------------------------------------------------------------------- //
 
@@ -112,15 +191,29 @@ test('and is left alone when there is a reason to leave it alone, with the reaso
   assert.match(why({ proxied: true }), /already playing a copy/);
   assert.match(why({ declined: true }), /by hand/, 'the user said "preview the original" about this very file');
   assert.match(why({ supported: false }), /WebCodecs/);
-  // A picture the copy would not shrink is not a picture to copy: 1080p is the smallest one that is.
-  assert.match(autoProxyDecision({ width: 1280, height: 720 }).reason, /no bigger than the copy/);
-  assert.match(autoProxyDecision({ width: 640, height: 360 }).reason, /no bigger than the copy/);
+  // A picture the copy would not shrink is not a picture to copy: at the default rung, 1080p is the
+  // smallest one that is.
+  assert.match(autoProxyDecision({ width: 1280, height: 720 }).reason, /no bigger than a 720p copy/);
+  assert.match(autoProxyDecision({ width: 640, height: 360 }).reason, /no bigger than a 720p copy/);
 });
 
 test('the automatic decision has no way to touch the export', () => {
-  // It takes a size and four flags and returns a verdict: there is no URL in it, no file, and no
-  // "which picture" — so the rule that the export always encodes the original cannot be broken here.
+  // It takes a picture, a rung and four flags and returns a verdict: there is no URL in it, no file,
+  // and no "which picture" — so the rule that the export always encodes the original cannot be broken
+  // here.
   assert.deepEqual(Object.keys(autoProxyDecision({ width: 3840, height: 2160 })), ['build']);
+});
+
+test('a copy is built by itself only at a rung that would shrink the picture', () => {
+  // The pick reaches the automatic path, which is where it has to be honoured: a 1080p master picked
+  // at 1080p is played as it is, and the same master at 480p is copied down without being asked.
+  const hd = { width: 1920, height: 1080 };
+  assert.deepEqual(autoProxyDecision(hd, { id: '720p' }), { build: true });
+  assert.deepEqual(autoProxyDecision(hd, { id: '480p' }), { build: true });
+  assert.match(autoProxyDecision(hd, { id: '1080p' }).reason, /no bigger than a 1080p copy/);
+  const already = { width: 1280, height: 720 };
+  assert.deepEqual(autoProxyDecision(already, { id: '480p' }), { build: true }, 'a 720p picture at 480p');
+  assert.match(autoProxyDecision(already, { id: '720p' }).reason, /no bigger than/);
 });
 
 // --------------------------------------------------------------------------- //

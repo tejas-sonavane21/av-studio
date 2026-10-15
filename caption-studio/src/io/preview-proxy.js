@@ -56,19 +56,66 @@ import {
 } from '../../vendor/mediabunny/mediabunny.min.mjs';
 import { evenSize } from './webcodecs-export.js';
 
-/** The long edge a copy is scaled to. 720p-landscape, and the size this project measured as enough. */
+/** The long edge a copy is scaled to when nobody has said otherwise. 720p-landscape. */
 export const PROXY_LONG_EDGE = 1280;
 
 /**
- * Above this long edge, a picture is copied.
+ * The sizes a copy can be made at, biggest first — the ladder the panel offers.
  *
- * **1280 — the same number as the cap itself**, and that is the whole policy in one line: the preview
- * is a 720p picture, and anything bigger than a 720p picture is given a 720p one. It was 1920 on the
- * reasoning that "1080p decodes fine, so a copy of it would only be a second thing to keep in step",
- * and that was a guess about the *file* rather than about the machine: 1080p is exactly the size a
- * laptop with a high-DPI display, a busy CPU and a couple of other tabs does **not** decode in real
- * time, and the copy that would have fixed it was never offered. A picture at or below the cap is left
- * alone, because a copy of it would be no smaller than what is already playing.
+ * **The pick is a resolution, and it is the user's, because the right answer depends on the machine
+ * rather than on the file.** 720p is this project's measured default and the rung every number in
+ * `README.md` was taken at; 480p and 360p are for a machine that is still stuttering playing a 720p
+ * copy (a quarter and a ninth of the pixels, and the bitrate follows the pixels), and 1080p is for a
+ * machine with headroom to spare and an eye on detail — where a 1080p master needs no copy at all.
+ *
+ * Naming is by height, which is how the sizes are talked about, and the long edge is what a copy is
+ * actually scaled to (see `proxySize`, which rounds to even numbers and never upscales). A portrait
+ * clip gets the same rung: 720p means 720 on the *long* edge either way.
+ */
+export const PROXY_LADDER = Object.freeze([
+  Object.freeze({ id: '1080p', label: '1080p', longEdge: 1920 }),
+  Object.freeze({ id: '720p', label: '720p', longEdge: 1280 }),
+  Object.freeze({ id: '540p', label: '540p', longEdge: 960 }),
+  Object.freeze({ id: '480p', label: '480p', longEdge: 854 }),
+  Object.freeze({ id: '360p', label: '360p', longEdge: 640 }),
+]);
+
+/** The rung used when nothing has been picked. 720p, and the one every documented number is at. */
+export const DEFAULT_PROXY_ID = '720p';
+
+/**
+ * One rung of the ladder, or the default when the id is not one of them.
+ *
+ * Total, and deliberately: a stored pick that no longer exists (a rung removed, a hand-edited value)
+ * must not leave the panel with no size at all, and "the default" is the one answer that is always
+ * right. A copy size is not a place to be clever about bad input.
+ */
+export function proxyRung(id = DEFAULT_PROXY_ID) {
+  return (
+    PROXY_LADDER.find((rung) => rung.id === id) ??
+    PROXY_LADDER.find((rung) => rung.id === DEFAULT_PROXY_ID)
+  );
+}
+
+/** The long edge a rung id means, with the default for anything else. */
+export function proxyLongEdge(id = DEFAULT_PROXY_ID) {
+  return proxyRung(id).longEdge;
+}
+
+/**
+ * The long edge above which a picture is worth copying, at the default rung.
+ *
+ * **1280 — the same number as the default cap itself**, and that is the policy in one line: the preview
+ * is a 720p picture by default, and anything bigger than a 720p picture is given one. It was 1920 on
+ * the reasoning that "1080p decodes fine, so a copy of it would only be a second thing to keep in
+ * step", and that was a guess about the *file* rather than about the machine: 1080p is exactly the
+ * size a laptop with a high-DPI display, a busy CPU and a couple of other tabs does **not** decode in
+ * real time, and the copy that would have fixed it was never offered. A picture at or below the rung
+ * is left alone, because a copy of it would be no smaller than what is already playing.
+ *
+ * With the ladder in play this constant is only the *default* rung's edge: the live threshold is the
+ * picked rung's long edge, which is why every policy function here takes an id (or an edge) rather
+ * than reading this number behind the caller's back.
  */
 export const PROXY_THRESHOLD = 1280;
 
@@ -107,9 +154,9 @@ export const PROXY_RATE_TOLERANCE = 0.5;
  * second. A picture at or below the cap is left alone; anything above it is a candidate, which with
  * `PROXY_THRESHOLD` at 1280 means **every 1080p and 4K file** — the two sizes this feature exists for.
  */
-export function needsProxy(width, height, { threshold = PROXY_THRESHOLD } = {}) {
+export function needsProxy(width, height, { threshold = PROXY_THRESHOLD, longEdge = null } = {}) {
   const long = Math.max(Number(width) || 0, Number(height) || 0);
-  return long > threshold;
+  return long > (longEdge ?? threshold);
 }
 
 /**
@@ -117,8 +164,12 @@ export function needsProxy(width, height, { threshold = PROXY_THRESHOLD } = {}) 
  *
  * Never upscales: a 720p file copied "up" to the cap would be bigger, slower and no clearer. Even
  * dimensions always, because a codec configuration with an odd edge is refused outright.
+ *
+ * `threshold` defaults to the long edge itself — "this picture is already small enough to leave alone"
+ * means small enough *for the size being asked for*, and defaulting it to the module's 720p constant
+ * instead would silently hand back the original size when the caller had picked 480p.
  */
-export function proxySize(width, height, { longEdge = PROXY_LONG_EDGE, threshold = PROXY_THRESHOLD } = {}) {
+export function proxySize(width, height, { longEdge = PROXY_LONG_EDGE, threshold = longEdge } = {}) {
   const w = Math.round(Number(width) || 0);
   const h = Math.round(Number(height) || 0);
   if (!(w > 0 && h > 0)) return null;
@@ -159,6 +210,37 @@ export function proxyBitrate(width, height, fps = DEFAULT_PROXY_FPS) {
 }
 
 /**
+ * What the picked rung means for one picture: the size to copy it to, and whether that is worth doing.
+ *
+ * This is the join between the picker and the arithmetic — one object that answers, for a picture and a
+ * rung, the three questions the panel asks (how big is the copy, does this picture need one, how many
+ * bits a second will it cost). Pure, so the panel cannot invent a size the converter was not given and
+ * the tests can pin the policy per rung rather than per build.
+ *
+ * `worth` is `false` for a picture the copy would not shrink — a 1080p master with the 1080p rung
+ * picked is a picture to play as it is, and saying so is the difference between "the build is stuck"
+ * and "there is nothing to build".
+ */
+export function proxyPlan(picture, { id = DEFAULT_PROXY_ID, fps = DEFAULT_PROXY_FPS } = {}) {
+  const rung = proxyRung(id);
+  const width = Number(picture?.width) || 0;
+  const height = Number(picture?.height) || 0;
+  if (!(width > 0 && height > 0)) {
+    return { id: rung.id, rung, size: null, worth: false, bitsPerSecond: 0, reason: 'this picture has no size to copy' };
+  }
+  const worth = needsProxy(width, height, { longEdge: rung.longEdge });
+  const size = worth ? proxySize(width, height, { longEdge: rung.longEdge }) : null;
+  return {
+    id: rung.id,
+    rung,
+    size,
+    worth,
+    bitsPerSecond: size ? proxyBitrate(size.width, size.height, fps) : 0,
+    reason: worth ? '' : `this picture is no bigger than a ${rung.label} copy would be, so it is played as it is`,
+  };
+}
+
+/**
  * Whether the preview should build itself a copy **without being asked**, and why not when it should not.
  *
  * Automatic, because a fix nobody switches on is not a fix. The button shipped, the preview was still
@@ -175,15 +257,14 @@ export function proxyBitrate(width, height, fps = DEFAULT_PROXY_FPS) {
  */
 export function autoProxyDecision(
   picture,
-  { supported = true, building = false, proxied = false, declined = false } = {},
+  { supported = true, building = false, proxied = false, declined = false, id = DEFAULT_PROXY_ID } = {},
 ) {
   if (!picture) return { build: false, reason: 'there is no picture yet' };
   if (building) return { build: false, reason: 'a copy is already being built' };
   if (proxied) return { build: false, reason: 'the preview is already playing a copy' };
   if (declined) return { build: false, reason: 'this picture was sent back to the original by hand' };
-  if (!needsProxy(picture.width, picture.height)) {
-    return { build: false, reason: 'this picture is no bigger than the copy would be' };
-  }
+  const plan = proxyPlan(picture, { id });
+  if (!plan.worth) return { build: false, reason: plan.reason };
   if (!supported) return { build: false, reason: 'this browser cannot make a copy (it needs WebCodecs)' };
   return { build: true };
 }

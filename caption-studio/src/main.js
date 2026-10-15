@@ -40,7 +40,14 @@ import {
 import { captionFiles, downloadBlob, downloadText, exportStem } from './io/download.js';
 import { exportDocumentToVideo } from './io/webcodecs-export.js';
 import { createPreviewSource } from './io/preview-source.js';
-import { autoProxyDecision, buildPreviewProxy, needsProxy, proxySize, proxySupported } from './io/preview-proxy.js';
+import {
+  DEFAULT_PROXY_ID,
+  PROXY_LADDER,
+  autoProxyDecision,
+  buildPreviewProxy,
+  proxyPlan,
+  proxySupported,
+} from './io/preview-proxy.js';
 import { defaultExportSettings, encoderSettings, outputSize } from './io/export-settings.js';
 import { alignCaptions } from './align/aligner.js';
 import { validateDocument } from './model/document.js';
@@ -128,6 +135,13 @@ let proxyController = null;
 // `loadedmetadata`, because pointing the element at the original is a source change like any other.
 // Null means no decision has been made about the picture that is loaded.
 let proxyDeclined = null;
+// Which rung of the size ladder the user has picked. The preview copy's resolution is theirs to
+// choose — the right answer depends on the machine, not on the file — and it lives here rather than in
+// the document because it says *how the preview is built*, not what the project contains.
+let proxyPick = DEFAULT_PROXY_ID;
+// The copy that was playing when the pick changed, so a rebuild can wait for the new one rather than
+// leaving the preview on the original in the meantime.
+let proxySwap = null;
 // Which picture is on screen against which one the export encodes — the two are deliberately
 // different once a preview copy exists. See `io/preview-source.js`.
 const previewSource = createPreviewSource();
@@ -499,15 +513,50 @@ async function onVideo(file) {
 // ---------------------------------------------------------------------------
 
 /**
- * The four things that decide whether a copy is worth offering: is there a picture, is it big, will
- * the browser let one be made, and is there one already.
+ * The size picker, built from the ladder so the option a person sees and the edge the converter is
+ * given cannot drift apart.
+ *
+ * Created once; the options carry the rung's own long edge in their title, so the size a rung means for
+ * *this* picture is visible before anything is built rather than after.
+ */
+function buildProxySizeSelect() {
+  const select = $('#proxy-size');
+  if (!select) return;
+  select.replaceChildren(
+    ...PROXY_LADDER.map((rung) => {
+      const option = el('option', null, `${rung.label} (${rung.longEdge} on the long edge)`);
+      option.value = rung.id;
+      return option;
+    }),
+  );
+  select.value = proxyPick;
+  select.addEventListener('change', onProxyPickChange);
+}
+
+/**
+ * What the picked rung means for the picture on screen, right now.
+ *
+ * One call, one answer, shared by everything in the panel — the button's label, whether it is enabled,
+ * the note under it and the copy itself — so there is no way for the panel to describe one size while
+ * the converter builds another.
+ */
+function currentProxyPlan() {
+  return proxyPlan(previewSource.original, { id: proxyPick });
+}
+
+/**
+ * The four things that decide whether a copy is worth offering: is there a picture, is it bigger than
+ * the rung that is picked, will the browser let one be made, and is there one already.
  */
 function refreshProxyControls() {
   const build = $('#proxy-build');
   const clear = $('#proxy-clear');
+  const select = $('#proxy-size');
   if (!build || !clear) return;
+  if (select) select.value = proxyPick;
   const picture = previewSource.original;
-  const worthwhile = Boolean(picture) && needsProxy(picture.width, picture.height) && proxySupported();
+  const plan = currentProxyPlan();
+  const worthwhile = Boolean(picture) && plan.worth && proxySupported();
   build.disabled = proxyBuilding || !worthwhile || previewSource.proxied;
   // The second button is the stop button while a copy is being built. A copy costs a minute of the
   // user's machine and this one starts by itself, so it has to be stoppable by hand.
@@ -518,10 +567,70 @@ function refreshProxyControls() {
     return;
   }
   build.textContent = 'Build smooth preview copy';
-  if (picture && !previewSource.proxied) {
-    const size = proxySize(picture.width, picture.height);
-    if (size && worthwhile) build.textContent = `Build smooth preview copy (${size.width}×${size.height})`;
+  if (picture && !previewSource.proxied && worthwhile && plan.size) {
+    build.textContent = `Build smooth preview copy (${plan.size.width}×${plan.size.height})`;
   }
+  // What the pick means here, said where the pick is: either the size this picture would be copied to
+  // and what that costs a second, or why there is nothing to copy. Never both, and never a size for a
+  // build that is not offered.
+  if (picture && plan.size && plan.worth && !previewSource.proxied) {
+    setProxyNote(
+      `${picture.width}×${picture.height} → ${plan.size.width}×${plan.size.height} ` +
+        `(${plan.rung.label}, about ${(plan.bitsPerSecond / 1e6).toFixed(2)} Mbps). ` +
+        'The copy is used only in the preview. Export always encodes the original file.',
+    );
+  } else if (picture && previewSource.proxied) {
+    // A copy is playing: say what it is and where the picker is, rather than leaving the last build's
+    // sentence under a picker that no longer describes it.
+    setProxyNote(previewSource.describe());
+  } else if (picture && !plan.worth && !previewSource.proxied) {
+    setProxyNote(
+      `${picture.width}×${picture.height} — ${plan.reason}. Pick a smaller size to copy it down, ` +
+        'or leave it as it is: the preview plays the original file. Export always encodes the original file.',
+    );
+  }
+}
+
+/**
+ * A different rung: rebuild the copy at it.
+ *
+ * Changing the size is a decision about the *preview*, so it takes effect on the preview: a copy that
+ * is playing is rebuilt at the new size (the old one keeps playing until the new one is ready, so the
+ * transport is never left on the heavier original), and a picture with no copy yet just updates what
+ * the button would build. Stopping to ask first would be worse than either — the pick is made by
+ * somebody who already knows what they want.
+ */
+function onProxyPickChange() {
+  const select = $('#proxy-size');
+  if (!select) return;
+  const before = proxyPick;
+  proxyPick = select.value;
+  if (before === proxyPick) return;
+  const plan = currentProxyPlan();
+  log(
+    `preview copy: size now ${plan.rung.label}${plan.size ? ` (${plan.size.width}×${plan.size.height})` : ''}` +
+      `${plan.worth ? '' : ` — ${plan.reason}`}`,
+  );
+  refreshProxyControls();
+  if (proxyBuilding) {
+    // A build in flight is at the *old* rung, so it is stopped rather than left to deliver a copy
+    // nobody asked for; the new one starts as soon as the stop has been taken.
+    proxySwap = 'restart';
+    proxyController?.abort();
+    return;
+  }
+  if (previewSource.proxied) {
+    if (!previewSource.original || !proxySupported() || !plan.worth) {
+      // Nothing to rebuild at — back to the original, with the reason said out loud.
+      onClearProxy();
+      return;
+    }
+    // A rebuild, not a teardown: the copy that is playing stays on screen until the new one is ready,
+    // because the original is the heavier picture and the user is mid-edit.
+    void onBuildProxy();
+    return;
+  }
+  if (plan.worth && proxySupported() && previewSource.original) void onBuildProxy();
 }
 
 function setProxyNote(text) {
@@ -566,17 +675,26 @@ function usePictureUrl(url, { restore = null, resume = false, label = '' } = {})
 /**
  * Make a smaller copy of the picture, in the browser, for the preview to play.
  *
- * Called **by itself** when a picture big enough to need one is loaded (see `maybeAutoProxy`), and by
- * the button when the user wants one back after sending a picture to the original. Even off the clock a
- * long 4K file takes a while to decode and re-encode, so the cost is not hidden: the panel counts it
- * out, the log carries a line, and the stop button cancels it. What it fixes is measured, not asserted
- * — the copy's frame rate against the source's, in `tools/ui-smoke.mjs` and `tools/preview-perf.mjs`.
+ * Called **by itself** when a picture bigger than the picked rung is loaded (see `maybeAutoProxy`), by
+ * the button when the user wants one back after sending a picture to the original, and by the size
+ * picker when the rung changes. The size and the bitrate are the current plan's, so a rebuild at a new
+ * rung is the same call with different numbers in it.
+ *
+ * Even off the clock a long 4K file takes a while to decode, and the wait is the *master's* decode rather
+ * than the copy's settings: measured on this project's 2160p fixture, the copy's own size moves the pass
+ * by about one per cent (10.7 s at the 720p rung against 10.8 s at 480p for a 4 s window) while a
+ * decode-and-scale arm with no encoder at all accounts for between four fifths and nine tenths of it
+ * (`tools/proxy-speed.mjs`, where the floor prints its own share of the arm: 80-89% over four runs)
+ * — so the cost is not hidden, it is *stated*: the panel counts it out, the log carries the size and the
+ * rate, and the stop button cancels it. What the copy fixes is measured too — the copy's frame rate
+ * against the source's, in `tools/ui-smoke.mjs` and `tools/preview-perf.mjs`.
  */
 async function onBuildProxy() {
   const picture = previewSource.original;
   if (!picture || proxyBuilding) return;
-  const size = proxySize(picture.width, picture.height);
-  if (!size) return;
+  const plan = currentProxyPlan();
+  const size = plan.size;
+  if (!size || !plan.worth) return;
 
   // The transport is parked for the pass, because this is a heavy job next to the decoder that is
   // already playing the picture. On the automatic path nothing is playing yet, so it is a no-op.
@@ -586,9 +704,11 @@ async function onBuildProxy() {
   const controller = new AbortController();
   proxyController = controller;
   refreshProxyControls();
+  const megs = (plan.bitsPerSecond / 1e6).toFixed(2);
   setProxyNote('copying — decoding the picture off the clock');
   log(
-    `preview copy: converting ${picture.width}×${picture.height} → ${size.width}×${size.height} in this browser ` +
+    `preview copy: converting ${picture.width}×${picture.height} → ${size.width}×${size.height} ` +
+      `(${plan.rung.label}, about ${megs} Mbps) in this browser ` +
       `(${(picture.duration || 0).toFixed(1)}s of picture — decoded off the clock, so the pass takes what the ` +
       'decoding takes rather than what the clip runs, and no frames are dropped to keep up). ' +
       'The export is untouched.',
@@ -599,6 +719,7 @@ async function onBuildProxy() {
     const result = await buildPreviewProxy({
       url: previewSource.exportUrl,
       size,
+      bitsPerSecond: plan.bitsPerSecond,
       signal: controller.signal,
       onProgress: (fraction, message) => setProxyNote(`${message} (${Math.round(fraction * 100)}%)`),
     });
@@ -645,9 +766,15 @@ async function onBuildProxy() {
     );
   } catch (err) {
     if (err?.name === 'AbortError') {
-      log('preview copy: stopped — the preview is still on the original');
-      setProxyNote('the copy was stopped. The preview is still on the original file.');
-      stateOf('sources', 'warn', 'copy stopped', 'The preview copy was stopped, so the preview is still playing the original.');
+      if (proxySwap) {
+        log(`preview copy: stopped the pass at the old size — starting again at ${proxyPick}`);
+        setProxyNote(`switching the copy to ${proxyPick}…`);
+        stateOf('sources', 'busy', 'copying…', `Rebuilding the preview copy at ${proxyPick}.`);
+      } else {
+        log('preview copy: stopped — the preview is still on the original');
+        setProxyNote('the copy was stopped. The preview is still on the original file.');
+        stateOf('sources', 'warn', 'copy stopped', 'The preview copy was stopped, so the preview is still playing the original.');
+      }
     } else {
       log(`ERROR preview copy: ${err.message}`);
       setProxyNote(`the copy could not be made: ${err.message}`);
@@ -658,6 +785,17 @@ async function onBuildProxy() {
     if (proxyController === controller) proxyController = null;
     refreshProxyControls();
     setStatus('idle');
+    // The picker changed the rung *while* this was building: the copy that just arrived is at the old
+    // one, so it is replaced. Nothing is asked of the user — they already said which size they want.
+    if (proxySwap) {
+      const wanted = proxySwap;
+      proxySwap = null;
+      if (wanted === 'restart') {
+        const next = currentProxyPlan();
+        if (next.worth && proxySupported() && previewSource.original) void onBuildProxy();
+        else if (previewSource.proxied) onClearProxy();
+      }
+    }
   }
 }
 
@@ -676,14 +814,16 @@ function maybeAutoProxy() {
     building: proxyBuilding,
     proxied: previewSource.proxied,
     declined: Boolean(picture) && proxyDeclined === picture.name,
+    id: proxyPick,
   });
   if (!decision.build) {
     log(`preview copy: not building one automatically — ${decision.reason}`);
     return;
   }
+  const plan = currentProxyPlan();
   log(
-    'preview copy: building a copy automatically, so the preview is not decoding the master; ' +
-      'the export is untouched and Stop copying cancels it',
+    `preview copy: building a copy automatically at ${plan.rung.label}, so the preview is not ` +
+      'decoding the master; the export is untouched and Stop copying cancels it',
   );
   setProxyNote('copying the picture for the preview — this happens by itself; Stop copying cancels it');
   void onBuildProxy();
@@ -3474,6 +3614,7 @@ $('#transcribe-probe').addEventListener('click', onTranscribeProbe);
 $('#transcribe-preset').addEventListener('change', refreshModelNote);
 $('#proxy-build').addEventListener('click', onBuildProxy);
 $('#proxy-clear').addEventListener('click', onClearProxy);
+buildProxySizeSelect();
 refreshProxyControls();
 $('#runs-refresh').addEventListener('click', () => refreshRuns());
 $('#runs-open').addEventListener('click', onOpenRun);
