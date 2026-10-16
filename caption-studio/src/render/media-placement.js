@@ -27,7 +27,7 @@
  * hit-tested against the very same points, so what is on screen and what is grabbable cannot drift.
  */
 
-import { MIN_BOX, boxRect, normalizeBox, normalizeRotation } from '../model/media.js';
+import { MIN_BOX, MIN_CROP, boxRect, normalizeBox, normalizeCrop, normalizeRotation } from '../model/media.js';
 import { snapValue } from './placement.js';
 import { clamp, isPlainObject } from '../util/math.js';
 
@@ -135,8 +135,20 @@ export function clipQuad(clip, size) {
  */
 export function handlePoints(clip, size) {
   const r = clipPixels(clip, size);
-  const centre = { x: r.cx, y: r.cy };
-  const rotation = Number(clip?.rotation) || 0;
+  return handlePointsForRect({ x: r.x, y: r.y, w: r.w, h: r.h }, Number(clip?.rotation) || 0);
+}
+
+/**
+ * The eight resize handles of any pixel rect, rotated about its own centre. Pure.
+ *
+ * The clip's box is one such rect; the **crop frame** is another (`editor/canvas-overlay.js` draws it
+ * around the whole uncropped picture while a crop is being made). Both want the same eight squares in the
+ * same places, so there is one function for both — a crop handle that is drawn a pixel away from where it
+ * can be grabbed would be the same bug as an invisible box handle, only harder to spot.
+ */
+export function handlePointsForRect(rect, rotation = 0) {
+  const r = rect ?? { x: 0, y: 0, w: 0, h: 0 };
+  const centre = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
   return HANDLE_IDS.map((id) => {
     const [ax, ay] = AXES[id];
     const corner = { x: r.x + (r.w * (ax + 1)) / 2, y: r.y + (r.h * (ay + 1)) / 2 };
@@ -152,6 +164,70 @@ export function handlePoints(clip, size) {
       cursor: handleCursor(id, rotation),
     };
   });
+}
+
+/**
+ * A crop cut by dragging one handle of the crop frame. Pure.
+ *
+ * `startRect` is the crop frame the gesture began with — in pixels, drawn around the **whole** picture
+ * (see `editor/canvas-overlay.js`), which is what makes the maths below a fraction of the file. The
+ * dragged edges follow the pointer and the opposite ones stay put, exactly as a box resize does; the
+ * answer is in fractions of the media, and the crop the gesture started with is what the fractions are
+ * applied to — so cutting a tenth off the left of an already-cropped picture cuts a tenth of what is
+ * *left*, not a tenth of the original file.
+ *
+ * Works in the clip's own frame, so cropping a turned clip moves the edge under the pointer rather than
+ * an edge at right angles to it.
+ */
+export function cropFromHandle({
+  handle,
+  startCrop,
+  startRect,
+  point,
+  rotation = 0,
+  minSize = MIN_CROP,
+} = {}) {
+  const axes = AXES[handle];
+  const crop = normalizeCrop(startCrop);
+  if (!axes || !startRect || !(startRect.w > 0) || !(startRect.h > 0)) return crop;
+  const centre = { x: startRect.x + startRect.w / 2, y: startRect.y + startRect.h / 2 };
+  const local = rotatePoint(point ?? { x: 0, y: 0 }, centre, -rotation);
+  const [ax, ay] = axes;
+  let { x, y, w, h } = crop;
+  // The kept fraction is measured from the edge that is *not* being dragged, which is the one that stays
+  // put: the left edge for a right handle, the right edge for a left one.
+  if (ax < 0) {
+    const keep = clampFraction((startRect.x + startRect.w - local.x) / startRect.w);
+    x = crop.x + crop.w * (1 - keep);
+    w = crop.w * keep;
+  } else if (ax > 0) {
+    w = crop.w * clampFraction((local.x - startRect.x) / startRect.w);
+  }
+  if (ay < 0) {
+    const keep = clampFraction((startRect.y + startRect.h - local.y) / startRect.h);
+    y = crop.y + crop.h * (1 - keep);
+    h = crop.h * keep;
+  } else if (ay > 0) {
+    h = crop.h * clampFraction((local.y - startRect.y) / startRect.h);
+  }
+  return normalizeCrop({
+    x,
+    y,
+    w: Math.max(minSize, w),
+    h: Math.max(minSize, h),
+  });
+}
+
+/**
+ * How much of the frame a dragged crop edge leaves: none of it at most, all of it at least.
+ *
+ * The floor on the *size* is applied afterwards, by `normalizeCrop` and the `minSize` argument, because
+ * "the pointer is off the left edge" and "the crop is tiny" are different statements: this one only says
+ * the edge is outside the picture, and a fraction of zero is a crop that clamps to the smallest allowed
+ * one rather than to a picture with no width.
+ */
+function clampFraction(fraction) {
+  return Math.min(1, Math.max(0, Number(fraction) || 0));
 }
 
 /**
@@ -523,6 +599,16 @@ export function describeTransform(clip) {
   if (clip.rotation) parts.push(`${Math.round(clip.rotation)}°`);
   if (clip.flipX || clip.flipY) parts.push(`flipped ${[clip.flipX ? 'x' : null, clip.flipY ? 'y' : null].filter(Boolean).join('/')}`);
   if (clip.fit && clip.fit !== 'contain') parts.push(clip.fit);
-  if (clip.opacity !== 1) parts.push(`${Math.round(clamp(clip.opacity, 0, 1) * 100)}% opaque`);
+  // A crop is stated as what is left of the file, which is the number the sliders show: "60%×100%" reads
+  // as "six tenths of the picture across", where "cut 20% off the left" does not say what is left.
+  if (clip.crop && !(clip.crop.x === 0 && clip.crop.y === 0 && clip.crop.w === 1 && clip.crop.h === 1)) {
+    parts.push(`cropped to ${pct(clip.crop.w)}×${pct(clip.crop.h)}`);
+  }
+  // `Number.isFinite` rather than `!== 1`: this describes whatever it is handed, and a partial clip (a
+  // fixture, a clip mid-edit) has no opacity to report — stating "NaN% opaque" about it is worse than
+  // saying nothing.
+  if (Number.isFinite(clip.opacity) && clip.opacity !== 1) {
+    parts.push(`${Math.round(clamp(clip.opacity, 0, 1) * 100)}% opaque`);
+  }
   return parts.join(' · ');
 }

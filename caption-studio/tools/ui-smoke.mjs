@@ -1354,6 +1354,224 @@ async function main() {
     assert('the fit controls can be driven from the panel', false, 'the clip was not painted at all');
   }
 
+  console.log('\n\u25a0 cropping a clip, on the preview');
+  // A crop cuts the clip's **own file**, so it is checked on a picture whose two halves can be told
+  // apart: red on the left half, blue on the right. A solid colour cannot say *which* half a cut left
+  // behind — the pixels can, and they are the only place that answer is final.
+  await evaluate(
+    cdp,
+    `(async () => {
+      const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+      const g = c.getContext('2d');
+      g.fillStyle = '#ff0000'; g.fillRect(0, 0, 32, 64);
+      g.fillStyle = '#0000ff'; g.fillRect(32, 0, 32, 64);
+      const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+      const dt = new DataTransfer();
+      dt.items.add(new File([blob], 'bands.png', { type: 'image/png' }));
+      const input = document.querySelector('#media-in');
+      input.files = dt.files; input.dispatchEvent(new Event('change'));
+    })()`,
+  );
+  await waitFor(cdp, clipLane, (v) => v >= 2, { describe: 'the two-band clip to be added' });
+  await delay(250);
+  // Clicking its row is also what parks the playhead inside its window, so the clip really is on the
+  // frame to be grabbed — the same reason the sections above select the row rather than trust the import.
+  await evaluate(cdp, selectByName('bands\\.png'));
+  await delay(250);
+
+  const cropRun = await evaluate(
+    cdp,
+    `(async () => {
+      const overlay = document.querySelector('#overlay-canvas');
+      const media = document.querySelector('#media-canvas');
+      const canvas = document.querySelector('#preview-canvas');
+      // A synthetic pointer event has no pointer id behind it, so capture is stubbed — the same stub the
+      // gesture section above uses, for the same reason.
+      overlay.setPointerCapture = () => {};
+      overlay.releasePointerCapture = () => {};
+      const frameRect = () => canvas.getBoundingClientRect();
+      const perCss = () => (frameRect().width > 0 ? media.width / frameRect().width : 1);
+      const px = (logical) => logical / perCss();
+      const client = (bx, by) => {
+        const r = frameRect();
+        const k = perCss();
+        return { x: r.left + bx / k, y: r.top + by / k };
+      };
+      const gesture = (from, to) => {
+        const event = (type, at) =>
+          new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            clientX: at.x,
+            clientY: at.y,
+            pointerId: 1,
+            pointerType: 'mouse',
+            isPrimary: true,
+            buttons: type === 'pointerup' ? 0 : 1,
+          });
+        overlay.dispatchEvent(event('pointerdown', from));
+        overlay.dispatchEvent(event('pointermove', to));
+        overlay.dispatchEvent(event('pointerup', to));
+      };
+      const settle = async () => {
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        await new Promise((r) => setTimeout(r, 60));
+      };
+      const text = (id) => document.querySelector('#' + id).textContent;
+      // The banded clip's own picture, read out of the frame. Red is its left half and blue its right, so
+      // the rectangle the two cover together is that clip and nothing else: the other clip on the layer is
+      // magenta, which counts as neither, and the captions are on a canvas of their own.
+      const bands = () => {
+        const d = media.getContext('2d').getImageData(0, 0, media.width, media.height).data;
+        let red = 0;
+        let blue = 0;
+        let x0 = media.width;
+        let y0 = media.height;
+        let x1 = -1;
+        let y1 = -1;
+        for (let i = 3; i < d.length; i += 4) {
+          if (d[i] <= 10) continue;
+          const r = d[i - 3];
+          const g = d[i - 2];
+          const b = d[i - 1];
+          const isRed = r > 200 && g < 60 && b < 60;
+          const isBlue = b > 200 && r < 60 && g < 60;
+          if (!isRed && !isBlue) continue;
+          if (isRed) red += 1;
+          if (isBlue) blue += 1;
+          const p = (i - 3) / 4;
+          const x = p % media.width;
+          const y = Math.floor(p / media.width);
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+        return { red: red, blue: blue, x0: x0, y0: y0, x1: x1, y1: y1, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+      };
+      const insets = () => ({
+        left: parseFloat(text('clip-crop-left-out')),
+        right: parseFloat(text('clip-crop-right-out')),
+        top: parseFloat(text('clip-crop-top-out')),
+        bottom: parseFloat(text('clip-crop-bottom-out')),
+      });
+      const where = () => text('clip-inspector-where');
+      const toggle = document.querySelector('#clip-crop-toggle');
+
+      const whole = bands();
+      if (!whole.red || !whole.blue) return { error: 'the two-band picture was not on the frame to cut' };
+      const before = { bands: whole, insets: insets(), where: where(), mode: toggle.checked };
+
+      // ---- the cut: crop mode on, the picture's right edge dragged to the middle of the picture ------
+      // The picture is whole, so its own rectangle *is* the crop frame the handles moved onto.
+      toggle.checked = true;
+      const mid = (whole.y0 + whole.y1) / 2;
+      gesture(client(whole.x1 - 1, mid), client((whole.x0 + whole.x1) / 2, mid));
+      await settle();
+      const cut = { bands: bands(), insets: insets(), where: where() };
+
+      // ---- the panel's own slider, on the same clip: one crop, two ways in --------------------------
+      const slider = document.querySelector('#clip-crop-right');
+      slider.value = '0.25';
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      slider.dispatchEvent(new Event('change', { bubbles: true }));
+      await settle();
+      const slid = { bands: bands(), insets: insets() };
+
+      document.querySelector('#clip-crop-reset').click();
+      await settle();
+      const reset = { bands: bands(), insets: insets(), where: where() };
+
+      // ---- the mode off: the same drag is an ordinary box edit, and the media is left alone ---------
+      // The point is the picture's right edge, taken from the frame rather than remembered, so it is the
+      // same place the crop handle was — the only thing that changed between the two drags is the mode.
+      toggle.checked = false;
+      const edge = bands();
+      const grab = client(edge.x1 - 1, (edge.y0 + edge.y1) / 2);
+      gesture(grab, { x: grab.x - px(60), y: grab.y - px(40) });
+      await settle();
+      const plain = { bands: bands(), insets: insets(), where: where(), mode: toggle.checked };
+
+      return {
+        before: before,
+        cut: cut,
+        slid: slid,
+        reset: reset,
+        plain: plain,
+        perCss: perCss(),
+      };
+    })()`,
+    { timeout: 120 },
+  );
+
+  if (cropRun?.error) {
+    assert('a clip can be cropped on the preview', false, cropRun.error);
+  } else {
+    // The box's own size in pixels, which a crop does not touch — taken out of the panel line so that
+    // "the box did not move" is compared against the panel's own numbers rather than against a copy of
+    // the layout this harness would have to keep in step.
+    const boxPx = (line) => String((String(line).match(/(\d+)\u00d7(\d+) px/) || [])[0] ?? '');
+    assert(
+      'the crop controls arrive switched off, showing a whole picture',
+      cropRun.before.mode === false &&
+        cropRun.before.insets.left === 0 &&
+        cropRun.before.insets.right === 0 &&
+        cropRun.before.insets.top === 0 &&
+        cropRun.before.insets.bottom === 0 &&
+        cropRun.before.bands.red > 0 &&
+        cropRun.before.bands.blue > 0,
+      `mode ${cropRun.before.mode}, insets ${JSON.stringify(cropRun.before.insets)}, ${cropRun.before.bands.red} red and ${cropRun.before.bands.blue} blue pixels`,
+    );
+    // Half the picture's width is what dragging its right edge to its own middle asks for. The picture is
+    // a square in a 16:9 box, so a cut to 50% wide is drawn *half as wide and just as tall*.
+    assert(
+      'dragging the picture\u2019s right edge in cuts the media to half its width',
+      Math.abs(cropRun.cut.insets.right - 50) <= 1.5 &&
+        Math.abs(cropRun.cut.bands.width - cropRun.before.bands.width / 2) <= 4 &&
+        Math.abs(cropRun.cut.bands.height - cropRun.before.bands.height) <= 2,
+      `the panel said ${cropRun.cut.insets.right}% cut and the picture went ${cropRun.before.bands.width}\u00d7${cropRun.before.bands.height} \u2192 ${cropRun.cut.bands.width}\u00d7${cropRun.cut.bands.height} px`,
+    );
+    assert(
+      'and the half that was cut is gone from the file\u2019s own pixels, not hidden behind the box',
+      cropRun.cut.bands.blue === 0 && cropRun.cut.bands.red > 0,
+      `the frame still had ${cropRun.cut.bands.blue} blue and ${cropRun.cut.bands.red} red pixels of the two halves`,
+    );
+    assert(
+      'and the box itself never moved: a crop is not a resize',
+      boxPx(cropRun.cut.where) === boxPx(cropRun.before.where),
+      `the box read ${boxPx(cropRun.before.where)} before and ${boxPx(cropRun.cut.where)} after`,
+    );
+    // The slider says how much to cut off *one* side, so 25% is a quarter off the right and three
+    // quarters of the picture left behind — the same statement the drag above made as 50%.
+    assert(
+      'the panel\u2019s own inset slider cuts the same picture, one side at a time',
+      Math.abs(cropRun.slid.insets.right - 25) <= 1.5 &&
+        Math.abs(cropRun.slid.bands.width - cropRun.before.bands.width * 0.75) <= 4 &&
+        cropRun.slid.bands.blue > 0,
+      `the panel said ${cropRun.slid.insets.right}% off the right and the picture was ${cropRun.slid.bands.width}px of the ${cropRun.before.bands.width}px it started at`,
+    );
+    assert(
+      'and Reset crop shows the whole file again, both halves included',
+      cropRun.reset.insets.left === 0 &&
+        cropRun.reset.insets.right === 0 &&
+        Math.abs(cropRun.reset.bands.width - cropRun.before.bands.width) <= 3 &&
+        Math.abs(cropRun.reset.bands.height - cropRun.before.bands.height) <= 3 &&
+        cropRun.reset.bands.blue > 0,
+      `insets ${JSON.stringify(cropRun.reset.insets)} with the picture back at ${cropRun.reset.bands.width}\u00d7${cropRun.reset.bands.height} px and ${cropRun.reset.bands.blue} blue pixels`,
+    );
+    assert(
+      'with crop mode off the same drag is an ordinary box edit, and cuts nothing',
+      cropRun.plain.mode === false &&
+        cropRun.plain.insets.right === 0 &&
+        cropRun.plain.insets.left === 0 &&
+        (cropRun.plain.bands.x1 !== cropRun.reset.bands.x1 || cropRun.plain.bands.y1 !== cropRun.reset.bands.y1),
+      `mode ${cropRun.plain.mode}, insets ${JSON.stringify(cropRun.plain.insets)}, the picture now at x1=${cropRun.plain.bands.x1} y1=${cropRun.plain.bands.y1}`,
+    );
+    console.log(
+      `  \u2022 the crop: the picture\u2019s right edge cut away ${cropRun.cut.insets.right}% of the file, the slider cut ${cropRun.slid.insets.right}% off the right, and Reset put the whole file back \u2014 with the box at ${boxPx(cropRun.before.where)} throughout`,
+    );
+  }
+
   // Hand the selection back. A clip and a caption are never both selected — clicking either one clears
   // the other, so the two panels can never describe different things — and the sections below edit a
   // caption. Clicking a caption row is also the *proof* of that rule: the clip's panel must close.

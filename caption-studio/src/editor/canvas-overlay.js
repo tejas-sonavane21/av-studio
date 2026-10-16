@@ -53,18 +53,21 @@ import {
   boxFromMove,
   clipPixels,
   clipQuad,
+  cropFromHandle,
   handlePoints,
+  handlePointsForRect,
   hitClip,
   hitHandle,
   hitRotateHandle,
   pointInClip,
   rotateHandlePoint,
+  rotatePoint,
   rotateStemPoint,
   rotationFromPointer,
   snapBox,
   snapRotation,
 } from '../render/media-placement.js';
-import { boxRect, clipPixelAspect, drawOrder } from '../model/media.js';
+import { FULL_CROP, boxRect, clipContentAspect, clipDrawRect, clipPixelAspect, drawOrder } from '../model/media.js';
 
 /** One keyboard nudge, as a fraction of the canvas (so zoom level cannot change it). */
 export const DEFAULT_NUDGE_STEP = 0.005;
@@ -72,6 +75,9 @@ export const DEFAULT_NUDGE_STEP = 0.005;
 export const NUDGE_MULTIPLIER = 4;
 /** Extra px of slop around a box for hit testing — a single line of small text is short. */
 export const HIT_PADDING_PX = 6;
+/** The crop frame, and its handles, while the panel is in crop mode — a second kind of handle on screen. */
+export const CROP_COLOUR = '#f59e0b';
+
 /**
  * No snap targets at all, which is what Alt holds a gesture to.
  *
@@ -264,11 +270,13 @@ export function createCanvasOverlay({
   getClips = () => [],
   clipSize = () => null,
   keepAspect = () => true,
+  cropMode = () => false,
   onSelect = null,
   onPlace = null,
   onClipSelect = null,
   onClipBox = null,
   onClipRotate = null,
+  onClipCrop = null,
   snapTolerance = DEFAULT_SNAP_TOLERANCE_PX,
   showAllTargets = true,
 } = {}) {
@@ -343,13 +351,34 @@ export function createCanvasOverlay({
   }
 
   /**
-   * The pixel ratio a shape-locked resize holds: the media's own shape when its size is known, and the
-   * box's own shape when it is not (an offline clip is still resizable, and its box is all there is).
+   * The pixel ratio a shape-locked resize holds: the shape of what the clip *shows* — its crop, not its
+   * file — when the file is loaded, and the box's own shape when it is not (an offline clip is still
+   * resizable, and its box is all there is).
    */
   function aspectFor(clip) {
     const media = clipSize?.(clip.id) ?? null;
-    if (media && media.width > 0 && media.height > 0) return media.width / media.height;
+    const content = media ? clipContentAspect(clip, media) : 0;
+    if (content > 0) return content;
     return clipPixelAspect(clip, preview.renderer.size);
+  }
+
+  /**
+   * The crop frame: the rectangle around the **whole** picture, in pixels, for the crop handles to live on.
+   *
+   * Not the crop's own rectangle. A crop is a *cut*, and cutting needs to see what is being cut: showing
+   * the frame around what is already left would shrink it under the pointer with every drag and leave
+   * nothing to drag outwards again. Null when the file is not loaded — there is no whole picture to frame.
+   *
+   * Spelled `{x, y, w, h}`, the convention `handlePointsForRect` and `cropFromHandle` read. `clipDrawRect`
+   * answers `{x, y, width, height}`, and handing that on unchanged is a frame whose width is `undefined`:
+   * handles placed at `NaN`, and a cut that never leaves the crop it started with.
+   */
+  function cropFrameFor(clip) {
+    const media = clipSize?.(clip.id) ?? null;
+    if (!media) return null;
+    const rect = clipDrawRect({ ...clip, crop: FULL_CROP }, media, preview.renderer.size);
+    if (!(rect.width > 0) || !(rect.height > 0)) return null;
+    return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
   }
 
   /**
@@ -477,11 +506,38 @@ export function createCanvasOverlay({
     ctx.stroke?.();
     ctx.restore?.();
 
-    for (const handle of handlePoints(clip, geo.size)) {
+    // In crop mode the handles belong to the crop frame — the whole picture's outline, dashed, with what
+    // is currently *shown* drawn inside it. That is the only place the uncropped extent ever appears on
+    // screen, and without it a crop is eight squares floating over a picture with no frame to cut.
+    const rotation = Number(clip.rotation) || 0;
+    const frame = cropMode?.() ? cropFrameFor(clip) : null;
+    let handles = handlePoints(clip, geo.size);
+    if (frame) {
+      const centre = { x: frame.x + frame.w / 2, y: frame.y + frame.h / 2 };
+      const corners = [
+        { x: frame.x, y: frame.y },
+        { x: frame.x + frame.w, y: frame.y },
+        { x: frame.x + frame.w, y: frame.y + frame.h },
+        { x: frame.x, y: frame.y + frame.h },
+      ].map((corner) => to(rotatePoint(corner, centre, rotation)));
+      ctx.save?.();
+      ctx.strokeStyle = CROP_COLOUR;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash?.([6, 4]);
+      ctx.beginPath?.();
+      ctx.moveTo?.(corners[0].x, corners[0].y);
+      for (let i = 1; i < corners.length; i++) ctx.lineTo?.(corners[i].x, corners[i].y);
+      ctx.closePath?.();
+      ctx.stroke?.();
+      ctx.restore?.();
+      handles = handlePointsForRect(frame, rotation);
+    }
+
+    for (const handle of handles) {
       const p = to(handle);
       ctx.save?.();
       ctx.fillStyle = '#0b0b0b';
-      ctx.strokeStyle = SELECT_COLOUR;
+      ctx.strokeStyle = frame ? CROP_COLOUR : SELECT_COLOUR;
       ctx.lineWidth = 1.5;
       ctx.fillRect?.(p.x - side / 2, p.y - side / 2, side, side);
       ctx.strokeRect?.(p.x - side / 2, p.y - side / 2, side, side);
@@ -527,6 +583,13 @@ export function createCanvasOverlay({
       Math.round(clip.box.w * 1e4),
       Math.round(clip.box.h * 1e4),
       Math.round((Number(clip.rotation) || 0) * 100),
+      // The crop is part of the paint (it decides which pixels and which shape), so a crop edit has to
+      // change this key or the handles would follow the model while the picture stayed still.
+      Math.round((clip.crop?.x ?? 0) * 1e4),
+      Math.round((clip.crop?.y ?? 0) * 1e4),
+      Math.round((clip.crop?.w ?? 1) * 1e4),
+      Math.round((clip.crop?.h ?? 1) * 1e4),
+      cropMode?.() ? 'crop' : '',
     ].join(':');
   }
 
@@ -581,6 +644,10 @@ export function createCanvasOverlay({
 
   function emitClipRotate(clipId, degrees, info) {
     onClipRotate?.(clipId, degrees, info);
+  }
+
+  function emitClipCrop(clipId, crop, info) {
+    onClipCrop?.(clipId, crop, info);
   }
 
   /**
@@ -655,6 +722,18 @@ export function createCanvasOverlay({
 
   /** Which clip gesture the pointer starts, or `null` when it is not one — see `media-placement.js`. */
   function beginGestureOn(point, clip, size) {
+    // While the panel is in crop mode its eight handles live on the **crop frame** — the whole picture's
+    // outline — and cut the media instead of resizing the box. The round handle is still the turn, because
+    // the two questions are different ones and a mode that hid rotation would make a turned clip
+    // uncroppable. The body still moves, so a crop can be positioned without leaving the mode.
+    if (cropMode?.()) {
+      const frame = cropFrameFor(clip);
+      const cropHandle = frame ? hitHandle(point, handlePointsForRect(frame, Number(clip.rotation) || 0)) : null;
+      if (cropHandle) return { mode: 'crop', clipId: clip.id, handle: cropHandle.id };
+      if (hitRotateHandle(point, clip, size)) return { mode: 'rotate', clipId: clip.id, handle: 'rotate' };
+      if (pointInClip(point, clip, size)) return { mode: 'move', clipId: clip.id, handle: null };
+      return null;
+    }
     if (hitRotateHandle(point, clip, size)) {
       return { mode: 'rotate', clipId: clip.id, handle: 'rotate' };
     }
@@ -682,8 +761,15 @@ export function createCanvasOverlay({
       // zero the moment the gesture starts.
       startGrip: gesture.mode === 'rotate' ? rotateHandlePoint(clip, size) : null,
       aspect: aspectFor(clip),
+      // The crop a cut is measured against: the rectangle the gesture started with, in the file's frame,
+      // and the whole-picture frame it is cut out of. Both are read once, at pointer-down, so every move
+      // in the gesture is measured from the same place — dragging the same handle twice as far cannot make
+      // the crop jump because a re-fit moved the frame under the pointer.
+      startCrop: { ...clip.crop },
+      startCropFrame: gesture.mode === 'crop' ? cropFrameFor(clip) : null,
       box: null,
       rotation: null,
+      crop: null,
       moved: false,
     };
     guides = { targets: gestureTargets(), snappedX: null, snappedY: null };
@@ -724,6 +810,17 @@ export function createCanvasOverlay({
         clipDrag.rotation = snapped.degrees;
         clipDrag.moved = true;
         emitClipRotate(clip.id, snapped.degrees, { live: true, snapped: snapped.snapped, commit: false });
+      } else if (clipDrag.mode === 'crop') {
+        const crop = cropFromHandle({
+          handle: clipDrag.handle,
+          startCrop: clipDrag.startCrop,
+          startRect: clipDrag.startCropFrame,
+          point,
+          rotation: clipDrag.startRotation,
+        });
+        clipDrag.crop = crop;
+        clipDrag.moved = true;
+        emitClipCrop(clip.id, crop, { live: true, commit: false });
       } else if (clipDrag.mode === 'resize') {
         const resized = boxFromHandle({
           handle: clipDrag.handle,
@@ -781,12 +878,14 @@ export function createCanvasOverlay({
       const { clipId, mode, moved } = clipDrag;
       const box = clipDrag.box ?? clipDrag.startBox;
       const rotation = clipDrag.rotation ?? clipDrag.startRotation;
+      const crop = clipDrag.crop ?? clipDrag.startCrop;
       clipDrag = null;
       guides = { targets: { x: [], y: [] }, snappedX: null, snappedY: null };
       // A press that never moved is a *selection*, not an edit: committing one would log a change to a
       // clip nobody changed.
       if (moved) {
         if (mode === 'rotate') emitClipRotate(clipId, rotation, { live: false, commit: true });
+        else if (mode === 'crop') emitClipCrop(clipId, crop, { live: false, commit: true });
         else emitClipBox(clipId, box, { live: false, commit: true });
       }
       overlay.releasePointerCapture?.(e?.pointerId);
