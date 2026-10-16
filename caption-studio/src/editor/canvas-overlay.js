@@ -64,7 +64,7 @@ import {
   snapBox,
   snapRotation,
 } from '../render/media-placement.js';
-import { clipPixelAspect, drawOrder } from '../model/media.js';
+import { boxRect, clipPixelAspect, drawOrder } from '../model/media.js';
 
 /** One keyboard nudge, as a fraction of the canvas (so zoom level cannot change it). */
 export const DEFAULT_NUDGE_STEP = 0.005;
@@ -352,12 +352,42 @@ export function createCanvasOverlay({
     return clipPixelAspect(clip, preview.renderer.size);
   }
 
-  /** Snap targets for any drag: canvas centre/thirds/safe areas/edges + the visible captions. */
-  function targetsFor(excludeBlockId = null) {
+  /**
+   * Snap targets for a drag: canvas centre/thirds/safe areas/edges, the captions, and the clips.
+   *
+   * An overlay clip is a box like a caption box, so its edges belong in the same list — that is how a
+   * badge is lined up on a banner edge without measuring anything. The **dragged** clip is left out
+   * (that is the `exclude` argument): its own edges would sit on top of the pointer, snapping to
+   * distance zero and lighting a guide line for a snap that moved nothing.
+   */
+  function targetsFor(excludeId = null, { includeClips = true } = {}) {
     return buildSnapTargets({
       canvas: preview.renderer.size,
-      layouts: preview.layouts ?? [],
-      excludeBlockId,
+      layouts: includeClips ? [...(preview.layouts ?? []), ...clipLayouts()] : preview.layouts ?? [],
+      excludeBlockId: excludeId,
+    });
+  }
+
+  /**
+   * The targets the gesture in flight should be using — read live, because Alt can take them away and
+   * put them back mid-drag.
+   *
+   * A *caption* drag keeps the caption targets it has always had and is not offered the clips: a caption
+   * is placed by an anchor and the clips are placed by a box, and quietly changing where captions snap
+   * would be a change to the caption editor made in a change to the clip editor.
+   */
+  function gestureTargets() {
+    if (clipDrag) return targetsFor(clipDrag.clipId);
+    if (drag) return targetsFor(drag.blockId, { includeClips: false });
+    return targetsFor(null);
+  }
+
+  /** Every overlay clip as a pixel rect the snap builder can read, labelled as a clip. */
+  function clipLayouts() {
+    const size = preview.renderer.size;
+    return clips().map((clip) => {
+      const rect = boxRect(clip.box, size);
+      return { blockId: clip.id, kind: 'clip', x: rect.x, y: rect.y, width: rect.width, height: rect.height };
     });
   }
 
@@ -570,7 +600,7 @@ export function createCanvasOverlay({
       guides.snappedY = null;
       return;
     }
-    if (guides.targets === NO_TARGETS) guides.targets = targetsFor(drag ? drag.blockId : null);
+    if (guides.targets === NO_TARGETS) guides.targets = gestureTargets();
   }
 
   /** Drag: pointer down on a block. */
@@ -605,7 +635,7 @@ export function createCanvasOverlay({
         },
       };
       select(layout.blockId);
-      guides = { targets: targetsFor(layout.blockId), snappedX: null, snappedY: null };
+      guides = { targets: gestureTargets(), snappedX: null, snappedY: null };
       applyGuideModifier(e.altKey === true);
       overlay.setPointerCapture?.(e.pointerId);
       e.preventDefault?.();
@@ -656,7 +686,7 @@ export function createCanvasOverlay({
       rotation: null,
       moved: false,
     };
-    guides = { targets: targetsFor(null), snappedX: null, snappedY: null };
+    guides = { targets: gestureTargets(), snappedX: null, snappedY: null };
     applyGuideModifier(e.altKey === true);
     overlay.setPointerCapture?.(e.pointerId);
     e.preventDefault?.();
