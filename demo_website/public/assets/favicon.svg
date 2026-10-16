@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Aqualux Watersports">
+  <defs>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0fbfc9"/>
+      <stop offset="1" stop-color="#04556c"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="#04202f"/>
+  <circle cx="44" cy="18" r="7" fill="#f7c66b"/>
+  <path d="M33 20l9 13H24z" fill="#7ce9df"/>
+  <path d="M6 40c6 0 8-6 15-6s9 6 15 6 8-6 12-6 6 6 10 6" fill="none" stroke="url(#sea)" stroke-width="4" stroke-linecap="round"/>
+  <path d="M8 50c6 0 8-6 15-6s9 6 15 6 6-6 10-6" fill="none" stroke="#0fbfc9" stroke-width="4" stroke-linecap="round" opacity=".55"/>
+</svg>

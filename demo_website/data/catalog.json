@@ -1,0 +1,392 @@
+{
+  "brand": {
+    "name": "AQUALUX WATERSPORTS",
+    "shortName": "AQUALUX",
+    "tagline": "Luxury watersports experience on the Arabian Sea",
+    "motto": "Luxury watersports experience at Shreenika Coastal Retreat, Akshi Beach, Alibag",
+    "venue": "Shreenika Coastal Retreat",
+    "beach": "Akshi Beach, Alibag",
+    "region": "Raigad, Maharashtra",
+    "addressLine": "Shreenika Coastal Retreat, Akshi Beach Road, Akshi, Alibag, Maharashtra 402201",
+    "mapQuery": "Shreenika Coastal Retreat Akshi Beach Alibag",
+    "instagramHandle": "@aqualux.watersports",
+    "instagramUrl": "https://www.instagram.com/aqualux.watersports/",
+    "phoneDisplay": "+91 98200 00000",
+    "phoneHref": "+919820000000",
+    "whatsappNumber": "919820000000",
+    "email": "rides@aqualuxwatersports.in",
+    "seasonNote": "Open October to May, 06:30 to 18:30 IST",
+    "currency": "INR",
+    "services": [
+      "Jetcar rides",
+      "Sunset jetcar signature runs",
+      "Parasailing",
+      "Speed boat cruise",
+      "Banana boat",
+      "Kitesurf lessons",
+      "Kayak and mangrove paddle",
+      "Beach ATV",
+      "Private sunset deck"
+    ]
+  },
+  "jetcarFinishes": [
+    {
+      "id": "seafoam",
+      "name": "Seafoam Pearl",
+      "hull": "#f2fbff",
+      "accent": "#12c7d4",
+      "trim": "#0b5f78"
+    },
+    {
+      "id": "turquoise",
+      "name": "Turquoise Rush",
+      "hull": "#17c3d6",
+      "accent": "#053f52",
+      "trim": "#eafcff"
+    },
+    {
+      "id": "sunset",
+      "name": "Sunset Coral",
+      "hull": "#ff7a4d",
+      "accent": "#3d1206",
+      "trim": "#ffe6d8"
+    },
+    {
+      "id": "abyss",
+      "name": "Midnight Abyss",
+      "hull": "#0b2233",
+      "accent": "#35e0e6",
+      "trim": "#cfeff6"
+    },
+    {
+      "id": "champagne",
+      "name": "Champagne Gold",
+      "hull": "#e3c185",
+      "accent": "#4a3410",
+      "trim": "#fff6e2"
+    }
+  ],
+  "jetcars": [
+    {
+      "id": "jetcar-1100",
+      "name": "AQUALUX JETCAR 1100",
+      "activityId": "jetcar-discovery",
+      "badge": "First ride",
+      "tagline": "The friendly one. Stable, quick to learn, and the fastest way onto the water for a first timer.",
+      "power": "110 HP",
+      "topSpeed": "65 km/h",
+      "seats": "2 rides",
+      "duration": "15 min",
+      "price": 1800,
+      "turn": "Twin jet thrust",
+      "highlights": [
+        "Instructor rides with you",
+        "Life jackets in every size",
+        "Ideal for ages 10 and up"
+      ]
+    },
+    {
+      "id": "jetcar-1800",
+      "name": "AQUALUX JETCAR 1800 TURBO",
+      "activityId": "jetcar-turbo-tandem",
+      "badge": "Most booked",
+      "tagline": "The crowd favourite. Twice the punch out of the surf line, with a longer run down the coast.",
+      "power": "180 HP",
+      "topSpeed": "80 km/h",
+      "seats": "2 rides",
+      "duration": "30 min",
+      "price": 3200,
+      "turn": "Turbo jet drive",
+      "highlights": [
+        "Two riders per blast",
+        "Plays at the sandbar",
+        "GoPro mount on request"
+      ]
+    },
+    {
+      "id": "jetcar-gt",
+      "name": "AQUALUX JETCAR GT SIGNATURE",
+      "activityId": "jetcar-sunset-signature",
+      "badge": "Signature",
+      "tagline": "The flagship. A full 45 minute line down Akshi Beach, timed so you finish facing the sunset.",
+      "power": "230 HP",
+      "topSpeed": "95 km/h",
+      "seats": "2 rides",
+      "duration": "45 min",
+      "price": 5500,
+      "turn": "Carbon jet drive",
+      "highlights": [
+        "Sunset slot reserved",
+        "Photographer on the shore",
+        "Chilled towels and coconut water"
+      ]
+    }
+  ],
+  "activities": [
+    {
+      "id": "jetcar-discovery",
+      "name": "Jetcar Discovery Ride",
+      "category": "jetcar",
+      "duration": "15 min",
+      "price": 1800,
+      "unit": "rider",
+      "minRiders": 1,
+      "maxRiders": 2,
+      "blurb": "Your first jetcar run. A guided blast along the shore with the instructor on the seat behind you.",
+      "tag": "First ride",
+      "icon": "jetcar"
+    },
+    {
+      "id": "jetcar-turbo-tandem",
+      "name": "Jetcar Turbo Tandem",
+      "category": "jetcar",
+      "duration": "30 min",
+      "price": 3200,
+      "unit": "rider",
+      "minRiders": 1,
+      "maxRiders": 2,
+      "blurb": "180 HP of turbo jet drive, a full sweep of the bay, and enough time to actually learn the throttle.",
+      "tag": "Most booked",
+      "icon": "jetcar"
+    },
+    {
+      "id": "jetcar-sunset-signature",
+      "name": "Jetcar Sunset Signature",
+      "category": "jetcar",
+      "duration": "45 min",
+      "price": 5500,
+      "unit": "rider",
+      "minRiders": 1,
+      "maxRiders": 2,
+      "blurb": "The flagship run on the GT. You leave the jetty at 16:30 and come back with the sun on your shoulder.",
+      "tag": "Signature",
+      "icon": "jetcar"
+    },
+    {
+      "id": "parasailing",
+      "name": "Parasailing Sky Ride",
+      "category": "watersport",
+      "duration": "10 min",
+      "price": 1200,
+      "unit": "rider",
+      "minRiders": 1,
+      "maxRiders": 6,
+      "blurb": "Winched off the boat deck up to 120 feet, with the whole Akshi coastline under your feet.",
+      "tag": "",
+      "icon": "parasail"
+    },
+    {
+      "id": "speedboat-cruise",
+      "name": "Speed Boat Coastal Cruise",
+      "category": "watersport",
+      "duration": "20 min",
+      "price": 2400,
+      "unit": "boat",
+      "minRiders": 1,
+      "maxRiders": 6,
+      "blurb": "A private run out to the sandbar and back. Book the whole boat and set your own pace.",
+      "tag": "Whole boat",
+      "icon": "boat"
+    },
+    {
+      "id": "banana-boat",
+      "name": "Banana Boat Blast",
+      "category": "watersport",
+      "duration": "15 min",
+      "price": 700,
+      "unit": "rider",
+      "minRiders": 4,
+      "maxRiders": 8,
+      "blurb": "Four to eight riders, one very determined boat driver, and a great deal of splashing.",
+      "tag": "Group fun",
+      "icon": "banana"
+    },
+    {
+      "id": "kitesurf-lesson",
+      "name": "Kitesurf Discovery Lesson",
+      "category": "watersport",
+      "duration": "60 min",
+      "price": 3500,
+      "unit": "rider",
+      "minRiders": 1,
+      "maxRiders": 3,
+      "blurb": "Beach briefing, kite control on the sand, then your first body drags in waist deep water.",
+      "tag": "Certified coach",
+      "icon": "kite"
+    },
+    {
+      "id": "beach-atv",
+      "name": "Beach ATV Shoreline Trail",
+      "category": "leisure",
+      "duration": "10 min",
+      "price": 600,
+      "unit": "rider",
+      "minRiders": 1,
+      "maxRiders": 4,
+      "blurb": "A marked loop over the wet sand at the north end of the beach, helmets included.",
+      "tag": "",
+      "icon": "atv"
+    },
+    {
+      "id": "kayak-mangrove",
+      "name": "Kayak and Mangrove Paddle",
+      "category": "leisure",
+      "duration": "30 min",
+      "price": 500,
+      "unit": "rider",
+      "minRiders": 1,
+      "maxRiders": 6,
+      "blurb": "A slow double kayak paddle into the creek mouth. The quietest half hour of your trip.",
+      "tag": "Calm",
+      "icon": "kayak"
+    },
+    {
+      "id": "sunset-deck",
+      "name": "Private Sunset Deck at Shreenika",
+      "category": "retreat",
+      "duration": "60 min",
+      "price": 1500,
+      "unit": "group",
+      "minRiders": 1,
+      "maxRiders": 10,
+      "blurb": "A reserved deck at Shreenika Coastal Retreat, cold towels, coconut water and the sunset over the bay.",
+      "tag": "Retreat",
+      "icon": "deck"
+    }
+  ],
+  "packages": [
+    {
+      "id": "coastal-starter",
+      "name": "Coastal Starter",
+      "price": 4900,
+      "for": "2 riders",
+      "summary": "A first taste of the water for a couple or two friends.",
+      "includes": [
+        "Jetcar Discovery Ride, 15 min each",
+        "Banana Boat Blast, 1 round",
+        "Kayak paddle, 30 min",
+        "Shreenika beach towels"
+      ]
+    },
+    {
+      "id": "jetcar-signature-day",
+      "name": "Jetcar Signature Day",
+      "price": 12500,
+      "for": "Up to 4 riders",
+      "highlight": true,
+      "summary": "The full Aqualux line-up with the turbo jetcars as the centrepiece.",
+      "includes": [
+        "Jetcar Turbo Tandem, 2 rides",
+        "Parasailing Sky Ride",
+        "Speed Boat Coastal Cruise",
+        "Private Sunset Deck, 60 min"
+      ]
+    },
+    {
+      "id": "aqualux-platinum",
+      "name": "Aqualux Platinum",
+      "price": 24900,
+      "for": "Up to 6 riders",
+      "summary": "Everything we run, with the GT Signature finish and a photographer on the shore.",
+      "includes": [
+        "Jetcar GT Signature, 2 sunset rides",
+        "Parasailing and Speed Boat",
+        "Kitesurf Discovery Lesson",
+        "Private deck dinner and shoot"
+      ]
+    }
+  ],
+  "slots": [
+    {
+      "id": "sunrise",
+      "name": "Golden Hour",
+      "window": "06:30 - 09:00",
+      "note": "Glass-flat water and no queue. Best for first time jetcar riders."
+    },
+    {
+      "id": "day",
+      "name": "High Tide Day",
+      "window": "09:00 - 16:00",
+      "note": "Full fleet in the water. All watersports running back to back."
+    },
+    {
+      "id": "sunset",
+      "name": "Sunset Session",
+      "window": "16:00 - 18:30",
+      "note": "The Signature jetcar run leaves the jetty at 16:30 sharp."
+    }
+  ],
+  "stats": [
+    {
+      "value": 2400,
+      "suffix": "+",
+      "label": "Riders taken out"
+    },
+    {
+      "value": 9,
+      "suffix": "",
+      "label": "Watersports on the menu"
+    },
+    {
+      "value": 3,
+      "suffix": "",
+      "label": "Jetcar models"
+    },
+    {
+      "value": 4.9,
+      "suffix": "/5",
+      "label": "Guest rating",
+      "decimals": 1
+    }
+  ],
+  "testimonials": [
+    {
+      "quote": "We came for the beach and ended up spending the whole evening on the jetcars. The Sunset Signature run is worth every rupee.",
+      "name": "Ritika and Aman",
+      "from": "Pune",
+      "tag": "Jetcar Sunset Signature"
+    },
+    {
+      "quote": "Well run operation. Briefing was clear, jackets were new, and the instructor stayed with my son the whole ride.",
+      "name": "Sameer Kulkarni",
+      "from": "Thane",
+      "tag": "Jetcar Discovery Ride"
+    },
+    {
+      "quote": "Booked the Signature Day for a birthday group of four. The deck at Shreenika made it feel like a proper occasion.",
+      "name": "Priya Menon",
+      "from": "Mumbai",
+      "tag": "Jetcar Signature Day"
+    }
+  ],
+  "faqs": [
+    {
+      "q": "What exactly is a jetcar?",
+      "a": "A jetcar is a jet-propelled watercraft that you ride rather than sit inside. It planes on the surface, turns on a jet of water instead of a propeller, and is stable enough for a first timer with an instructor on board. It is the ride Aqualux is built around."
+    },
+    {
+      "q": "Do I need any experience?",
+      "a": "None. Every jetcar run starts with a five minute briefing on the sand and an instructor rides with you on the Discovery and Turbo runs. The GT Signature is also open to beginners, we just take the line down the beach more smoothly."
+    },
+    {
+      "q": "What should I bring?",
+      "a": "Swimwear or quick dry shorts, a change of clothes, sunscreen and a towel. Life jackets in every size, helmets where required, and lockers at Shreenika Coastal Retreat are included."
+    },
+    {
+      "q": "Is it safe for children?",
+      "a": "Riders from age 10 can go on the Discovery Ride with an adult on the same jetcar. Under 18 needs a guardian signature at check-in. Parasailing and banana boat have their own minimum age, ask at the desk."
+    },
+    {
+      "q": "When is the best time to come?",
+      "a": "October to May is our season. Mornings between 06:30 and 09:00 have the flattest water; the 16:00 to 18:30 Sunset Session is the busiest, so book a day ahead for the GT."
+    },
+    {
+      "q": "How do I get to Akshi Beach?",
+      "a": "Akshi is about 95 km from Mumbai and 100 km from Pune, roughly a two and a half hour drive. Alibag town is 12 km away. Shreenika Coastal Retreat is on the Akshi Beach road and we are on its shoreline."
+    },
+    {
+      "q": "What is the cancellation policy?",
+      "a": "Free rescheduling up to 12 hours before your slot. Rides cancelled by us for weather or sea conditions are rerated or fully refunded. Send a WhatsApp message with your booking reference and we will handle it."
+    }
+  ]
+}
