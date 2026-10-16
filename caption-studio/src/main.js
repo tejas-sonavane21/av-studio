@@ -61,14 +61,24 @@ import { createMediaLibrary } from './editor/media-library.js';
 import { createTimeline } from './editor/timeline.js';
 import {
   addMediaClip,
+  boxRect,
+  centerClipBox,
   clipLength,
+  clipPixelAspect,
   describeClip,
+  fitClipToFrame,
+  flipMediaClip,
   mediaClips,
   moveMediaClip,
   planClip,
   removeMediaClip,
+  resetMediaClip,
+  rotateMediaClip,
+  setClipBox,
   trimMediaClip,
+  updateMediaClip,
 } from './model/media.js';
+import { boxWithAspect, describeTransform } from './render/media-placement.js';
 import { createExportDialog } from './editor/export-dialog.js';
 import {
   TIMELINE_TRACKS,
@@ -935,6 +945,7 @@ function syncMedia() {
   timeline?.setMediaOffline(mediaLibrary.missing(clips.map((clip) => clip.id)));
   timeline?.setSelectedMediaClip(selectedMediaClipId);
   renderMediaList();
+  renderClipInspector();
   return clips;
 }
 
@@ -1058,7 +1069,11 @@ async function relinkClip(id, file) {
 function selectMediaClip(id) {
   selectedMediaClipId = id ?? null;
   timeline?.setSelectedMediaClip(selectedMediaClipId);
+  // The overlay draws the handles for whatever is selected, so selecting here is what puts them on
+  // screen — and selecting from the panel or the lane is the same act as clicking the clip.
+  overlay?.selectClip(selectedMediaClipId);
   renderMediaList();
+  renderClipInspector();
   const clip = mediaClips(preview?.document).find((c) => c.id === id);
   if (clip) {
     log(`clip: selected "${clip.name}" ${clip.start.toFixed(2)}s → ${clip.end.toFixed(2)}s`);
@@ -1140,9 +1155,257 @@ function renderMediaList() {
   if (note) {
     note.textContent = !clips.length
       ? 'Images and videos drawn over the picture, under the captions. They are silent — the master track under Audio is the programme\u2019s sound. No clips loaded.'
-      : `${clips.length} clip${clips.length === 1 ? '' : 's'} over the picture${offline ? `, ${offline} with no file loaded (Relink to bring it back)` : ''}. Drag along the Clips lane to move, drag the edges to trim.`;
+      : `${clips.length} clip${clips.length === 1 ? '' : 's'} over the picture${offline ? `, ${offline} with no file loaded (Relink to bring it back)` : ''}. Click a clip \u2014 here, on the Clips lane or on the preview \u2014 to get its handles: drag the body to move it, the square handles to resize it, the round one to turn it, and the lane's edges to trim it.`;
   }
 }
+
+// ---------------------------------------------------------------------------
+// the selected clip's transform
+// ---------------------------------------------------------------------------
+
+/**
+ * The pixel ratio a clip's picture keeps: its own shape when the file is loaded, its box's shape when
+ * it is not.
+ *
+ * A file's shape is the right answer while the media is there — that is what "do not distort this"
+ * means. For a clip whose file is offline there is no shape to keep, so the box's own is held instead;
+ * refusing to resize a clip until its file comes back would be a panel that suddenly does nothing.
+ */
+function clipShapeAspect(clip) {
+  const media = mediaLibrary.size(clip?.id);
+  if (media && media.width > 0 && media.height > 0) return media.width / media.height;
+  const size = preview?.renderer?.size ?? null;
+  return size ? clipPixelAspect(clip, size) : 0;
+}
+
+/**
+ * The one place a clip's *frame* changes — the preview's handles, the panel's sliders and their commit
+ * lines all come through here.
+ *
+ * `live` is a gesture in progress: the picture is redrawn and the panel's numbers follow, but nothing is
+ * logged, because a drag is one edit and not one per pointer move. `commit` is the end of a gesture: the
+ * log line is written and the clips are republished, which is what puts a finished drag into the strip,
+ * the list and the renderer at once.
+ *
+ * A box edit deliberately does **not** rebuild the strip mid-drag: a clip's box says nothing about when
+ * it plays, so the lane has nothing to say about it, and re-rendering the lane sixty times a second to
+ * prove that is work nobody asked for.
+ */
+function editClip(id, patch, { live = false, what = 'adjusted' } = {}) {
+  const doc = preview?.document;
+  const clip = mediaClips(doc).find((c) => c.id === id);
+  if (!doc || !clip) return null;
+  const next = updateMediaClip(doc, id, patch);
+  if (!next) return null;
+  if (!live) {
+    // The full republish: it hands the renderer the canonical list, repaints the lane and the rows and
+    // refills the panel, and it is also what puts the new box on the frame — the model answers a patch
+    // with *fresh objects*, so an edit is only on screen once the new list has been published.
+    syncMedia();
+    log(`clip ${what}: "${clip.name}" ${describeTransform(next)}`);
+    return next;
+  }
+  // A gesture in progress: the same publish to the renderer, without rebuilding the lane or the rows,
+  // which cannot have changed — a box says nothing about when a clip plays.
+  preview?.setMedia(mediaClips(doc), (clipId) => mediaLibrary.element(clipId));
+  redraw();
+  renderClipInspector();
+  return next;
+}
+
+/** A drag on a clip in the preview: its body (move) or one of its handles (resize). */
+function onClipBox(id, box, info = {}) {
+  return editClip(id, { box }, {
+    live: Boolean(info.live),
+    commit: Boolean(info.commit),
+    what: info.resize ? 'resized' : 'moved',
+  });
+}
+
+/** A drag on the round handle: the clip's rotation. */
+function onClipRotation(id, degrees, info = {}) {
+  return editClip(id, { rotation: degrees }, {
+    live: Boolean(info.live),
+    commit: Boolean(info.commit),
+    what: 'rotated',
+  });
+}
+
+/**
+ * The selected clip, or `null`. Read fresh every time — the panel is a view of the document.
+ *
+ * Named apart from the `selectedClip` variable, which is the *timeline's* cut range: the two are different
+ * kinds of thing and one function with the other's name would be a trap for the next reader.
+ */
+function selectedMediaClip() {
+  return mediaClips(preview?.document).find((clip) => clip.id === selectedMediaClipId) ?? null;
+}
+
+/** Whether the panel's shape lock is on. Defaults to on, which is what an unlocked checkbox means. */
+function clipShapeLocked() {
+  const lock = $('#clip-lock');
+  return !lock || lock.checked !== false;
+}
+
+/** The selected clip's media, as the frame the panel's shape maths needs. */
+function clipFrameSize() {
+  return preview?.renderer?.size ?? { width: 1, height: 1 };
+}
+
+/**
+ * Fill the transform panel from the document.
+ *
+ * Every value is read back from the clip rather than remembered, so the panel cannot disagree with the
+ * picture — and `except` is the slider the user is currently holding. A thumb is not moved while it is
+ * being dragged: an edge-clamped box would otherwise fight the hand that is pushing it, and the readout
+ * next to it is what says where the clip actually went.
+ */
+function renderClipInspector({ except = null } = {}) {
+  const host = $('#clip-inspector');
+  if (!host) return;
+  const clip = selectedMediaClip();
+  host.hidden = !clip;
+  if (!clip) return;
+
+  const set = (id, value) => {
+    if (except && except === id) return;
+    const input = $(`#${id}`);
+    if (input) input.value = String(value);
+  };
+  const text = (id, value) => {
+    const node = $(`#${id}`);
+    if (node) node.textContent = value;
+  };
+  const pct = (v) => `${Math.round(v * 100)}%`;
+
+  set('clip-x', clip.box.x);
+  set('clip-y', clip.box.y);
+  set('clip-w', clip.box.w);
+  set('clip-h', clip.box.h);
+  set('clip-rot', clip.rotation);
+  set('clip-opacity', clip.opacity);
+  text('clip-x-out', pct(clip.box.x));
+  text('clip-y-out', pct(clip.box.y));
+  text('clip-w-out', pct(clip.box.w));
+  text('clip-h-out', pct(clip.box.h));
+  text('clip-rot-out', `${Math.round(clip.rotation)}\u00b0`);
+  text('clip-opacity-out', pct(clip.opacity));
+
+  const fit = $('#clip-fit');
+  if (fit) fit.value = clip.fit;
+
+  // What the box means in pixels, which is the number that answers "why does this look small on a
+  // 4K frame" — a fraction of the frame is not a size until it is multiplied by one.
+  const size = clipFrameSize();
+  const px = boxRect(clip.box, size);
+  const media = mediaLibrary.size(clip.id);
+  text('clip-inspector-name', `${clip.kind === 'video' ? '\u25b6' : '\u25a2'} ${clip.name}`);
+  text(
+    'clip-inspector-where',
+    `${describeTransform(clip)} \u00b7 ${Math.round(px.width)}\u00d7${Math.round(px.height)} px` +
+      (media ? ` \u00b7 file ${media.width}\u00d7${media.height}` : ' \u00b7 file not loaded'),
+  );
+  const hint = $('#clip-inspector-hint');
+  if (hint) {
+    hint.textContent = mediaLibrary.has(clip.id)
+      ? 'Drag the clip on the preview to move it, the square handles to resize it, the round handle above it to turn it. Arrow keys nudge; shift inverts the shape lock for one drag.'
+      : `No file is loaded for "${clip.name}" \u2014 Relink it in the list above. Its window and its box are still editable, and nothing is drawn until the file is back.`;
+  }
+
+  // Enabled only while a clip is selected: a panel offering to edit nothing is worse than no panel.
+  for (const id of ['clip-x', 'clip-y', 'clip-w', 'clip-h', 'clip-rot', 'clip-opacity', 'clip-fit', 'clip-flip-x', 'clip-flip-y', 'clip-fit-frame', 'clip-fill-frame', 'clip-center', 'clip-reset']) {
+    const control = $(`#${id}`);
+    if (control) control.disabled = false;
+  }
+}
+
+/**
+ * Wire the transform panel, once.
+ *
+ * The sliders edit live (`input`) and log on release (`change`), so a drag on one is a single entry in the
+ * log rather than sixty. The buttons are whole commands and each is a call into `model/media.js`, the
+ * same one the preview's own gestures end at, so a panel edit and a drag cannot produce different
+ * documents.
+ */
+function wireClipInspector() {
+  const host = $('#clip-inspector');
+  if (!host) return;
+
+  /** Apply a panel edit to the box, holding the picture's shape when one slider moved. */
+  const boxEdit = (change, { driver = null, live = false } = {}) => {
+    const clip = selectedMediaClip();
+    if (!clip) return null;
+    let box = { ...clip.box, ...change };
+    if (clipShapeLocked() && driver) {
+      box = boxWithAspect(box, clipShapeAspect(clip), clipFrameSize(), { driver });
+    }
+    return editClip(clip.id, { box }, { live, what: driver ? 'resized' : 'moved' });
+  };
+
+  const bindRange = (id, apply) => {
+    const input = $(`#${id}`);
+    if (!input) return;
+    const read = () => Number(input.value);
+    input.addEventListener('input', () => {
+      apply(read(), { live: true });
+      // Every *other* control is refilled from the model — the height a shape lock derived from the width
+      // has to appear, or the panel would be describing a box that no longer exists. The slider under the
+      // hand is left alone, because moving a thumb while it is being dragged is the one thing a range
+      // control must never do.
+      renderClipInspector({ except: id });
+    });
+    input.addEventListener('change', () => apply(read(), { live: false }));
+  };
+
+  bindRange('clip-x', (value, opts) => boxEdit({ x: value }, opts));
+  bindRange('clip-y', (value, opts) => boxEdit({ y: value }, opts));
+  bindRange('clip-w', (value, opts) => boxEdit({ w: value }, { ...opts, driver: 'w' }));
+  bindRange('clip-h', (value, opts) => boxEdit({ h: value }, { ...opts, driver: 'h' }));
+  bindRange('clip-rot', (value, opts) => {
+    const clip = selectedMediaClip();
+    return clip ? editClip(clip.id, { rotation: value }, { live: opts.live, what: 'rotated' }) : null;
+  });
+  bindRange('clip-opacity', (value, opts) => {
+    const clip = selectedMediaClip();
+    return clip ? editClip(clip.id, { opacity: value }, { live: opts.live, what: 'made more/less opaque' }) : null;
+  });
+
+  const fit = $('#clip-fit');
+  fit?.addEventListener('change', () => {
+    const clip = selectedMediaClip();
+    if (clip) editClip(clip.id, { fit: fit.value }, { what: `fitting set to ${fit.value}` });
+  });
+
+  // A command is a whole edit with a name, so every button reads the same way and every one of them
+  // ends with a log line a person can check against what they saw happen.
+  const command = (id, what, run) => {
+    const button = $(`#${id}`);
+    if (!button) return;
+    button.addEventListener('click', () => {
+      const doc = preview?.document;
+      const clip = selectedMediaClip();
+      if (!doc || !clip) return;
+      if (run(doc, clip) === false) return;
+      // `syncMedia` republishes the clips to the renderer *and* refills this panel, which is the whole
+      // effect of a command — nothing else has to be asked for.
+      syncMedia();
+      log(`clip ${what}: "${clip.name}"`);
+    });
+  };
+
+  command('clip-flip-x', 'mirrored left to right', (doc, clip) => Boolean(flipMediaClip(doc, clip.id, 'x')));
+  command('clip-flip-y', 'mirrored top to bottom', (doc, clip) => Boolean(flipMediaClip(doc, clip.id, 'y')));
+  command('clip-fit-frame', 'fitted to the frame', (doc, clip) => Boolean(fitClipToFrame(doc, clip.id, { mode: 'contain' })));
+  command('clip-fill-frame', 'filled the frame', (doc, clip) => Boolean(fitClipToFrame(doc, clip.id, { mode: 'cover' })));
+  command('clip-center', 'centred', (doc, clip) => Boolean(centerClipBox(doc, clip.id)));
+  command('clip-reset', 'reset to how it arrived', (doc, clip) =>
+    Boolean(resetMediaClip(doc, clip.id, { media: mediaLibrary.size(clip.id), canvas: doc.canvas })),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// sources: the files the programme is built from
+// ---------------------------------------------------------------------------
 
 async function onAi(file) {
   if (!file) return;
@@ -2892,8 +3155,10 @@ function updateSelectionUI() {
   uiBusy = true;
   try {
     const doc = preview?.document;
-    // Auto-select the first block so the inspector is useful the moment a document appears.
-    if (doc?.blocks?.length && !findBlock(doc, selectedBlockId)) {
+    // Auto-select the first block so the inspector is useful the moment a document appears — but never
+    // while an overlay clip is selected. A clip selection is a whole object the user just picked, and
+    // auto-selecting a caption under it would take the selection back off the clip that was chosen.
+    if (doc?.blocks?.length && !selectedMediaClipId && !findBlock(doc, selectedBlockId)) {
       selectedBlockId = doc.blocks[0].id;
       overlay?.select(selectedBlockId);
     }
@@ -3511,11 +3776,31 @@ function createOverlay() {
     canvas: $('#preview-canvas'),
     overlay: $('#overlay-canvas'),
     preview,
+    // The clips to hit-test and draw handles for, the size of each clip's own file (for a shape-locked
+    // resize) and the panel's lock — all read live, because the overlay outlives any of them.
+    getClips: () => mediaClips(preview?.document),
+    clipSize: (id) => mediaLibrary.size(id),
+    keepAspect: () => clipShapeLocked(),
     onSelect: (id) => {
       selectedBlockId = id ?? null;
       updateSelectionUI();
     },
     onPlace: (blockId, anchor, info) => placeSelected(blockId, anchor, info),
+    // A selection made *in the preview*: the clip's own callbacks publish it, so the lane, the list and
+    // the transform panel all follow the click that made it. Nothing is re-entered here — `selectClip`
+    // on the overlay is only called by the other two ways in, so a click cannot loop back through it.
+    onClipSelect: (id) => {
+      selectedMediaClipId = id ?? null;
+      if (selectedMediaClipId) {
+        selectedClip = null;
+        timeline?.setSelectedClip(null);
+      }
+      timeline?.setSelectedMediaClip(selectedMediaClipId);
+      renderMediaList();
+      renderClipInspector();
+    },
+    onClipBox: (id, box, info) => onClipBox(id, box, info),
+    onClipRotate: (id, degrees, info) => onClipRotation(id, degrees, info),
   });
   return overlay;
 }
@@ -3535,6 +3820,7 @@ preview = createPreview({
 });
 
 createOverlay();
+wireClipInspector();
 
 timeline = createTimeline({
   container: $('#timeline'),

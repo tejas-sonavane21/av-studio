@@ -124,6 +124,11 @@ rules there are worth knowing because they are what "CapCut-like" actually means
   and the other visible captions. Guides are painted on an overlay canvas, never by the renderer.
 - **clamping slides the box, it never resizes it**, and an over-wide box is centred rather than
   pushed off one edge. A drag therefore cannot lose a caption off the frame.
+- **`Alt` places something freely.** Guides are what make the near-misses land, and they are also what
+  makes a deliberately off-centre position hard to hit, so holding `Alt` clears the targets for the
+  rest of that gesture — captions and overlay clips alike. The guide lines go with them (the overlay
+  draws from the same set), so the screen never promises a pull that will not happen, and letting go
+  puts them back mid-drag.
 
 Keyboard nudges are a fraction of the canvas (0.5 %, `Shift` = ×4), so a nudge means the same thing at
 every preview size and every display; arrow keys inside a text field are left alone.
@@ -394,6 +399,22 @@ separate from the caption blocks.
   are awaited before the export starts (a `drawImage` on bytes that have not arrived throws, and the
   layer's guard would then skip that clip on every frame), and a clip whose source file is missing is
   reported rather than silently absent.
+- **It is a box, and the preview is where you shape it.** A clip is not placed by an anchor the way a
+  caption is, so its gestures are the *box's*: drag the body to move it (with the same edge snapping,
+  and `Alt` to place it freely), any of the eight square handles to resize it, and the round handle on
+  a stem above the top edge to turn it. `Shift` inverts the shape lock for one drag — the lock is the
+  default and `Shift` is the exception — so one hand can do both without touching the panel. Everything
+  is solved in the clip's *own* frame (`render/media-placement.js`), which is what keeps a turned clip's
+  handles on its own corners and its opposite corner pinned while the dragged one follows the pointer.
+- **The panel and the handles are one model, two ways to ask.** X / Y / width / height / rotation /
+  opacity sliders, `contain` / `cover` / `stretch`, flips, and `Fit frame` / `Fill frame` / `Centre` /
+  `Reset` all write the same fields the drags do, and every readout is read back from the clip rather
+  than remembered — so the panel cannot disagree with the picture. The readout line names the box in
+  pixels as well as as a fraction of the frame, which is the number that actually matters when a 64×64
+  logo has to come out a predictable size in a 1920×1080 export. The box may run off the frame (a
+  picture half off the edge is a look), but the *file* is chosen per clip and its own proportions are
+  never guessed: a resize holds the media's ratio, and `contain` is the default so nothing is distorted
+  by accident.
 
 ## The audio-studio bridge
 

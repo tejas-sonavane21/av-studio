@@ -27,6 +27,7 @@ import {
   selectionRect,
 } from '../../src/editor/canvas-overlay.js';
 import { createFakeCanvas } from '../helpers/fake-canvas.js';
+import { normalizeClip } from '../../src/model/media.js';
 
 // ---------------------------------------------------------------------------
 // pure helpers
@@ -203,7 +204,23 @@ function fakePreview(layouts, blocks) {
  * Consistency matters — the overlay derives the selection outline from the anchor and the drag maths
  * from the layout, so an inconsistent fixture would hide a bug rather than expose one.
  */
-function setup({ place = { posX: 500 / 1280, posY: 550 / 720, gravity: 'center' } } = {}) {
+/**
+ * An overlay-clip fixture: a 640×360 box at (320,180) on the 1280×720 frame, with corners at
+ * (320,180) / (960,180) / (960,540) / (320,540) — round numbers, because every expected value in the
+ * clip tests below is read off this box by hand.
+ */
+export const CLIP_BOX = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
+export const CLIP_CENTRE = { x: 640, y: 360 };
+export const CLIP_SE = { x: 960, y: 540 };
+/** The round handle: 26 px above the top edge, which is the top edge's own midpoint minus the gap. */
+export const CLIP_GRIP = { x: 640, y: 180 - 26 };
+
+function setup({
+  place = { posX: 500 / 1280, posY: 550 / 720, gravity: 'center' },
+  clips = [],
+  media = { width: 400, height: 200 },
+  shapesLocked = true,
+} = {}) {
   const layouts = [{ blockId: 'b1', x: 400, y: 500, width: 200, height: 100 }];
   const blocks = [
     { id: 'b1', placement: place },
@@ -213,7 +230,7 @@ function setup({ place = { posX: 500 / 1280, posY: 550 / 720, gravity: 'center' 
   const canvas = createFakeCanvas(1280, 720);
   const canvasEl = fakeElement({ rect: { left: 100, top: 50, width: 1280, height: 720 }, clientWidth: 1280, clientHeight: 720 });
   const overlayEl = fakeElement({ rect: { left: 100, top: 50, width: 1280, height: 720 }, clientWidth: 1280, clientHeight: 720, ctx: canvas.getContext('2d') });
-  const calls = { select: [], place: [] };
+  const calls = { select: [], place: [], clipSelect: [], clipBox: [], clipRotate: [] };
   const win = fakeWindow();
   const previousWindow = globalThis.window;
   globalThis.window = win;
@@ -222,8 +239,14 @@ function setup({ place = { posX: 500 / 1280, posY: 550 / 720, gravity: 'center' 
     canvas: canvasEl,
     overlay: overlayEl,
     preview,
+    getClips: () => clips,
+    clipSize: () => media,
+    keepAspect: () => shapesLocked,
     onSelect: (id) => calls.select.push(id),
     onPlace: (id, anchor, info) => calls.place.push({ id, anchor, info }),
+    onClipSelect: (id) => calls.clipSelect.push(id),
+    onClipBox: (id, box, info) => calls.clipBox.push({ id, box, info }),
+    onClipRotate: (id, degrees, info) => calls.clipRotate.push({ id, degrees, info }),
   });
 
   return {
@@ -234,6 +257,9 @@ function setup({ place = { posX: 500 / 1280, posY: 550 / 720, gravity: 'center' 
     overlayEl,
     win,
     calls,
+    clips,
+    /** The clip as the overlay last published it, which is what the caller would have applied. */
+    lastBox: () => calls.clipBox.at(-1)?.box ?? null,
     /** logical canvas point → the client coordinates the overlay will see */
     at: (x, y) => ({ clientX: x + 100, clientY: y + 50 }),
     cleanup: () => {
@@ -241,6 +267,11 @@ function setup({ place = { posX: 500 / 1280, posY: 550 / 720, gravity: 'center' 
       globalThis.window = previousWindow;
     },
   };
+}
+
+/** The clip the fixtures below drag: the model's own canonical shape, so the overlay sees what main.js gives it. */
+function clipFixture(over = {}) {
+  return normalizeClip({ id: 'c1', kind: 'image', name: 'logo.png', start: 1, end: 5, box: CLIP_BOX, ...over });
 }
 
 test('the factory refuses to run without its elements', () => {
@@ -305,6 +336,31 @@ test('a drag that lines the box up with the canvas centre snaps exactly, and say
     assert.equal(live.info.guides.snappedY.edge, 'middle', 'vertically it is the box middle');
     assert.equal(live.info.guides.snappedX.label, 'centre');
     assert.equal(s.overlay.guides.snappedX.label, 'centre', 'and the overlay can draw it');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('and holding alt places the box where it was put: no guide moves it, and none is drawn', () => {
+  const s = setup();
+  try {
+    // The same drag as the test above, 3 px short of the centre on both axes — inside the tolerance, so
+    // with the targets in place it lands on the centre. Alt takes the targets away for the gesture.
+    s.overlayEl.emit('pointerdown', { ...s.at(450, 540), pointerId: 1, altKey: true, preventDefault() {} });
+    s.overlayEl.emit('pointermove', { ...s.at(587, 347), pointerId: 1, altKey: true, preventDefault() {} });
+    const [live] = s.calls.place;
+    assert.ok(Math.abs(live.anchor.posX - 637 / 1280) < 1e-12, `posX was ${live.anchor.posX}`);
+    assert.ok(Math.abs(live.anchor.posY - 357 / 720) < 1e-12, `posY was ${live.anchor.posY}`);
+    assert.equal(live.info.guides.snappedX ?? null, null, 'nothing was snapped');
+    assert.equal(s.overlay.guides.targets.x.length, 0, 'no targets, so the guide layer has nothing to draw');
+
+    // Letting go *mid-drag* puts the guides back, which is how a position gets finished by hand: nudge
+    // it close with the modifier, release, and the last few pixels snap.
+    s.overlayEl.emit('pointermove', { ...s.at(587, 347), pointerId: 1, preventDefault() {} });
+    assert.ok(s.overlay.guides.targets.x.length > 0, 'the full set is back the moment the key is released');
+    const [after] = s.calls.place.slice(-1);
+    assert.equal(after.anchor.posX, 0.5, 'and the same position now snaps onto the centre');
+    assert.equal(after.anchor.posY, 0.5);
   } finally {
     s.cleanup();
   }
@@ -429,5 +485,223 @@ test('dispose removes every listener and leaves no drag behind', () => {
     assert.equal(s.overlay.dragging, false);
   } finally {
     globalThis.window = undefined;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// overlay clips: the box, its handles, and the round handle above it
+// ---------------------------------------------------------------------------
+
+test('a press on a clip selects it and drags its box, committing on release', () => {
+  const s = setup({ clips: [clipFixture()] });
+  try {
+    // A press with no movement is a selection, and nothing is committed for it: a click is not an edit.
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    assert.deepEqual(s.calls.clipSelect, ['c1'], 'the press selected the clip in the preview');
+    assert.equal(s.overlay.selectedClipId, 'c1');
+    assert.equal(s.overlay.dragging, true);
+    assert.deepEqual(s.calls.clipBox, [], 'and asked for no edit yet');
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+    assert.deepEqual(s.calls.clipBox, [], 'a click is not a drag, so nothing was committed');
+
+    // Now drag it: 60 px right and 40 px down, on a 1280x720 frame.
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointermove', { ...s.at(700, 400), pointerId: 1, preventDefault() {} });
+    const live = s.calls.clipBox.at(-1);
+    assert.equal(live.info.live, true);
+    assert.equal(live.info.commit, false);
+    assert.ok(Math.abs(live.box.x - (0.25 + 60 / 1280)) < 1e-9, `x moved with the pointer: ${live.box.x}`);
+    assert.ok(Math.abs(live.box.y - (0.25 + 40 / 720)) < 1e-9, `y moved with the pointer: ${live.box.y}`);
+    assert.equal(live.box.w, 0.5, 'the size is untouched by a move');
+    assert.equal(live.box.h, 0.5);
+
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+    const committed = s.calls.clipBox.at(-1);
+    assert.equal(committed.info.commit, true, 'and the release is the commit');
+    assert.deepEqual(committed.box, live.box, 'with the box the drag ended on');
+    assert.equal(s.overlay.dragging, false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('and alt frees a clip drag the same way, guides and lines together', () => {
+  const s = setup({ clips: [clipFixture()] });
+  try {
+    // The clip's centre starts exactly on the frame's centre, so 3 px to the right is inside the
+    // tolerance and would snap straight back — unless the modifier says otherwise.
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, altKey: true, preventDefault() {} });
+    s.overlayEl.emit('pointermove', { ...s.at(643, 360), pointerId: 1, altKey: true, preventDefault() {} });
+    const [live] = s.calls.clipBox;
+    assert.ok(Math.abs(live.box.x - (0.25 + 3 / 1280)) < 1e-9, `the box went where it was put: ${live.box.x}`);
+    assert.equal(live.info.guides.snappedX ?? null, null, 'nothing was snapped');
+    assert.equal(s.overlay.guides.targets.x.length, 0, 'and the guide layer is drawing nothing');
+
+    s.overlayEl.emit('pointermove', { ...s.at(643, 360), pointerId: 1, preventDefault() {} });
+    assert.ok(s.overlay.guides.targets.x.length > 0, 'letting go puts the clip\u2019s targets back');
+    assert.ok(Math.abs(s.lastBox().x - 0.25) < 1e-12, `and it snaps onto the centre: ${s.lastBox().x}`);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a drag on a handle resizes the box and pins the corner opposite', () => {
+  // The shape lock is off for this one: with it on, the height is derived from the width, and that case
+  // has a test of its own below.
+  const s = setup({ clips: [clipFixture()], shapesLocked: false });
+  try {
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+
+    s.overlayEl.emit('pointerdown', { ...s.at(CLIP_SE.x, CLIP_SE.y), pointerId: 1, preventDefault() {} });
+    assert.equal(s.overlay.clipDragging.mode, 'resize');
+    assert.equal(s.overlay.clipDragging.handle, 'se');
+    s.overlayEl.emit('pointermove', { ...s.at(1000, 600), pointerId: 1, preventDefault() {} });
+    const resized = s.lastBox();
+    assert.ok(resized.w > 0.5, `the box grew: ${resized.w}`);
+    assert.ok(resized.h > 0.5, `the box grew: ${resized.h}`);
+    assert.equal(resized.x, 0.25, 'the top-left corner did not move');
+    assert.equal(resized.y, 0.25);
+    // 1000 px of the frame is 0.78125 of it, and the left edge is pinned at 0.25, so the width is the
+    // difference between the two.
+    assert.ok(Math.abs(resized.w - (1000 / 1280 - 0.25)) < 1e-9, `the right edge followed the pointer: ${resized.w}`);
+    assert.equal(s.calls.clipSelect.at(-1), 'c1', 'and the same clip is still the one being edited');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('the panel shape lock holds the picture ratio, and shift inverts it for one drag', () => {
+  const s = setup({ clips: [clipFixture()] });
+  try {
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+    // The side handle: 880 px wide asks for a 440 px height at the 400x200 file's 2:1 shape, which is
+    // more than the 360 px the box has, so a locked drag grows the height and a free one does not.
+    s.overlayEl.emit('pointerdown', { ...s.at(960, 360), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointermove', { ...s.at(1200, 360), pointerId: 1, preventDefault() {} });
+    const locked = s.lastBox();
+    assert.ok(Math.abs(locked.h - 440 / 720) < 1e-9, `the height was derived from the width: ${locked.h}`);
+    assert.ok(Math.abs(locked.y + locked.h / 2 - 0.5) < 1e-9, 'and it grew around the box own centre');
+
+    s.overlayEl.emit('pointermove', { ...s.at(1200, 360), pointerId: 1, shiftKey: true, preventDefault() {} });
+    const free = s.lastBox();
+    assert.equal(free.h, 0.5, 'shift frees the shape for this drag');
+    assert.equal(free.w, locked.w, 'and the edge the pointer set is the same either way');
+
+    // A locked *corner* drag grows the box out of the corner that was not touched, so the corner opposite
+    // the handle is the one that stays put — the same promise a free resize makes.
+    s.overlayEl.emit('pointerdown', { ...s.at(CLIP_SE.x, CLIP_SE.y), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointermove', { ...s.at(1000, 600), pointerId: 1, preventDefault() {} });
+    const corner = s.lastBox();
+    assert.equal(corner.x, 0.25, 'the top-left corner did not move');
+    assert.equal(corner.y, 0.25);
+    assert.ok(Math.abs((corner.w * 1280) / (corner.h * 720) - 2) < 1e-9, `and the file's 2:1 shape is held: ${corner.w}x${corner.h}`);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('the round handle turns the clip, and shift puts the angle on a step', () => {
+  const s = setup({ clips: [clipFixture()] });
+  try {
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+
+    s.overlayEl.emit('pointerdown', { ...s.at(CLIP_GRIP.x, CLIP_GRIP.y), pointerId: 1, preventDefault() {} });
+    assert.equal(s.overlay.clipDragging.mode, 'rotate', 'the grip above the top edge is the turn handle');
+    // 40 degrees round the centre from the grip's own position at the top: the grip starts at -90, so
+    // the clip ends up turned 130, which is 5 degrees off the 135 step and therefore out of reach.
+    const at40 = {
+      x: CLIP_CENTRE.x + 100 * Math.cos((40 * Math.PI) / 180),
+      y: CLIP_CENTRE.y + 100 * Math.sin((40 * Math.PI) / 180),
+    };
+    s.overlayEl.emit('pointermove', { ...s.at(at40.x, at40.y), pointerId: 1, preventDefault() {} });
+    assert.ok(
+      Math.abs(s.calls.clipRotate.at(-1).degrees - 130) < 1e-6,
+      `free rotation passed through: ${s.calls.clipRotate.at(-1).degrees}`,
+    );
+    assert.equal(s.calls.clipRotate.at(-1).info.snapped, null, 'and nothing was snapped');
+
+    s.overlayEl.emit('pointermove', { ...s.at(at40.x, at40.y), pointerId: 1, shiftKey: true, preventDefault() {} });
+    assert.equal(s.calls.clipRotate.at(-1).degrees, 135, 'shift takes the nearest 15 degrees');
+
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+    assert.equal(s.calls.clipRotate.at(-1).info.commit, true);
+    assert.equal(s.calls.clipBox.length, 0, 'a rotation is not a box edit');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('arrow keys nudge the selected clip, and a press on nothing clears it', () => {
+  const clip = clipFixture();
+  const s = setup({ clips: [clip] });
+  // What `main.js` does with a published box, so the second nudge starts from where the first one ended
+  // rather than from the fixture: an overlay that nudged from a stale box would double the step.
+  const applied = () => {
+    const box = s.lastBox();
+    if (box) clip.box = box;
+  };
+  try {
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+    s.win.emit('keydown', { key: 'ArrowRight', target: {}, preventDefault() {} });
+    const nudged = s.lastBox();
+    assert.ok(Math.abs(nudged.x - (0.25 + DEFAULT_NUDGE_STEP)) < 1e-9, `one step right: ${nudged.x}`);
+    assert.equal(nudged.w, 0.5, 'and a nudge is a move');
+    assert.equal(s.calls.clipBox.at(-1).info.keyboard, true);
+    applied();
+
+    s.win.emit('keydown', { key: 'ArrowRight', shiftKey: true, target: {}, preventDefault() {} });
+    assert.ok(
+      Math.abs(s.lastBox().x - (0.25 + DEFAULT_NUDGE_STEP * (NUDGE_MULTIPLIER + 1))) < 1e-9,
+      `shift nudges further: ${s.lastBox().x}`,
+    );
+    applied();
+
+    s.overlayEl.emit('pointerdown', { ...s.at(10, 10), pointerId: 1, preventDefault() {} });
+    assert.equal(s.overlay.selectedClipId, null, 'a press on empty frame selects nothing');
+    assert.equal(s.calls.clipSelect.at(-1), null, 'and says so');
+    const before = s.calls.clipBox.length;
+    s.win.emit('keydown', { key: 'ArrowRight', target: {}, preventDefault() {} });
+    assert.equal(s.calls.clipBox.length, before, 'with nothing selected, arrow keys edit nothing');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('the cursor says what a press would do over a handle, a clip or nothing', () => {
+  const s = setup({ clips: [clipFixture()] });
+  try {
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+    s.overlayEl.emit('pointermove', { ...s.at(CLIP_SE.x, CLIP_SE.y), pointerId: 1 });
+    assert.equal(s.overlayEl.style.cursor, 'nwse-resize');
+    s.overlayEl.emit('pointermove', { ...s.at(CLIP_GRIP.x, CLIP_GRIP.y), pointerId: 1 });
+    assert.equal(s.overlayEl.style.cursor, 'grab', 'the turn handle');
+    s.overlayEl.emit('pointermove', { ...s.at(640, 360), pointerId: 1 });
+    assert.equal(s.overlayEl.style.cursor, 'move', 'the body');
+    s.overlayEl.emit('pointermove', { ...s.at(10, 10), pointerId: 1 });
+    assert.equal(s.overlayEl.style.cursor, '', 'and nothing at all over the bare frame');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('selecting a caption and selecting a clip are exclusive, whichever way each is chosen', () => {
+  const s = setup({ clips: [clipFixture()] });
+  try {
+    s.overlayEl.emit('pointerdown', { ...s.at(450, 540), pointerId: 1, preventDefault() {} });
+    assert.equal(s.overlay.selectedId, 'b1');
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    assert.equal(s.overlay.selectedId, null, 'a clip press released the caption');
+    assert.deepEqual(s.calls.select.at(-1), null);
+
+    s.overlay.select('b1');
+    assert.equal(s.overlay.selectedClipId, null, 'and selecting a caption releases the clip');
+    assert.equal(s.calls.clipSelect.at(-1), null);
+  } finally {
+    s.cleanup();
   }
 });
