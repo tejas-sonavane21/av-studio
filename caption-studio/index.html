@@ -385,6 +385,19 @@
                 <button class="ghost" id="clip-fill-frame" type="button" disabled title="Fill the frame with the picture, cropping what hangs over">Fill frame</button>
                 <button class="ghost" id="clip-center" type="button" disabled title="Centre the box on the frame">Centre</button>
                 <button class="ghost" id="clip-reset" type="button" disabled title="Back to how it arrived: its own shape, centred, upright, opaque">Reset</button>
+                <button class="ghost" id="clip-duplicate" type="button" disabled title="Copy this clip: the same window, the same box, on its own layer above">Duplicate</button>
+                <!--
+                  The stack. Two clips that overlap in time also overlap on the frame, and which one is on
+                  top is a decision rather than a consequence of when either of them starts — so it gets
+                  its own four buttons instead of being implied by the clip list's order.
+                -->
+                <span class="clip-layer-group" title="Which clip is drawn on top where two overlap">
+                  <span class="clip-layer-label">Layer</span>
+                  <button class="ghost" id="clip-back" type="button" disabled title="Send this clip to the bottom of the stack">&#10515;</button>
+                  <button class="ghost" id="clip-backward" type="button" disabled title="Send this clip one layer back">&#8595;</button>
+                  <button class="ghost" id="clip-forward" type="button" disabled title="Bring this clip one layer forward">&#8593;</button>
+                  <button class="ghost" id="clip-front" type="button" disabled title="Bring this clip to the top of the stack">&#10514;</button>
+                </span>
               </div>
               <div class="hint" id="clip-inspector-hint">
                 Drag the clip on the preview to move it, its square handles to resize and the round one

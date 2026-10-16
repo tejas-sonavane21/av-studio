@@ -66,12 +66,15 @@ import {
   clipLength,
   clipPixelAspect,
   describeClip,
+  duplicateClip,
   fitClipToFrame,
   flipMediaClip,
+  layerPosition,
   mediaClips,
   moveMediaClip,
   planClip,
   removeMediaClip,
+  reorderClip,
   resetMediaClip,
   rotateMediaClip,
   setClipBox,
@@ -1131,10 +1134,22 @@ function mediaRow(clip) {
     relink.append(input);
     actions.append(el('span', 'clip-offline', 'offline'), relink);
   }
+  // Duplicate sits next to remove because they are the two things a row can do to the clip itself, and
+  // copying is the one people reach for when a badge has to go in two corners.
+  const copy = el('button', 'clip-dup', '\u29c9');
+  copy.title = `Duplicate "${clip.name}" on the same window`;
+  copy.addEventListener('click', () => {
+    const doc = preview?.document;
+    if (doc && duplicateSelectedClip(doc, clip)) {
+      syncMedia();
+      log(`clip duplicated: "${clip.name}"`);
+    }
+  });
+
   const remove = el('button', 'clip-remove', '\u00d7');
   remove.title = 'Remove this clip from the programme';
   remove.addEventListener('click', () => removeClip(clip.id));
-  actions.append(remove);
+  actions.append(copy, remove);
 
   row.append(name, where, actions);
   return row;
@@ -1213,6 +1228,22 @@ function editClip(id, patch, { live = false, what = 'adjusted' } = {}) {
   return next;
 }
 
+/**
+ * Copy the selected clip: same window, same box, its own layer on top, and its own slot in the library.
+ *
+ * The *file* is shared rather than copied (`mediaLibrary.copy`), because a duplicated clip is a second
+ * use of one picture: re-reading the bytes would re-decode a video the user already has open, and the two
+ * clips would then decode the same file twice in the preview and twice in the export. The copy is left
+ * selected, because a copy you cannot immediately see selected is a button that appears to do nothing.
+ */
+function duplicateSelectedClip(doc, clip) {
+  const copy = duplicateClip(doc, clip.id);
+  if (!copy) return false;
+  mediaLibrary.copy(clip.id, copy.id);
+  selectMediaClip(copy.id);
+  return true;
+}
+
 /** A drag on a clip in the preview: its body (move) or one of its handles (resize). */
 function onClipBox(id, box, info = {}) {
   return editClip(id, { box }, {
@@ -1263,6 +1294,7 @@ function clipFrameSize() {
 function renderClipInspector({ except = null } = {}) {
   const host = $('#clip-inspector');
   if (!host) return;
+  const doc = preview?.document;
   const clip = selectedMediaClip();
   host.hidden = !clip;
   if (!clip) return;
@@ -1299,21 +1331,39 @@ function renderClipInspector({ except = null } = {}) {
   const size = clipFrameSize();
   const px = boxRect(clip.box, size);
   const media = mediaLibrary.size(clip.id);
+  // Where the clip sits in the stack, which is the one number the picture itself cannot show: two clips
+  // that overlap in time also overlap on the frame, and only the panel can say which one is winning.
+  const layer = layerPosition(doc, clip.id);
   text('clip-inspector-name', `${clip.kind === 'video' ? '\u25b6' : '\u25a2'} ${clip.name}`);
   text(
     'clip-inspector-where',
     `${describeTransform(clip)} \u00b7 ${Math.round(px.width)}\u00d7${Math.round(px.height)} px` +
-      (media ? ` \u00b7 file ${media.width}\u00d7${media.height}` : ' \u00b7 file not loaded'),
+      (media ? ` \u00b7 file ${media.width}\u00d7${media.height}` : ' \u00b7 file not loaded') +
+      // Which layer, of how many. The number is what answers "why is the badge behind the banner" —
+      // the panel is the only place that can say it, because the picture just shows the result.
+      (layer.count > 1 ? ` \u00b7 layer ${layer.index}/${layer.count}` : ''),
   );
   const hint = $('#clip-inspector-hint');
   if (hint) {
     hint.textContent = mediaLibrary.has(clip.id)
-      ? 'Drag the clip on the preview to move it, the square handles to resize it, the round handle above it to turn it. Arrow keys nudge; shift inverts the shape lock for one drag.'
+      ? 'Drag the clip on the preview to move it, the square handles to resize it, the round handle above it to turn it, and Alt to drag with no guides. Arrow keys nudge; shift inverts the shape lock for one drag.'
       : `No file is loaded for "${clip.name}" \u2014 Relink it in the list above. Its window and its box are still editable, and nothing is drawn until the file is back.`;
+  }
+  // The stack buttons are only meaningful with something to stack: a single clip has nowhere to go, and
+  // a button that can never do anything is a button that teaches people the panel lies.
+  const stackable = layer.count > 1;
+  for (const [id, usable] of [
+    ['clip-front', stackable && layer.index < layer.count],
+    ['clip-forward', stackable && layer.index < layer.count],
+    ['clip-backward', stackable && layer.index > 1],
+    ['clip-back', stackable && layer.index > 1],
+  ]) {
+    const button = $(`#${id}`);
+    if (button) button.classList.toggle('muted', !usable);
   }
 
   // Enabled only while a clip is selected: a panel offering to edit nothing is worse than no panel.
-  for (const id of ['clip-x', 'clip-y', 'clip-w', 'clip-h', 'clip-rot', 'clip-opacity', 'clip-fit', 'clip-flip-x', 'clip-flip-y', 'clip-fit-frame', 'clip-fill-frame', 'clip-center', 'clip-reset']) {
+  for (const id of ['clip-x', 'clip-y', 'clip-w', 'clip-h', 'clip-rot', 'clip-opacity', 'clip-fit', 'clip-flip-x', 'clip-flip-y', 'clip-fit-frame', 'clip-fill-frame', 'clip-center', 'clip-reset', 'clip-duplicate', 'clip-front', 'clip-forward', 'clip-backward', 'clip-back']) {
     const control = $(`#${id}`);
     if (control) control.disabled = false;
   }
@@ -1393,6 +1443,11 @@ function wireClipInspector() {
     });
   };
 
+  command('clip-front', 'brought to the front', (doc, clip) => Boolean(reorderClip(doc, clip.id, 'front')));
+  command('clip-forward', 'brought one layer forward', (doc, clip) => Boolean(reorderClip(doc, clip.id, 'up')));
+  command('clip-backward', 'sent one layer back', (doc, clip) => Boolean(reorderClip(doc, clip.id, 'down')));
+  command('clip-back', 'sent to the back', (doc, clip) => Boolean(reorderClip(doc, clip.id, 'back')));
+  command('clip-duplicate', 'duplicated', (doc, clip) => duplicateSelectedClip(doc, clip));
   command('clip-flip-x', 'mirrored left to right', (doc, clip) => Boolean(flipMediaClip(doc, clip.id, 'x')));
   command('clip-flip-y', 'mirrored top to bottom', (doc, clip) => Boolean(flipMediaClip(doc, clip.id, 'y')));
   command('clip-fit-frame', 'fitted to the frame', (doc, clip) => Boolean(fitClipToFrame(doc, clip.id, { mode: 'contain' })));
