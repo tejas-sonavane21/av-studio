@@ -214,9 +214,12 @@ export function describeAnchor(anchor) {
  * Build the guide lines a drag can snap to.
  *
  * Sources, in the order they are added (earlier wins a tie, since later duplicates are dropped):
- * canvas centre and thirds, the safe-area edges, the canvas edges, then the other visible blocks'
- * box edges. Including the sibling blocks is what makes a second caption line up with the first
- * without the user measuring anything.
+ * canvas centre and thirds, the safe-area edges, the canvas edges, then the other visible boxes'
+ * edges. Including the sibling boxes is what makes a second caption line up with the first without the
+ * user measuring anything — and the boxes are not only captions: an overlay clip's rect is handed over as
+ * a layout too (`editor/canvas-overlay.js`), with `kind: 'clip'`, so a logo can be lined up on a banner's
+ * edge. `kind` is only a label: what a target *is* never changes how snapping works, it changes what the
+ * guide line says about itself.
  *
  * @param {{ canvas: {width:number,height:number}, layouts?: Array, safeAreas?: boolean, thirds?: boolean, excludeBlockId?: string|null }} options
  */
@@ -261,16 +264,17 @@ export function buildSnapTargets({
 
   for (const layout of layouts) {
     if (!layout || layout.blockId === excludeBlockId) continue;
+    const kind = layout.kind === 'clip' ? 'clip' : 'block';
     const l = layout.x ?? 0;
     const r = l + (layout.width ?? 0);
-    add(x, l, 'block', 'block left');
-    add(x, (l + r) / 2, 'block', 'block centre');
-    add(x, r, 'block', 'block right');
+    add(x, l, kind, `${kind} left`);
+    add(x, (l + r) / 2, kind, `${kind} centre`);
+    add(x, r, kind, `${kind} right`);
     const t = layout.y ?? 0;
     const b = t + (layout.height ?? 0);
-    add(y, t, 'block', 'block top');
-    add(y, (t + b) / 2, 'block', 'block middle');
-    add(y, b, 'block', 'block bottom');
+    add(y, t, kind, `${kind} top`);
+    add(y, (t + b) / 2, kind, `${kind} middle`);
+    add(y, b, kind, `${kind} bottom`);
   }
 
   return { x, y };

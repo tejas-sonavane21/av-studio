@@ -1062,6 +1062,10 @@ async function main() {
       });
       const tick = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       const centre = (b) => ({ x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 });
+      // A distance in *logical* pixels as a distance in CSS pixels, which is what a pointer event carries.
+      // The two are the same on this page (the harness runs at DPR 1) but a drag written in the wrong unit
+      // is a drag that would silently be wrong anywhere else.
+      const px = (logical) => logical / perCss();
 
       const opened = {
         visible: !document.querySelector('#clip-inspector').hidden,
@@ -1082,24 +1086,36 @@ async function main() {
       const moved = painted();
       const movedPanel = panel();
 
+      // ---- a drag with the guides on: a near miss lands on the line ---------------------------
+      // Aimed a hair inside the top-left corner of the frame, which is a target no caption can be near, so
+      // the corner is the only thing that can account for where the box ends up. (The move above is the
+      // other half of this: held Alt, the same drag lands wherever it was put.)
+      // Taken by the middle of the clip, not by its corner: a corner is a *resize* handle, and the point of
+      // this drag is that a move is pulled onto a guide.
+      const grab2 = client(centre(moved).x, centre(moved).y);
+      const aim = client(4 + moved.width / 2, 4 + moved.height / 2);
+      gesture(grab2, aim);
+      await tick();
+      const snapped = painted();
+      const snappedPanel = panel();
       // ---- resize: the corner that has frame to grow into -------------------------------------
       // The model keeps a box inside the frame and the frame's edge wins over a handle, so the corner
       // diagonally opposite the one dragged only stays put when the drag has somewhere to go. Take the
       // corner with room in *both* axes and grow by a step that fits: a clip parked against an edge would
       // otherwise be measuring the clamp rather than the pin.
       const room = {
-        se: { x: media.width - 1 - moved.x1, y: media.height - 1 - moved.y1 },
-        nw: { x: moved.x0, y: moved.y0 },
+        se: { x: media.width - 1 - snapped.x1, y: media.height - 1 - snapped.y1 },
+        nw: { x: snapped.x0, y: snapped.y0 },
       };
       const grow = 80;
       const fits = (r) => r.x >= grow + 16 && r.y >= grow + 16;
       const corner = fits(room.se) ? 'se' : fits(room.nw) ? 'nw' : null;
       if (!corner) return { error: 'no corner had ' + grow + 'px of room to grow into: ' + JSON.stringify(room) };
       const sign = corner === 'se' ? 1 : -1;
-      const grip = corner === 'se' ? client(moved.x1 - 1, moved.y1 - 1) : client(moved.x0 + 1, moved.y0 + 1);
+      const grip = corner === 'se' ? client(snapped.x1 - 1, snapped.y1 - 1) : client(snapped.x0 + 1, snapped.y0 + 1);
       // Dragged mostly along one axis: the shape lock makes the other edge follow the bigger of the two
       // pushes, so the box grows by the same step on both edges and stays inside the room measured above.
-      gesture(grip, { x: grip.x + sign * grow * perCss(), y: grip.y + sign * grow * 0.7 * perCss() });
+      gesture(grip, { x: grip.x + sign * px(grow), y: grip.y + sign * px(grow * 0.7) });
       await tick();
       const resized = painted();
       const resizedPanel = panel();
@@ -1108,7 +1124,7 @@ async function main() {
       // A third of a turn, then a little more, so the angle is nowhere near a step and a *turned square*
       // is a visibly wider box than an upright one.
       const stem = client(centre(resized).x, resized.y0 - 26 * perCss());
-      const spin = client(centre(resized).x + 120 * perCss(), centre(resized).y + 60 * perCss());
+      const spin = client(centre(resized).x + px(120), centre(resized).y + px(60));
       gesture(stem, spin);
       await tick();
       const rotated = painted();
@@ -1125,6 +1141,7 @@ async function main() {
       return {
         opened: opened,
         moved: { box: moved, panel: movedPanel },
+        snapped: { box: snapped, panel: snappedPanel },
         resized: { box: resized, panel: resizedPanel },
         rotated: { box: rotated, panel: rotatedPanel },
         nudged: { box: nudged, panel: nudgedPanel },
@@ -1139,7 +1156,7 @@ async function main() {
   if (gestures?.error) {
     assert('the clip can be grabbed on the preview', false, gestures.error);
   } else {
-    const { opened, moved, resized, rotated, nudged } = gestures;
+    const { opened, moved, snapped, resized, rotated, nudged } = gestures;
     // The panel names the clip the row names: one selection, shown in both places, and compared against
     // the row itself rather than against a file name this harness would have to keep in step.
     const rowName = String(opened.row).replace(/^[^\w]*\s*/, '');
@@ -1173,17 +1190,31 @@ async function main() {
       `the panel still read ${moved.panel.x} / ${moved.panel.y}`,
     );
 
+    // Guides on: 4 logical px inside the frame's top-left corner, which is inside the snap tolerance, so
+    // the box is pulled the rest of the way onto the corner. The Alt drag above is the other half of this
+    // pair: same gesture, no guides, wherever the pointer left it.
+    assert(
+      'a drag that ends near the frame\u2019s corner snaps onto it, rather than 4 px short',
+      snapped.box.x0 <= 1 && snapped.box.y0 <= 1,
+      `the box\u2019s top-left landed at (${snapped.box.x0},${snapped.box.y0}) of the ${gestures.frame.width}\u00d7${gestures.frame.height} frame`,
+    );
+    assert(
+      'and the panel\u2019s numbers moved with the snap',
+      snapped.panel.x !== moved.panel.x || snapped.panel.y !== moved.panel.y,
+      `the panel still read ${snapped.panel.x} / ${snapped.panel.y}`,
+    );
+
     // A corner handle: the box grows in both directions, and the corner *opposite* the one dragged
     // stays exactly where it was. Which corner that is depends on which one had room, so the pinned
     // corner is read off the gesture rather than assumed.
     const dragged = gestures.corner === 'se' ? 'bottom-right' : 'top-left';
     const pinned = gestures.corner === 'se' ? 'top-left' : 'bottom-right';
-    const before = gestures.corner === 'se' ? [moved.box.x0, moved.box.y0] : [moved.box.x1, moved.box.y1];
+    const before = gestures.corner === 'se' ? [snapped.box.x0, snapped.box.y0] : [snapped.box.x1, snapped.box.y1];
     const after = gestures.corner === 'se' ? [resized.box.x0, resized.box.y0] : [resized.box.x1, resized.box.y1];
     assert(
       `dragging the ${dragged} handle grows the clip in both directions`,
-      resized.box.width > moved.box.width + 20 && resized.box.height > moved.box.height + 20,
-      `the box was ${moved.box.width}\u00d7${moved.box.height} and is ${resized.box.width}\u00d7${resized.box.height}`,
+      resized.box.width > snapped.box.width + 20 && resized.box.height > snapped.box.height + 20,
+      `the box was ${snapped.box.width}\u00d7${snapped.box.height} and is ${resized.box.width}\u00d7${resized.box.height}`,
     );
     assert(
       `and the ${pinned} corner, opposite the handle, did not move`,
@@ -1192,7 +1223,7 @@ async function main() {
     );
     assert(
       'and the panel\u2019s width and height readouts followed the handle',
-      resized.panel.w !== moved.panel.w || resized.panel.h !== moved.panel.h,
+      resized.panel.w !== snapped.panel.w || resized.panel.h !== snapped.panel.h,
       `the panel still read ${resized.panel.w}\u00d7${resized.panel.h}`,
     );
 
@@ -1211,12 +1242,15 @@ async function main() {
     );
 
     // Arrow keys: a nudge is a move, and it goes through the same panel.
-    // Four steps of 0.005 of the frame is 2% of it, measured on the layer the clip is painted on.
-    const nudgedDx = (nudged.box.x0 + nudged.box.x1) / 2 - (rotated.box.x0 + rotated.box.x1) / 2;
+    // Four steps of 0.005 of the frame is 2% of it. The *right* edge is the one to measure: the clip was
+    // snapped onto the frame's top-left corner, and a turned clip's bounding box hangs off that corner, so
+    // its left edge is clipped by the canvas and moves less than the clip does.
+    const nudgedDx = nudged.box.x1 - rotated.box.x1;
+    const panelDx = Number(String(nudged.panel.x).replace('%', '')) - Number(String(rotated.panel.x).replace('%', ''));
     assert(
       'arrow keys nudge the selected clip, one step at a time',
-      Math.abs(nudgedDx - 4 * 0.005 * gestures.frame.width) <= 3,
-      `the picture moved ${nudgedDx.toFixed(1)} of the ${(4 * 0.005 * gestures.frame.width).toFixed(1)} px four steps ask for`,
+      Math.abs(nudgedDx - 4 * 0.005 * gestures.frame.width) <= 3 && Math.abs(panelDx - 2) <= 0.5,
+      `the picture moved ${nudgedDx.toFixed(1)} of the ${(4 * 0.005 * gestures.frame.width).toFixed(1)} px four steps ask for, and the panel moved ${panelDx}%`,
     );
     assert(
       'and the panel\u2019s numbers followed the nudge',

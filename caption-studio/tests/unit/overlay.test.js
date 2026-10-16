@@ -705,3 +705,59 @@ test('selecting a caption and selecting a clip are exclusive, whichever way each
     s.cleanup();
   }
 });
+
+// --------------------------------------------------------------------------- //
+// what a clip drag can line up with
+// --------------------------------------------------------------------------- //
+
+test('a clip drag snaps to the edges of the other clips, and says which', () => {
+  // c2 is a quarter-size box at the top left: on a 1280x720 frame that is (64,36)-(384,216), so its right
+  // edge is 384 and its bottom edge 216 — the two values the drag below stops just short of.
+  const s = setup({
+    clips: [clipFixture({ id: 'c1' }), clipFixture({ id: 'c2', box: { x: 0.05, y: 0.05, w: 0.25, h: 0.25 } })],
+  });
+  try {
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    // Grab c1's middle and put its top-left corner at (387, 213): 3 px past c2's edges, inside the
+    // tolerance, which is exactly the near-miss guides exist for.
+    s.overlayEl.emit('pointermove', { ...s.at(640 + 67, 360 + 33), pointerId: 1, preventDefault() {} });
+    const live = s.calls.clipBox.at(-1);
+    assert.ok(Math.abs(live.box.x - 384 / 1280) < 1e-9, `the left edge landed on c2's right edge: ${live.box.x}`);
+    assert.ok(Math.abs(live.box.y - 216 / 720) < 1e-9, `the top edge landed on c2's bottom edge: ${live.box.y}`);
+    assert.equal(live.box.w, 0.5, 'and the size is untouched, as ever');
+    assert.equal(live.info.guides.snappedX.kind, 'clip', 'the guide knows it came from a clip');
+    assert.equal(live.info.guides.snappedX.label, 'clip right');
+    assert.equal(live.info.guides.snappedY.label, 'clip bottom');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('and a clip is not offered its own edges, so it cannot snap to itself', () => {
+  const s = setup({ clips: [clipFixture()] });
+  try {
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointermove', { ...s.at(640 + 67, 360 + 33), pointerId: 1, preventDefault() {} });
+    const live = s.calls.clipBox.at(-1);
+    assert.ok(Math.abs(live.box.x - 387 / 1280) < 1e-9, `it stayed where it was put: ${live.box.x}`);
+    assert.equal(live.info.guides.snappedX, null, 'no guide was lit by its own box');
+    assert.equal(live.info.guides.snappedY, null);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a caption drag keeps the caption targets, and is not offered the clips', () => {
+  // The clip is under the caption: if clip boxes were handed to a caption drag, this drag would snap to
+  // the clip's edge and the caption editor would have changed without anyone deciding to.
+  const s = setup({ clips: [clipFixture({ id: 'c1', box: { x: 0.3, y: 0.6, w: 0.25, h: 0.25 } })] });
+  try {
+    s.overlayEl.emit('pointerdown', { ...s.at(450, 540), pointerId: 1, preventDefault() {} });
+    const x = s.overlay.guides.targets.x.map((t) => Math.round(t.value));
+    // The clip is 384..704 px wide, and neither edge is a canvas, third, safe-area or caption target.
+    assert.ok(!x.includes(384) && !x.includes(704), `no clip edges are in the list: ${x.join(', ')}`);
+    assert.ok(x.includes(640), 'and the canvas centre still is');
+  } finally {
+    s.cleanup();
+  }
+});

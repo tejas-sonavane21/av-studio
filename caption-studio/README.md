@@ -406,6 +406,13 @@ separate from the caption blocks.
   records no layer at all, and draws in list order exactly as it did then. `Duplicate` makes a clip of
   its own — same window, same box, own layer — from the *same* file: the bytes are shared in
   `editor/media-library.js`, so a copied logo does not decode twice in the preview or in the export.
+- **A clip lines up with the frame and with the other clips.** Its drag reads the same guide layer the
+  captions do — centre, thirds, safe areas, the frame's edges, the other visible captions *and* the other
+  clips' box edges — and the dragged clip is left out of its own target list, because its own edges would
+  snap at distance zero and light a guide line for a snap that moved nothing. `Alt` still clears the whole
+  set for a gesture. A *caption* drag is deliberately not offered the clips: a caption is placed by an
+  anchor and a clip by a box, and quietly changing where captions snap inside a change to the clip editor
+  is exactly the kind of thing that turns into a mystery later.
 - **It is a box, and the preview is where you shape it.** A clip is not placed by an anchor the way a
   caption is, so its gestures are the *box's*: drag the body to move it (with the same edge snapping,
   and `Alt` to place it freely), any of the eight square handles to resize it, and the round handle on
