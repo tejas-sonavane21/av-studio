@@ -60,9 +60,11 @@ import { createCanvasOverlay } from './editor/canvas-overlay.js';
 import { createMediaLibrary } from './editor/media-library.js';
 import { createTimeline } from './editor/timeline.js';
 import {
+  MIN_CROP,
   addMediaClip,
   boxRect,
   centerClipBox,
+  clipContentAspect,
   clipLength,
   clipPixelAspect,
   describeClip,
@@ -73,8 +75,10 @@ import {
   mediaClips,
   moveMediaClip,
   planClip,
+  normalizeCrop,
   removeMediaClip,
   reorderClip,
+  resetClipCrop,
   resetMediaClip,
   rotateMediaClip,
   setClipBox,
@@ -1188,9 +1192,17 @@ function renderMediaList() {
  */
 function clipShapeAspect(clip) {
   const media = mediaLibrary.size(clip?.id);
-  if (media && media.width > 0 && media.height > 0) return media.width / media.height;
+  // The shape of what the clip *shows*, crop included: cropping a logo to a strip and then resizing it
+  // must hold the strip's shape, not the file's.
+  const content = media ? clipContentAspect(clip, media) : 0;
+  if (content > 0) return content;
   const size = preview?.renderer?.size ?? null;
   return size ? clipPixelAspect(clip, size) : 0;
+}
+
+/** Whether the panel is in crop mode — read live, like every other mode. */
+function clipCropMode() {
+  return Boolean($('#clip-crop-toggle')?.checked);
 }
 
 /**
@@ -1250,6 +1262,20 @@ function onClipBox(id, box, info = {}) {
     live: Boolean(info.live),
     commit: Boolean(info.commit),
     what: info.resize ? 'resized' : 'moved',
+  });
+}
+
+/**
+ * A drag on a crop handle: which part of the clip's own file is shown.
+ *
+ * The box is untouched, which is the whole difference between cropping and resizing — and the crop is
+ * applied to the *file*, so the same crop means the same thing after a move, a resize or a rotation.
+ */
+function onClipCrop(id, crop, info = {}) {
+  return editClip(id, { crop }, {
+    live: Boolean(info.live),
+    commit: Boolean(info.commit),
+    what: 'cropped',
   });
 }
 
@@ -1333,6 +1359,18 @@ function renderClipInspector({ except = null } = {}) {
   const media = mediaLibrary.size(clip.id);
   // Where the clip sits in the stack, which is the one number the picture itself cannot show: two clips
   // that overlap in time also overlap on the frame, and only the panel can say which one is winning.
+  // The crop, as the four *insets* the panel edits: left/right/top/bottom, which is how a person describes
+  // a cut ("a bit off the left") where the stored rectangle describes what is left.
+  const crop = normalizeCrop(clip.crop);
+  set('clip-crop-left', crop.x);
+  set('clip-crop-top', crop.y);
+  set('clip-crop-right', 1 - crop.x - crop.w);
+  set('clip-crop-bottom', 1 - crop.y - crop.h);
+  text('clip-crop-left-out', pct(crop.x));
+  text('clip-crop-top-out', pct(crop.y));
+  text('clip-crop-right-out', pct(1 - crop.x - crop.w));
+  text('clip-crop-bottom-out', pct(1 - crop.y - crop.h));
+
   const layer = layerPosition(doc, clip.id);
   text('clip-inspector-name', `${clip.kind === 'video' ? '\u25b6' : '\u25a2'} ${clip.name}`);
   text(
@@ -1363,7 +1401,7 @@ function renderClipInspector({ except = null } = {}) {
   }
 
   // Enabled only while a clip is selected: a panel offering to edit nothing is worse than no panel.
-  for (const id of ['clip-x', 'clip-y', 'clip-w', 'clip-h', 'clip-rot', 'clip-opacity', 'clip-fit', 'clip-flip-x', 'clip-flip-y', 'clip-fit-frame', 'clip-fill-frame', 'clip-center', 'clip-reset', 'clip-duplicate', 'clip-front', 'clip-forward', 'clip-backward', 'clip-back']) {
+  for (const id of ['clip-x', 'clip-y', 'clip-w', 'clip-h', 'clip-rot', 'clip-opacity', 'clip-fit', 'clip-flip-x', 'clip-flip-y', 'clip-fit-frame', 'clip-fill-frame', 'clip-center', 'clip-reset', 'clip-duplicate', 'clip-front', 'clip-forward', 'clip-backward', 'clip-back', 'clip-crop-toggle', 'clip-crop-left', 'clip-crop-top', 'clip-crop-right', 'clip-crop-bottom', 'clip-crop-reset']) {
     const control = $(`#${id}`);
     if (control) control.disabled = false;
   }
@@ -1442,6 +1480,31 @@ function wireClipInspector() {
       log(`clip ${what}: "${clip.name}"`);
     });
   };
+
+  /**
+   * A crop edit keeps the edge opposite the one being moved: a slider says how much to cut off *one* side,
+   * so the other three stay where the user put them. The floor is the model's own `MIN_CROP`, so a slider
+   * cannot ask for a crop the model would refuse.
+   */
+  const cropEdit = (patch, opts = {}) => {
+    const clip = selectedMediaClip();
+    if (!clip) return null;
+    return editClip(clip.id, { crop: normalizeCrop({ ...clip.crop, ...patch }) }, { live: opts.live, what: 'cropped' });
+  };
+  const cropFrom = (side, value, opts) => {
+    const clip = selectedMediaClip();
+    if (!clip) return null;
+    const c = normalizeCrop(clip.crop);
+    if (side === 'left') return cropEdit({ x: value, w: Math.max(MIN_CROP, c.x + c.w - value) }, opts);
+    if (side === 'top') return cropEdit({ y: value, h: Math.max(MIN_CROP, c.y + c.h - value) }, opts);
+    if (side === 'right') return cropEdit({ w: Math.max(MIN_CROP, 1 - value - c.x) }, opts);
+    return cropEdit({ h: Math.max(MIN_CROP, 1 - value - c.y) }, opts);
+  };
+  bindRange('clip-crop-left', (value, opts) => cropFrom('left', value, opts));
+  bindRange('clip-crop-top', (value, opts) => cropFrom('top', value, opts));
+  bindRange('clip-crop-right', (value, opts) => cropFrom('right', value, opts));
+  bindRange('clip-crop-bottom', (value, opts) => cropFrom('bottom', value, opts));
+  command('clip-crop-reset', 'crop reset to the whole file', (doc, clip) => Boolean(resetClipCrop(doc, clip.id)));
 
   command('clip-front', 'brought to the front', (doc, clip) => Boolean(reorderClip(doc, clip.id, 'front')));
   command('clip-forward', 'brought one layer forward', (doc, clip) => Boolean(reorderClip(doc, clip.id, 'up')));
@@ -3832,10 +3895,12 @@ function createOverlay() {
     overlay: $('#overlay-canvas'),
     preview,
     // The clips to hit-test and draw handles for, the size of each clip's own file (for a shape-locked
-    // resize) and the panel's lock — all read live, because the overlay outlives any of them.
+    // resize), the panel's shape lock and its crop mode — all read live, because the overlay outlives any
+    // of them, and a mode read once at construction would be a mode that stops working after a reload.
     getClips: () => mediaClips(preview?.document),
     clipSize: (id) => mediaLibrary.size(id),
     keepAspect: () => clipShapeLocked(),
+    cropMode: () => clipCropMode(),
     onSelect: (id) => {
       selectedBlockId = id ?? null;
       updateSelectionUI();
@@ -3856,6 +3921,7 @@ function createOverlay() {
     },
     onClipBox: (id, box, info) => onClipBox(id, box, info),
     onClipRotate: (id, degrees, info) => onClipRotation(id, degrees, info),
+    onClipCrop: (id, crop, info) => onClipCrop(id, crop, info),
   });
   return overlay;
 }

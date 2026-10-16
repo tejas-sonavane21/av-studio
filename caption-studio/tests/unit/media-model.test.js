@@ -16,18 +16,26 @@ import {
   MEDIA_FITS,
   MIN_BOX,
   MIN_CLIP,
+  FULL_CROP,
+  MIN_CROP,
   addMediaClip,
   boxForMedia,
   boxRect,
   centerClipBox,
+  clipContentAspect,
   clipDrawRect,
   clipLength,
   clipPixelAspect,
   clipSourceTime,
   clipsAt,
+  cropMediaClip,
+  cropSourceRect,
   describeClip,
   drawOrder,
   duplicateClip,
+  isFullCrop,
+  normalizeCrop,
+  resetClipCrop,
   ensureMedia,
   findClip,
   fitClipToFrame,
@@ -443,4 +451,60 @@ test('a clip that arrives with a layer keeps it, and one that does not goes on t
   addMediaClip(doc, { ...findClip(doc, 'c1'), id: 'c9', layer: 0, start: 9, end: 12 });
   assert.equal(findClip(doc, 'c9')?.layer, 0);
   assert.deepEqual(drawOrder(mediaClips(doc)).map((c) => c.id), ['c1', 'c9']);
+});
+
+// --------------------------------------------------------------------------- //
+// the crop: which part of the file is shown
+// --------------------------------------------------------------------------- //
+
+test('a crop is on the file, and the picture it leaves is fitted without distorting it', () => {
+  const doc = { media: [], canvas };
+  addMediaClip(doc, clip({ id: 'c1' }));
+  assert.deepEqual(findClip(doc, 'c1').crop, { x: 0, y: 0, w: 1, h: 1 }, 'the whole file until it is cut');
+  assert.equal(isFullCrop(findClip(doc, 'c1').crop), true);
+
+  // The left half of a 400x400 file is 200x400 — twice as tall as it is wide — and no box can change that.
+  cropMediaClip(doc, 'c1', { x: 0, w: 0.5 });
+  const c = findClip(doc, 'c1');
+  assert.deepEqual(c.crop, { x: 0, y: 0, w: 0.5, h: 1 });
+  assert.equal(isFullCrop(c.crop), false);
+  assert.equal(clipContentAspect(c, entry), 0.5, 'the shape to hold is the crop, not the file');
+
+  const size = { width: 1920, height: 1080 };
+  const box = boxRect(c.box, size);
+  const rect = clipDrawRect(c, entry, size);
+  assert.equal(Math.round(rect.height), Math.round(box.height), 'the crop is fitted to the box as always');
+  assert.equal(Math.round(rect.width), Math.round(box.height / 2), 'and its own shape decides the rest');
+
+  // In the file's own pixels, which is exactly what the nine-argument drawImage is handed.
+  assert.deepEqual(cropSourceRect(c.crop, entry), { x: 0, y: 0, width: 200, height: 400 });
+  assert.deepEqual(cropSourceRect(c.crop, { width: 0, height: 0 }), { x: 0, y: 0, width: 0, height: 0 },
+    'a file nobody has measured has no source rectangle to take');
+});
+
+test('a crop is clamped into the file, so a drag past the edge cannot blank the clip', () => {
+  assert.deepEqual(normalizeCrop({ x: -1, y: 2, w: 5, h: 0 }), { x: 0, y: 0.98, w: 1, h: MIN_CROP });
+  // x = 0.9 leaves a tenth of the file's width, so a request for half of it is cut back to that tenth.
+  // (Compared with a tolerance because a tenth is not a binary fraction: `1 - 0.9` is 0.0999..98.)
+  const tight = normalizeCrop({ x: 0.9, y: 0, w: 0.5, h: 1 });
+  assert.deepEqual({ x: tight.x, y: tight.y, h: tight.h }, { x: 0.9, y: 0, h: 1 });
+  assert.ok(Math.abs(tight.w - 0.1) < 1e-9, `the width was clipped to the tenth left: ${tight.w}`);
+  assert.deepEqual(normalizeCrop(undefined), { x: 0, y: 0, w: 1, h: 1 });
+  assert.deepEqual(normalizeCrop({ x: 0.5, w: 0.5 }), { x: 0.5, y: 0, w: 0.5, h: 1 });
+});
+
+test('resetting a clip puts the whole file back, and a copy carries the crop', () => {
+  const doc = { media: [], canvas };
+  addMediaClip(doc, clip({ id: 'c1' }));
+  cropMediaClip(doc, 'c1', { x: 0.25, w: 0.5 });
+  const copy = duplicateClip(doc, 'c1');
+  assert.deepEqual(copy.crop, { x: 0.25, y: 0, w: 0.5, h: 1 }, 'a copy is a copy of the crop too');
+
+  resetClipCrop(doc, 'c1');
+  assert.deepEqual(findClip(doc, 'c1').crop, FULL_CROP);
+  assert.deepEqual(findClip(doc, copy.id).crop, { x: 0.25, y: 0, w: 0.5, h: 1 }, 'and the copy keeps its own');
+
+  cropMediaClip(doc, 'c1', { x: 0.1, y: 0.1, w: 0.5, h: 0.5 });
+  resetMediaClip(doc, 'c1', { media: entry, canvas });
+  assert.deepEqual(findClip(doc, 'c1').crop, FULL_CROP, 'reset means the picture as it arrived');
 });

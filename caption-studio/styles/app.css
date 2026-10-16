@@ -586,6 +586,17 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
  * `.muted` is the one that cannot do anything from here (the top clip cannot go forward), because a
  * button that is *disabled* stops responding to hover and the group then looks half-broken.
  */
+/*
+ * The crop mode and its four insets, boxed off from the rest of the bar because they are a *mode* plus
+ * the thing it edits: the checkbox changes what the preview's handles mean, and the sliders are the same
+ * edit for anyone who would rather type the number.
+ */
+.clip-crop-group {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 3px 8px; border: 1px solid rgba(245, 158, 11, 0.35); border-radius: var(--radius-sm);
+}
+.clip-crop-group .check { color: var(--text-1); }
+
 .clip-layer-group { display: inline-flex; align-items: center; gap: 2px; }
 .clip-layer-label { font-size: 11px; color: var(--text-2); margin-right: 2px; }
 .clip-layer-group .ghost { padding: 3px 7px; line-height: 1; font-size: 11px; }

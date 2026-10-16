@@ -368,6 +368,34 @@
                   <span>Opacity <b id="clip-opacity-out">100%</b></span>
                   <input type="range" id="clip-opacity" min="0" max="1" step="0.01" value="1" disabled />
                 </label>
+                <!--
+                  Crop. The four insets are what a person edits ("a bit off the left"), and they are cut
+                  from the clip's *own file*, so the same crop keeps meaning the same thing after a move,
+                  a resize or a rotation. The toggle is a mode rather than an edit: while it is on, the
+                  preview's eight handles belong to the crop frame around the whole picture.
+                -->
+                <span class="clip-crop-group">
+                  <label class="check" title="While this is on, the preview's handles cut the picture instead of resizing the box">
+                    <input type="checkbox" id="clip-crop-toggle" disabled /> crop on the preview
+                  </label>
+                  <button class="ghost" id="clip-crop-reset" type="button" disabled title="Show the whole file again">Reset crop</button>
+                </span>
+                <label class="field-inline">
+                  <span>Left <b id="clip-crop-left-out">0%</b></span>
+                  <input type="range" id="clip-crop-left" min="0" max="0.98" step="0.01" value="0" disabled />
+                </label>
+                <label class="field-inline">
+                  <span>Right <b id="clip-crop-right-out">0%</b></span>
+                  <input type="range" id="clip-crop-right" min="0" max="0.98" step="0.01" value="0" disabled />
+                </label>
+                <label class="field-inline">
+                  <span>Top <b id="clip-crop-top-out">0%</b></span>
+                  <input type="range" id="clip-crop-top" min="0" max="0.98" step="0.01" value="0" disabled />
+                </label>
+                <label class="field-inline">
+                  <span>Bottom <b id="clip-crop-bottom-out">0%</b></span>
+                  <input type="range" id="clip-crop-bottom" min="0" max="0.98" step="0.01" value="0" disabled />
+                </label>
                 <label class="field-inline">
                   <span>Fit</span>
                   <select id="clip-fit" disabled title="contain keeps the whole picture and never distorts it; cover fills the box and crops; stretch distorts it to the box, which is the only setting that can">
@@ -401,8 +429,9 @@
               </div>
               <div class="hint" id="clip-inspector-hint">
                 Drag the clip on the preview to move it, its square handles to resize and the round one
-                above it to turn it. Arrow keys nudge, shift-move resizes further, and holding <b>Alt</b>
-                drags without the guides pulling the box.
+                above it to turn it. Arrow keys nudge, shift inverts the shape lock, and holding <b>Alt</b>
+                drags without the guides. <b>Crop on the preview</b> puts the eight handles on the whole
+                picture instead, so they cut it rather than resizing the box.
               </div>
             </div>
           </div>

@@ -61,6 +61,7 @@ so this folder is self-contained.
 | A picture shorter than the track — the sound carries the programme on, and the picture layer goes blank rather than freezing | ✅ `hasMaterial()` in `src/editor/preview.js` |
 | A preview copy of a heavy picture — built *in the browser*, by itself, at a size the user picks from a 1080p–360p ladder (720p by default) for anything bigger than that size, decoded off the wall clock so it holds the file's real motion, with the export still encoding the original file | ✅ `src/io/preview-proxy.js` (Mediabunny), `src/io/preview-source.js` |
 | Imported pictures and logos as *clips* — a window on the clock, on their own lane, over the caption layer in both the preview and the export | ✅ `src/model/media.js`, `src/editor/media-library.js`, `src/render/media-layer.js` |
+| Cropping a clip — cutting the clip's *own file* down to a part of itself, from four inset sliders or from a crop mode on the preview, and stored in the file's fractions so the same crop survives a move, a resize and a turn | ✅ `cropFromHandle` in `src/render/media-placement.js`, `normalizeCrop` / `clipDrawRect` in `src/model/media.js` |
 | Presets that name their model — repository, parameter count and whether it is already downloaded here | ✅ `GET /health` → `presetDetails` (`audio_studio/models.py`) |
 | A finished run fills in Sources — its Veed master and its own SRT, instead of leaving them in a job folder | ✅ `reflectRunInSources()` in `src/main.js` |
 | Per-source audio — the picture's own track and the uploaded master track, each with its own switch | ✅ `src/editor/preview.js` |
@@ -420,6 +421,17 @@ separate from the caption blocks.
   default and `Shift` is the exception — so one hand can do both without touching the panel. Everything
   is solved in the clip's *own* frame (`render/media-placement.js`), which is what keeps a turned clip's
   handles on its own corners and its opposite corner pinned while the dragged one follows the pointer.
+- **A crop cuts the file; the box frames it.** Cropping is a different question from resizing — a resize
+  changes where the picture sits on the frame, a crop changes which part of the *file* is shown — so the
+  cut is stored on the clip as `crop`, a rectangle in the file's own fractions, and it survives a move, a
+  resize and a turn untouched. That is why the panel's crop mode is a *mode* and not another handle:
+  while it is on, the eight square handles live on the outline of the **whole picture** and cut the media
+  instead of the box, and the round handle still turns, because a mode that hid rotation would make a
+  turned clip uncroppable. The handles sit on the *uncropped* extent on purpose — framing the crop
+  itself would shrink the frame under the pointer with every drag and leave nothing to drag back out.
+  The same field has four inset sliders (Left / Right / Top / Bottom) and `Reset crop`; every path writes
+  the one value, and the picture is re-fitted into the box as the cut changes, so a crop can never change
+  the box's shape and a resize can never cut the file.
 - **The panel and the handles are one model, two ways to ask.** X / Y / width / height / rotation /
   opacity sliders, `contain` / `cover` / `stretch`, flips, and `Fit frame` / `Fill frame` / `Centre` /
   `Reset` all write the same fields the drags do, and every readout is read back from the clip rather

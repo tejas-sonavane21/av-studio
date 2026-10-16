@@ -27,6 +27,13 @@
  * box's own centre rather than as a matrix, so a project file stays readable and `rotation: 0` is one
  * value rather than a range of near-identities.
  *
+ * **A crop is a rectangle on the *file*, and it is not a mask.** `crop: {x, y, w, h}` is in fractions of
+ * the media's own pixels, so "the top half of the shot" means the same thing whatever the box is doing
+ * or how the frame is shaped. What is drawn is that piece of the file, fitted into the box by `fit` like
+ * any other picture — which is what makes a crop a *re-frame* rather than a hole: the part that is left
+ * fills the box, and `drawMediaClips` hands the same source rectangle to `drawImage` on both the preview
+ * and the export, so the two cannot disagree about which pixels survived.
+ *
  * **`layer` is the stacking order, and it is not the clock.** Two clips that overlap in time also
  * overlap on the frame, and which one wins is a decision the user makes ("put the badge over the banner")
  * rather than one the clock makes for them. Keeping the list sorted by time would make stacking a
@@ -73,6 +80,17 @@ export const DEFAULT_BOX_WIDTH = 0.4;
 /** How long a clip is when its own file has no length to copy (an image, or a broken container). */
 export const DEFAULT_CLIP_SECONDS = 5;
 
+/**
+ * The whole file, uncropped. The default, and the value a reset puts back.
+ *
+ * Frozen because it is handed out as-is in a couple of places and a crop object that some caller could
+ * scribble on would be a crop that changes under the renderer's feet.
+ */
+export const FULL_CROP = Object.freeze({ x: 0, y: 0, w: 1, h: 1 });
+
+/** The smallest crop, as a fraction of the media. Below this it is a speck, not a picture. */
+export const MIN_CROP = 0.02;
+
 const finite = (x) => typeof x === 'number' && Number.isFinite(x);
 
 /**
@@ -102,6 +120,53 @@ export function kindFromFile(file) {
   if (/\.(png|jpe?g|webp|gif|avif|bmp)$/.test(name)) return 'image';
   if (/\.(mp4|mov|m4v|webm|mkv|avi)$/.test(name)) return 'video';
   return null;
+}
+
+/**
+ * A crop rectangle, in fractions of the media's own pixels. Pure.
+ *
+ * Clamped to the file and never inside out, because a crop that runs off the edge of the picture is not
+ * a crop: the source rectangle handed to `drawImage` would be partly outside the image, and browsers
+ * answer that by drawing nothing at all — a clip that vanishes because a slider went one step too far.
+ */
+export function normalizeCrop(value) {
+  const c = isPlainObject(value) ? value : {};
+  const x = clamp(finite(c.x) ? c.x : 0, 0, 1 - MIN_CROP);
+  const y = clamp(finite(c.y) ? c.y : 0, 0, 1 - MIN_CROP);
+  const w = clamp(finite(c.w) ? c.w : 1, MIN_CROP, 1 - x);
+  const h = clamp(finite(c.h) ? c.h : 1, MIN_CROP, 1 - y);
+  return { x, y, w, h };
+}
+
+/** Whether a crop is the whole file. Exact, so "is it cropped" needs no tolerance. Pure. */
+export function isFullCrop(crop) {
+  return crop?.x === 0 && crop?.y === 0 && crop?.w === 1 && crop?.h === 1;
+}
+
+/**
+ * The crop as a rectangle **in the file's own pixels** — what `drawImage` needs. Pure.
+ *
+ * A media whose size is not known yet answers `0×0`: there is no source rectangle to take from a file
+ * nobody has measured, and every caller skips a zero-sized draw.
+ */
+export function cropSourceRect(crop, media) {
+  const width = Math.max(0, Number(media?.width) || 0);
+  const height = Math.max(0, Number(media?.height) || 0);
+  const c = normalizeCrop(crop);
+  return { x: c.x * width, y: c.y * height, width: c.w * width, height: c.h * height };
+}
+
+/**
+ * The pixel aspect of what a clip actually shows: its crop, not its file. Pure.
+ *
+ * This is the ratio a shape-locked resize holds and the one the picture is fitted into the box by, and
+ * the two must be the same number — a crop that changed the box's shape instead of the content's would
+ * stretch the picture the first time someone used it.
+ */
+export function clipContentAspect(clip, media) {
+  const width = (Number(media?.width) || 0) * normalizeCrop(clip?.crop).w;
+  const height = (Number(media?.height) || 0) * normalizeCrop(clip?.crop).h;
+  return width > 0 && height > 0 ? width / height : 0;
 }
 
 /** A box, clamped to the frame and never inside out. Pure. */
@@ -176,6 +241,9 @@ export function normalizeClip(value) {
     // "flipped".
     flipX: value.flipX === true,
     flipY: value.flipY === true,
+    // Which part of the file is shown. The whole file unless someone asked for less, so a project from
+    // before cropping existed reads as uncropped — which is what it was.
+    crop: normalizeCrop(value.crop),
     // Stacking order on the frame: 0 is the bottom. `null` means *no layer was ever recorded* — a clip
     // from before this field existed, or one a caller has just made and not placed yet — and everything
     // that reads it treats `null` as 0. That distinction is what lets `addMediaClip` put a new clip on
@@ -462,7 +530,29 @@ export function resetMediaClip(doc, id, { media = null, canvas = null } = {}) {
     flipX: false,
     flipY: false,
     opacity: 1,
+    // The whole file back: "reset" has to mean the picture as it arrived, and a crop left behind would be
+    // the one setting still quietly cutting the shot.
+    crop: FULL_CROP,
   });
+}
+
+/**
+ * Crop a clip: which part of its own file is shown, as fractions of that file.
+ *
+ * A patch rather than four arguments, because the preview's crop handles and the panel's sliders both
+ * compute a rectangle and neither should have to know the other's order. Normalised on the way in, so a
+ * drag past the edge of the picture clamps there instead of asking `drawImage` for pixels that are not in
+ * the file.
+ */
+export function cropMediaClip(doc, id, patch = {}) {
+  const clip = findClip(doc, id);
+  if (!clip) return null;
+  return updateMediaClip(doc, id, { crop: normalizeCrop({ ...clip.crop, ...patch }) });
+}
+
+/** The whole file back. Pure arithmetic in `updateMediaClip`'s hands. */
+export function resetClipCrop(doc, id) {
+  return updateMediaClip(doc, id, { crop: FULL_CROP });
 }
 
 /**
@@ -506,8 +596,11 @@ export function boxRect(box, size) {
  */
 export function clipDrawRect(clip, media, size) {
   const box = boxRect(clip?.box, size);
-  const width = Number(media?.width) || 0;
-  const height = Number(media?.height) || 0;
+  // The picture that has to be fitted is the *crop*, not the file: it is what the clip actually shows, and
+  // it is the shape the fit has to preserve.
+  const crop = normalizeCrop(clip?.crop);
+  const width = (Number(media?.width) || 0) * crop.w;
+  const height = (Number(media?.height) || 0) * crop.h;
   // Stretch needs no measurement at all: the box *is* the drawn rectangle. It is taken before the guard
   // below so that a media whose own size is unknown still fills its box when stretch was asked for —
   // stretched pixels of an unmeasured file are what the user asked for, and an empty rectangle would be

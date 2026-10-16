@@ -220,6 +220,7 @@ function setup({
   clips = [],
   media = { width: 400, height: 200 },
   shapesLocked = true,
+  cropping = false,
 } = {}) {
   const layouts = [{ blockId: 'b1', x: 400, y: 500, width: 200, height: 100 }];
   const blocks = [
@@ -230,7 +231,7 @@ function setup({
   const canvas = createFakeCanvas(1280, 720);
   const canvasEl = fakeElement({ rect: { left: 100, top: 50, width: 1280, height: 720 }, clientWidth: 1280, clientHeight: 720 });
   const overlayEl = fakeElement({ rect: { left: 100, top: 50, width: 1280, height: 720 }, clientWidth: 1280, clientHeight: 720, ctx: canvas.getContext('2d') });
-  const calls = { select: [], place: [], clipSelect: [], clipBox: [], clipRotate: [] };
+  const calls = { select: [], place: [], clipSelect: [], clipBox: [], clipRotate: [], crop: [] };
   const win = fakeWindow();
   const previousWindow = globalThis.window;
   globalThis.window = win;
@@ -242,11 +243,13 @@ function setup({
     getClips: () => clips,
     clipSize: () => media,
     keepAspect: () => shapesLocked,
+    cropMode: () => cropping,
     onSelect: (id) => calls.select.push(id),
     onPlace: (id, anchor, info) => calls.place.push({ id, anchor, info }),
     onClipSelect: (id) => calls.clipSelect.push(id),
     onClipBox: (id, box, info) => calls.clipBox.push({ id, box, info }),
     onClipRotate: (id, degrees, info) => calls.clipRotate.push({ id, degrees, info }),
+    onClipCrop: (id, crop, info) => calls.crop.push({ id, crop, info }),
   });
 
   return {
@@ -757,6 +760,54 @@ test('a caption drag keeps the caption targets, and is not offered the clips', (
     // The clip is 384..704 px wide, and neither edge is a canvas, third, safe-area or caption target.
     assert.ok(!x.includes(384) && !x.includes(704), `no clip edges are in the list: ${x.join(', ')}`);
     assert.ok(x.includes(640), 'and the canvas centre still is');
+  } finally {
+    s.cleanup();
+  }
+});
+
+// --------------------------------------------------------------------------- //
+// cropping on the preview
+// --------------------------------------------------------------------------- //
+
+test('crop mode puts the handles on the whole picture and cuts the media, not the box', () => {
+  // A 2:1 file in the standard fixture's 640×360 box: `contain` draws it 640×320 at (320,200), so the
+  // *whole picture's* frame has its right edge at 960 and its bottom at 520 — where the crop handles are.
+  const s = setup({ clips: [clipFixture()], cropping: true, media: { width: 800, height: 400 } });
+  try {
+    // Handles belong to the clip that is selected, so the clip is selected first — a press with no drag,
+    // the same two events every other handle test in this file opens with.
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+    assert.deepEqual(s.calls.clipSelect, ['c1'], 'the click selected the clip');
+
+    s.overlayEl.emit('pointerdown', { ...s.at(960, 360), pointerId: 1, preventDefault() {} });
+    assert.equal(s.overlay.clipDragging.mode, 'crop', 'the whole picture\u2019s handle starts a cut');
+    // Drag the right edge to the middle of the frame: half the file's width, from the left.
+    s.overlayEl.emit('pointermove', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    const live = s.calls.crop.at(-1);
+    assert.deepEqual(live.crop, { x: 0, y: 0, w: 0.5, h: 1 });
+    assert.deepEqual(s.calls.clipBox, [], 'and the box was not touched — that is what a crop is not');
+
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+    assert.equal(s.calls.crop.at(-1).info.commit, true, 'and the release commits the crop');
+    assert.deepEqual(s.calls.crop.at(-1).crop, live.crop);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('with crop mode off the same handle resizes the box, which is the pair that must not blur', () => {
+  const s = setup({ clips: [clipFixture()], media: { width: 800, height: 400 } });
+  try {
+    s.overlayEl.emit('pointerdown', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    s.overlayEl.emit('pointerup', { pointerId: 1 });
+
+    s.overlayEl.emit('pointerdown', { ...s.at(960, 360), pointerId: 1, preventDefault() {} });
+    assert.equal(s.overlay.clipDragging.mode, 'resize', 'with crop mode off the handle is a resize');
+    s.overlayEl.emit('pointermove', { ...s.at(640, 360), pointerId: 1, preventDefault() {} });
+    assert.deepEqual(s.calls.crop, [], 'no crop was asked for');
+    assert.equal(s.calls.clipBox.at(-1).info.resize, true, 'the box was resized instead');
+    assert.equal(s.calls.clipBox.at(-1).box.w, 0.25, 'with the shape lock on, so the width halved');
   } finally {
     s.cleanup();
   }
