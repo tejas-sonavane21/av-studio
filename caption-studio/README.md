@@ -399,6 +399,13 @@ separate from the caption blocks.
   are awaited before the export starts (a `drawImage` on bytes that have not arrived throws, and the
   layer's guard would then skip that clip on every frame), and a clip whose source file is missing is
   reported rather than silently absent.
+- **Stacking is a number, not the clock.** Two clips that overlap in time also overlap on the frame,
+  and which one wins is a decision rather than a consequence of when either of them starts — so a clip
+  carries `layer`, the draw order comes from `drawOrder()`, and the panel has the four steps (back /
+  down / up / front) with the position spelled out as `layer 2/3`. A project saved before layers existed
+  records no layer at all, and draws in list order exactly as it did then. `Duplicate` makes a clip of
+  its own — same window, same box, own layer — from the *same* file: the bytes are shared in
+  `editor/media-library.js`, so a copied logo does not decode twice in the preview or in the export.
 - **It is a box, and the preview is where you shape it.** A clip is not placed by an anchor the way a
   caption is, so its gestures are the *box's*: drag the body to move it (with the same edge snapping,
   and `Alt` to place it freely), any of the eight square handles to resize it, and the round handle on

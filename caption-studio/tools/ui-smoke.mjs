@@ -747,13 +747,13 @@ async function main() {
   // An image clip is made here rather than loaded from a fixture, for the same reason the video section
   // encodes its own: the repo carries no media, and a clip's file is a file the page can invent.
   const clipLane = 'document.querySelectorAll("#timeline .timeline-track.media .timeline-media-clip").length';
-  const addImageClip = async (name) => {
+  const addImageClip = async (name, colour = '#ff00ff') => {
     await evaluate(
       cdp,
       `(async () => {
         const c = document.createElement('canvas'); c.width = 64; c.height = 64;
         const g = c.getContext('2d');
-        g.fillStyle = '#ff00ff'; g.fillRect(0, 0, 64, 64);
+        g.fillStyle = '${colour}'; g.fillRect(0, 0, 64, 64);
         const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
         const dt = new DataTransfer();
         dt.items.add(new File([blob], '${name}', { type: 'image/png' }));
@@ -876,11 +876,102 @@ async function main() {
     (v) => v === 1,
   );
 
+  // The transport's own clock, so a seek here is the seek a person makes with the slider.
+  const seek = (t) =>
+    `(() => { const s = document.querySelector('#seek'); s.value = String(${t}); s.dispatchEvent(new Event('input', { bubbles: true })); return s.value; })()`;
+
   // ---- taking it away ------------------------------------------------------
-  // Re-added before the removal, so the clip that the export section later measures is a whole one.
-  await addImageClip('badge.png');
+  // Re-added before the removal, so the clip that the export section later measures is a whole one. A
+  // different colour this time: the second clip is the one the stacking checks below need to tell apart.
+  // Added from the *middle of the first clip's own window* — read off its row rather than guessed, because
+  // the drag above pushed it along the clock — so the two overlap in time. Two clips that never overlap
+  // in time cannot be stacked, and a stacking check that quietly has one clip on screen proves nothing.
+  const firstWindow = await evaluate(cdp, 'document.querySelector("#media-list .clip-row .clip-where").textContent');
+  const [wStart, wEnd] = String(firstWindow)
+    .replace('s', '')
+    .split('\u2013')
+    .map(Number);
+  const bothOn = (wStart + wEnd) / 2;
+  assert('the clip the stacking checks need is on the clock', wEnd > wStart, `its row read ${firstWindow}`);
+  await evaluate(cdp, seek(bothOn));
+  await delay(150);
+  await addImageClip('badge.png', '#00ffff');
   await delay(250);
   await check(cdp, 'a second clip joins the first on the lane', clipLane, (v) => v === 2);
+
+  // ---- which clip is on top ------------------------------------------------
+  // Both clips are added at the playhead and centred on the frame, so they sit on the same box and the
+  // pixel in the middle of the frame is whichever one was painted last. Colour is the honest way to ask
+  // "which one wins": the layer number can be read out of the model, but the frame is what a person sees.
+  const centreColour = () =>
+    `(() => {
+      const c = document.querySelector('#media-canvas');
+      const d = c.getContext('2d').getImageData(Math.floor(c.width / 2), Math.floor(c.height / 2), 1, 1).data;
+      return [d[0], d[1], d[2], d[3]].join(',');
+    })()`;
+  const CYAN = '0,255,255,255';
+  const MAGENTA = '255,0,255,255';
+  const panelWhere = 'document.querySelector("#clip-inspector-where").textContent';
+
+  // Selecting a clip is clicking its name, so the row that is clicked is the one the panel then describes.
+  // By *name*, not by index: the list is in time order and the first clip has been dragged along the
+  // clock by now, so "the second row" is not the second clip that was added.
+  const selectByName = (name) =>
+    `[...document.querySelectorAll("#media-list .clip-row")].find(r=>/${name}/.test(r.querySelector(".clip-name").textContent)).querySelector(".clip-name").click()`;
+  // Inside both windows, so both are really painted and the pixel in the middle is a decision rather than
+  // a coincidence. Selecting a clip parks the playhead at its own start, which is not necessarily where
+  // the other one is.
+  await evaluate(cdp, seek(bothOn));
+  await delay(150);
+  await evaluate(cdp, selectByName('badge\\.png'));
+  await delay(200);
+  const top = await evaluate(cdp, centreColour());
+  assert('the clip added last is painted on top where the two overlap', top === CYAN, `the frame's middle was ${top}`);
+  await check(cdp, 'and the panel says which layer it is on', panelWhere, (v) => /layer 2\/2/.test(String(v)));
+
+  await evaluate(cdp, 'document.querySelector("#clip-back").click()');
+  await delay(200);
+  const behind = await evaluate(cdp, centreColour());
+  assert(
+    'sending it back puts the other clip on top',
+    behind === MAGENTA,
+    `the frame's middle was ${behind}`,
+  );
+  await check(cdp, 'and the panel counts it from the bottom', panelWhere, (v) => /layer 1\/2/.test(String(v)));
+
+  await evaluate(cdp, 'document.querySelector("#clip-forward").click()');
+  await delay(200);
+  const again = await evaluate(cdp, centreColour());
+  assert('and one step forward puts it back on top', again === CYAN, `the frame's middle was ${again}`);
+
+  // One clip can be used twice. The copy is a clip of its own (its own layer, its own slot in the list)
+  // drawn from the *same* file, which is the point of duplicating rather than re-importing.
+  await evaluate(cdp, 'document.querySelector("#clip-duplicate").click()');
+  await delay(250);
+  await check(cdp, 'Duplicate adds the clip again, above the original', clipLane, (v) => v === 3);
+  await check(
+    cdp,
+    'and the copy is the one now selected',
+    panelWhere,
+    (v) => /layer 3\/3/.test(String(v)),
+  );
+  await check(
+    cdp,
+    'and its row is a clip of its own in the list',
+    'document.querySelectorAll("#media-list .clip-row").length',
+    (v) => v === 3,
+  );
+  // The copy is the *selected* clip, which is the reliable way to name it: it carries the same file name
+  // as the clip it came from, and rows are in time order rather than in the order they were added.
+  await evaluate(cdp, 'document.querySelector("#media-list .clip-row.active .clip-remove").click()');
+  await delay(250);
+  await check(
+    cdp,
+    'and removing the copy leaves the original, with its own row',
+    clipLane,
+    (v) => v === 2,
+  );
+
   await evaluate(
     cdp,
     'document.querySelectorAll("#media-list .clip-row")[1].querySelector(".clip-remove").click()',

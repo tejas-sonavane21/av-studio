@@ -27,6 +27,13 @@
  * box's own centre rather than as a matrix, so a project file stays readable and `rotation: 0` is one
  * value rather than a range of near-identities.
  *
+ * **`layer` is the stacking order, and it is not the clock.** Two clips that overlap in time also
+ * overlap on the frame, and which one wins is a decision the user makes ("put the badge over the banner")
+ * rather than one the clock makes for them. Keeping the list sorted by time would make stacking a
+ * side-effect of when a clip happens to start, so `layer` is stored per clip and `drawOrder()` is what
+ * every painter and hit test reads. A project written before clips had layers reads as all-zero layers,
+ * which draws in list order — exactly what it drew when it was saved.
+ *
  * **A clip is silent.** Its own soundtrack is not mixed into the programme — the master track loaded
  * under Sources is the programme's sound, and mixing a second stream would need a real mixer on both
  * the preview and the export path. Rather than half-do it, the UI says so plainly; when clips get
@@ -169,15 +176,99 @@ export function normalizeClip(value) {
     // "flipped".
     flipX: value.flipX === true,
     flipY: value.flipY === true,
+    // Stacking order on the frame: 0 is the bottom. `null` means *no layer was ever recorded* — a clip
+    // from before this field existed, or one a caller has just made and not placed yet — and everything
+    // that reads it treats `null` as 0. That distinction is what lets `addMediaClip` put a new clip on
+    // top while a clip handed back with `layer: 0` (a relink, an undo) stays exactly where it was.
+    layer: finite(value.layer) ? Math.max(0, Math.round(value.layer)) : null,
   };
 }
 
-/** A whole list, canonical: bad entries dropped, sorted by start (which is also z-order). Pure. */
+/**
+ * A whole list, canonical: bad entries dropped, sorted by start. Pure.
+ *
+ * Sorted by *time*, because that is what the timeline lane, the clip list and "which clips are on at
+ * `t`" all want to read. Stacking is `layer`'s job and is applied by `drawOrder()` where it matters.
+ */
 export function normalizeClips(value) {
   return (Array.isArray(value) ? value : [])
     .map(normalizeClip)
     .filter(Boolean)
     .sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+/**
+ * The same clips, bottom layer first — the order a painter draws them in, and the order a hit test has
+ * to search backwards through. Pure.
+ *
+ * The tie-break is the *list* index rather than the start time: a caller that has already put the list
+ * in some order (the lane sorts by time, a project file is whatever was saved) should get that order
+ * back for equal layers, so a list that has never been restacked draws exactly as it is stored.
+ */
+export function drawOrder(clips) {
+  return (Array.isArray(clips) ? clips : [])
+    .filter(Boolean)
+    .map((clip, index) => ({ clip, index }))
+    .sort((a, b) => (Number(a.clip.layer) || 0) - (Number(b.clip.layer) || 0) || a.index - b.index)
+    .map((entry) => entry.clip);
+}
+
+/** The layer a new clip should land on: above everything already on the frame. Pure. */
+export function topLayer(doc) {
+  return mediaClips(doc).reduce((top, clip) => Math.max(top, Number(clip.layer) || 0), -1);
+}
+
+/**
+ * Move a clip up or down the stack. `direction` is `up`, `down`, `front` or `back`. Pure (mutates `doc`).
+ *
+ * The stack is *renumbered* rather than the two clips trading places: after a drop of five clips the
+ * layers would otherwise be 0, 1, 7, 8, 40, which is unreadable in a project file and makes "is this
+ * the top one" a question about numbers nobody chose. `up`/`down` move by one place and are clamped at
+ * the ends, so holding a button down is not an error.
+ */
+export function reorderClip(doc, id, direction) {
+  const clip = findClip(doc, id);
+  if (!clip) return null;
+  const ordered = drawOrder(mediaClips(doc));
+  const from = ordered.findIndex((c) => c.id === clip.id);
+  if (from < 0) return null;
+  const last = ordered.length - 1;
+  const to =
+    direction === 'front' ? last : direction === 'back' ? 0 : direction === 'up' ? Math.min(last, from + 1) : Math.max(0, from - 1);
+  if (to !== from) {
+    const [moved] = ordered.splice(from, 1);
+    ordered.splice(to, 0, moved);
+  }
+  ordered.forEach((c, index) => {
+    c.layer = index;
+  });
+  doc.media = normalizeClips(mediaClips(doc));
+  return findClip(doc, clip.id);
+}
+
+/** Where a clip sits in the stack, one-based, and how many clips there are: `{ index, count }`. Pure. */
+export function layerPosition(doc, id) {
+  const ordered = drawOrder(mediaClips(doc));
+  const index = ordered.findIndex((clip) => clip.id === id);
+  return { index: index < 0 ? 0 : index + 1, count: ordered.length };
+}
+
+/**
+ * A copy of a clip, on the same window and the same box, one layer above it. Pure.
+ *
+ * Its own id and its own layer, so the copy is a clip rather than a second view of one: nothing in the
+ * document is shared between them, and moving or trimming the copy leaves the original alone. The
+ * *bytes* are not part of the document (see `editor/media-library.js`), so the caller is the one that
+ * has to register the file for the new id.
+ */
+export function duplicateClip(doc, id) {
+  const clip = findClip(doc, id);
+  if (!clip) return null;
+  const copy = normalizeClip({ ...clip, id: undefined, layer: topLayer(doc) + 1 });
+  if (!copy) return null;
+  ensureMedia(doc).push(copy);
+  doc.media = normalizeClips(doc.media);
+  return findClip(doc, copy.id);
 }
 
 /** Make sure a document has a clip list. An existing one is left as it is. */
@@ -192,10 +283,15 @@ export function mediaClips(doc) {
   return Array.isArray(doc?.media) ? doc.media.filter(Boolean) : [];
 }
 
-/** The clips covering `t`, bottom-to-top. Half-open `[start, end)`, like the cut ranges. Pure. */
+/**
+ * The clips covering `t`, bottom-to-top. Half-open `[start, end)`, like the cut ranges. Pure.
+ *
+ * Bottom-to-top because every caller paints them in the order it gets: the layer draws them one after
+ * another, and the overlay's hit test walks the same list backwards to find the top one.
+ */
 export function clipsAt(doc, t) {
   const time = Number(t) || 0;
-  return mediaClips(doc).filter((clip) => time >= clip.start && time < clip.end);
+  return drawOrder(mediaClips(doc).filter((clip) => time >= clip.start && time < clip.end));
 }
 
 /** The clip with this id, or `null`. Pure. */
@@ -228,10 +324,18 @@ export function planClip({ entry, at = 0, canvas = null, limit = 0, id = null } 
   });
 }
 
-/** Add a clip. Returns the stored clip, or `null` when it could not be one. */
+/**
+ * Add a clip. Returns the stored clip, or `null` when it could not be one.
+ *
+ * A clip dropped on the programme goes on **top** of the stack, which is what dropping one over another
+ * looks like it should do. A clip that arrives with a layer of its own (a project being re-opened, a
+ * relink, an undo) keeps it.
+ */
 export function addMediaClip(doc, clip) {
-  const next = normalizeClip(clip);
-  if (!next || !doc) return null;
+  if (!doc) return null;
+  const explicit = isPlainObject(clip) && finite(clip.layer);
+  const next = normalizeClip(explicit ? clip : { ...clip, layer: topLayer(doc) + 1 });
+  if (!next) return null;
   ensureMedia(doc).push(next);
   doc.media = normalizeClips(doc.media);
   return findClip(doc, next.id);

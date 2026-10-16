@@ -71,11 +71,18 @@ export function createMediaLibrary({ revoke = (url) => URL.revokeObjectURL(url) 
   const entries = new Map();
   let counter = 0;
 
-  /** Release one entry: its object URL, its element, and its slot. */
+  /**
+   * Release one entry: its object URL, its element, and its slot.
+   *
+   * A *shared* entry (the file behind a duplicated clip — see `copy()`) gives up its slot and nothing
+   * else. The element is still on screen in the other clip, and revoking a URL the other clip draws from
+   * is how one clip's removal blanks its twin.
+   */
   function release(id) {
     const entry = entries.get(id);
     if (!entry) return false;
     entries.delete(id);
+    if (entry.owned === false) return true;
     try {
       if (entry.kind === 'video') entry.element.removeAttribute?.('src');
     } catch {
@@ -132,6 +139,24 @@ export function createMediaLibrary({ revoke = (url) => URL.revokeObjectURL(url) 
     },
     get(id) {
       return entries.get(id) ?? null;
+    },
+    /**
+     * Point a second id at the same file, for a duplicated clip.
+     *
+     * A copy is a *copy of a clip*, not of the bytes: the picture on screen is one file, and duplicating
+     * it must not re-download, re-decode or re-encode anything. So the entry is shared - same element,
+     * same object URL, its own id - and `release()` is told which of the two is being dropped, because a
+     * clip removed from the programme must not take the other clip's picture with it.
+     *
+     * Nothing is registered when the source is not loaded: a copy of an offline clip is offline too, and
+     * pretending otherwise would draw an empty rectangle under a name that says the file is there.
+     */
+    copy(fromId, toId) {
+      const entry = entries.get(fromId);
+      if (!entry || !toId) return null;
+      const shared = { ...entry, id: toId, owned: false };
+      entries.set(toId, shared);
+      return shared;
     },
     /** The object URL for a clip's file, or `null` when it is not loaded — what the export decodes from. */
     url(id) {

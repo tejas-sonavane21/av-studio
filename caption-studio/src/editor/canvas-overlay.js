@@ -64,7 +64,7 @@ import {
   snapBox,
   snapRotation,
 } from '../render/media-placement.js';
-import { clipPixelAspect } from '../model/media.js';
+import { clipPixelAspect, drawOrder } from '../model/media.js';
 
 /** One keyboard nudge, as a fraction of the canvas (so zoom level cannot change it). */
 export const DEFAULT_NUDGE_STEP = 0.005;
@@ -319,10 +319,16 @@ export function createCanvasOverlay({
     return (preview.layouts ?? []).find((l) => l.blockId === selectedId) ?? null;
   }
 
-  /** Every overlay clip in the document, live. */
+  /**
+   * Every overlay clip in the document, live, **bottom layer first**.
+   *
+   * The order is the renderer's: the layer paints them in this order and `hitClip()` walks it backwards,
+   * so "the clip under the pointer" is the one that was painted last and is therefore on top. Read from
+   * the model (`drawOrder`) rather than assumed from the list, or stacking would only work by accident.
+   */
   function clips() {
     const list = getClips?.() ?? [];
-    return Array.isArray(list) ? list.filter(Boolean) : [];
+    return Array.isArray(list) ? drawOrder(list.filter(Boolean)) : [];
   }
 
   /** A clip by id, or `null`. */

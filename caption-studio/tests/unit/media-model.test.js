@@ -26,13 +26,18 @@ import {
   clipSourceTime,
   clipsAt,
   describeClip,
+  drawOrder,
+  duplicateClip,
   ensureMedia,
   findClip,
   fitClipToFrame,
   flipMediaClip,
   kindFromFile,
+  layerPosition,
   mediaClips,
   moveMediaClip,
+  reorderClip,
+  topLayer,
   normalizeBox,
   normalizeClip,
   normalizeClips,
@@ -358,4 +363,84 @@ test('a shape is held in pixels, which is the only ratio that means anything on 
   assert.equal(clipPixelAspect({ box: squareBox }, { width: 1920, height: 1080 }), 16 / 9);
   assert.equal(clipPixelAspect({ box: squareBox }, { width: 1080, height: 1920 }), 9 / 16, 'the same box, a phone');
   assert.equal(clipPixelAspect({ box: { w: 0, h: 0 } }, canvas), 1, 'a degenerate box is not a division by zero');
+});
+
+// --------------------------------------------------------------------------- //
+// the stack: which clip is on top where two overlap
+// --------------------------------------------------------------------------- //
+
+test('a new clip lands on top of the stack, and the stack is what draws', () => {
+  const doc = { media: [], canvas };
+  addMediaClip(doc, clip({ id: 'c1', start: 0, end: 5 }));
+  addMediaClip(doc, clip({ id: 'c2', start: 1, end: 4 }));
+  assert.equal(topLayer(doc), 1, 'the second clip is above the first');
+  assert.deepEqual(drawOrder(mediaClips(doc)).map((c) => c.id), ['c1', 'c2']);
+
+  // Reordering renumbers rather than trading values, so the layers stay 0..n-1 after any number of moves.
+  reorderClip(doc, 'c1', 'front');
+  assert.deepEqual(drawOrder(mediaClips(doc)).map((c) => c.id), ['c2', 'c1']);
+  assert.deepEqual(mediaClips(doc).map((c) => c.layer).sort(), [0, 1]);
+  assert.deepEqual(layerPosition(doc, 'c1'), { index: 2, count: 2 });
+
+  // `up` at the top is a no-op rather than an error, so holding the button down cannot break anything.
+  reorderClip(doc, 'c1', 'up');
+  assert.deepEqual(drawOrder(mediaClips(doc)).map((c) => c.id), ['c2', 'c1']);
+  reorderClip(doc, 'c1', 'back');
+  assert.deepEqual(drawOrder(mediaClips(doc)).map((c) => c.id), ['c1', 'c2']);
+  reorderClip(doc, 'c1', 'down');
+  assert.deepEqual(drawOrder(mediaClips(doc)).map((c) => c.id), ['c1', 'c2'], 'already at the back');
+});
+
+test('the stack is stored, not inferred from the clock', () => {
+  // Two clips on the same second: the one added later is on top, however the list is sorted by time.
+  const doc = { media: [], canvas };
+  addMediaClip(doc, clip({ id: 'late', start: 3, end: 8 }));
+  addMediaClip(doc, clip({ id: 'early', start: 1, end: 9 }));
+  assert.deepEqual(mediaClips(doc).map((c) => c.id), ['early', 'late'], 'the list is still in time order');
+  assert.deepEqual(drawOrder(mediaClips(doc)).map((c) => c.id), ['late', 'early'], 'and the stack is not');
+  // What is painted at a moment comes out bottom-to-top, which is the order a painter needs.
+  assert.deepEqual(clipsAt(doc, 4).map((c) => c.id), ['late', 'early']);
+  assert.deepEqual(clipsAt(doc, 0.5), [], 'nothing that early');
+});
+
+test('a clip from before layers existed has no layer recorded, and draws in list order', () => {
+  const stored = [
+    { id: 'a', kind: 'image', name: 'a.png', start: 0, end: 3 },
+    { id: 'b', kind: 'image', name: 'b.png', start: 1, end: 4 },
+  ];
+  const list = normalizeClips(stored);
+  assert.deepEqual(list.map((c) => c.layer), [null, null], 'null, not 0: no layer was ever chosen');
+  assert.deepEqual(drawOrder(list).map((c) => c.id), ['a', 'b'], 'and it still draws as it always did');
+  assert.equal(topLayer({ media: list }), 0);
+  // A move through the stack is what gives them real numbers, from then on.
+  reorderClip({ media: list }, 'b', 'front');
+  assert.deepEqual(list.map((c) => c.layer).sort(), [0, 1]);
+});
+
+test('a duplicate is its own clip: own id, own layer, and the same window and box', () => {
+  const doc = { media: [], canvas };
+  addMediaClip(doc, clip({ id: 'c1', start: 2, end: 6, box: { x: 0.1, y: 0.2, w: 0.3, h: 0.4 }, rotation: 30 }));
+  const copy = duplicateClip(doc, 'c1');
+  assert.ok(copy && copy.id !== 'c1', 'the copy has an id of its own');
+  assert.deepEqual(copy.box, findClip(doc, 'c1').box);
+  assert.equal(copy.rotation, 30);
+  assert.equal(copy.start, 2);
+  assert.equal(copy.end, 6);
+  assert.equal(copy.layer, 1, 'and it goes above the original');
+  // Editing one leaves the other alone, which is the whole point of a copy rather than a second name for
+  // one clip.
+  updateMediaClip(doc, copy.id, { opacity: 0.5 });
+  assert.equal(findClip(doc, 'c1').opacity, 1);
+  removeMediaClip(doc, copy.id);
+  assert.equal(findClip(doc, 'c1').opacity, 1, 'and removing the copy removes the copy');
+  assert.equal(mediaClips(doc).length, 1);
+});
+
+test('a clip that arrives with a layer keeps it, and one that does not goes on top', () => {
+  const doc = { media: [], canvas };
+  addMediaClip(doc, clip({ id: 'c1', start: 0, end: 4 }));
+  // A relink or an undo hands back the clip it took out, layer and all: it must not jump to the top.
+  addMediaClip(doc, { ...findClip(doc, 'c1'), id: 'c9', layer: 0, start: 9, end: 12 });
+  assert.equal(findClip(doc, 'c9')?.layer, 0);
+  assert.deepEqual(drawOrder(mediaClips(doc)).map((c) => c.id), ['c1', 'c9']);
 });
