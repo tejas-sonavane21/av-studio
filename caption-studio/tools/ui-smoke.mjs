@@ -894,6 +894,352 @@ async function main() {
     (v) => /^1 clip over the picture/.test(String(v)),
   );
 
+  console.log('\n■ the clip\u2019s box is edited on the preview itself');
+  // The section above left one clip on the programme. Selecting it from the panel is how a person starts
+  // (and it parks the playhead inside the clip, so the clip is really on screen to be grabbed).
+  await evaluate(cdp, 'document.querySelector("#media-list .clip-row .clip-name").click()');
+  await waitFor(cdp, clipPixels(), (v) => v > 1000, { describe: 'the clip to be on the preview' });
+
+  const gestures = await evaluate(
+    cdp,
+    `(async () => {
+      const overlay = document.querySelector('#overlay-canvas');
+      const media = document.querySelector('#media-canvas');
+      const canvas = document.querySelector('#preview-canvas');
+      // A synthetic pointer event has no pointer behind it, and the browser refuses to capture a pointer
+      // id it never issued — that refusal is an exception *inside* the handler, so capture is stubbed the
+      // way this harness already stubs it for the timeline.
+      overlay.setPointerCapture = () => {};
+      overlay.releasePointerCapture = () => {};
+
+      const frameRect = () => canvas.getBoundingClientRect();
+      // Backing-store pixels per CSS pixel: the clip layer is drawn at logical x dpr.
+      const perCss = () => (frameRect().width > 0 ? media.width / frameRect().width : 1);
+      const painted = () => {
+        if (!media || media.hidden || getComputedStyle(media).display === 'none') return null;
+        const d = media.getContext('2d').getImageData(0, 0, media.width, media.height).data;
+        let x0 = media.width;
+        let y0 = media.height;
+        let x1 = -1;
+        let y1 = -1;
+        let n = 0;
+        for (let i = 3; i < d.length; i += 4) {
+          if (d[i] <= 10) continue;
+          const p = (i - 3) / 4;
+          const x = p % media.width;
+          const y = Math.floor(p / media.width);
+          n += 1;
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+        return n ? { x0: x0, y0: y0, x1: x1, y1: y1, n: n, width: x1 - x0 + 1, height: y1 - y0 + 1 } : null;
+      };
+      const client = (bx, by) => {
+        const r = frameRect();
+        const k = perCss();
+        return { x: r.left + bx / k, y: r.top + by / k };
+      };
+      const gesture = (from, to, modifiers = {}) => {
+        const event = (type, at) =>
+          new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            clientX: at.x,
+            clientY: at.y,
+            pointerId: 1,
+            pointerType: 'mouse',
+            isPrimary: true,
+            buttons: type === 'pointerup' ? 0 : 1,
+            shiftKey: Boolean(modifiers.shift),
+            altKey: Boolean(modifiers.alt),
+          });
+        overlay.dispatchEvent(event('pointerdown', from));
+        overlay.dispatchEvent(event('pointermove', to));
+        overlay.dispatchEvent(event('pointerup', to));
+      };
+      const text = (id) => document.querySelector('#' + id).textContent;
+      const panel = () => ({
+        name: text('clip-inspector-name'),
+        where: text('clip-inspector-where'),
+        x: text('clip-x-out'),
+        y: text('clip-y-out'),
+        w: text('clip-w-out'),
+        h: text('clip-h-out'),
+        rotation: text('clip-rot-out'),
+      });
+      const tick = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const centre = (b) => ({ x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 });
+
+      const opened = {
+        visible: !document.querySelector('#clip-inspector').hidden,
+        panel: panel(),
+        row: document.querySelector('#media-list .clip-row .clip-name').textContent,
+        clip: painted(),
+      };
+      if (!opened.clip) return { error: 'nothing was painted on the clip layer to grab' };
+
+      // ---- move: take hold of the middle of what is painted and pull it 60 left, 40 up ----------
+      // Alt is held because guides are the default and they are *meant* to pull: a drag that ends a few
+      // pixels off the canvas centre lands on it, which is right for a person and wrong for a measurement
+      // of "does the picture follow the pointer". With Alt held no guide can move it, so the drag is the
+      // only thing that can account for where the picture ends up.
+      const grab = client(centre(opened.clip).x, centre(opened.clip).y);
+      gesture(grab, { x: grab.x - 60, y: grab.y - 40 }, { alt: true });
+      await tick();
+      const moved = painted();
+      const movedPanel = panel();
+
+      // ---- resize: the corner that has frame to grow into -------------------------------------
+      // The model keeps a box inside the frame and the frame's edge wins over a handle, so the corner
+      // diagonally opposite the one dragged only stays put when the drag has somewhere to go. Take the
+      // corner with room in *both* axes and grow by a step that fits: a clip parked against an edge would
+      // otherwise be measuring the clamp rather than the pin.
+      const room = {
+        se: { x: media.width - 1 - moved.x1, y: media.height - 1 - moved.y1 },
+        nw: { x: moved.x0, y: moved.y0 },
+      };
+      const grow = 80;
+      const fits = (r) => r.x >= grow + 16 && r.y >= grow + 16;
+      const corner = fits(room.se) ? 'se' : fits(room.nw) ? 'nw' : null;
+      if (!corner) return { error: 'no corner had ' + grow + 'px of room to grow into: ' + JSON.stringify(room) };
+      const sign = corner === 'se' ? 1 : -1;
+      const grip = corner === 'se' ? client(moved.x1 - 1, moved.y1 - 1) : client(moved.x0 + 1, moved.y0 + 1);
+      // Dragged mostly along one axis: the shape lock makes the other edge follow the bigger of the two
+      // pushes, so the box grows by the same step on both edges and stays inside the room measured above.
+      gesture(grip, { x: grip.x + sign * grow * perCss(), y: grip.y + sign * grow * 0.7 * perCss() });
+      await tick();
+      const resized = painted();
+      const resizedPanel = panel();
+
+      // ---- rotate: the round handle sits 26 logical px above the top edge ---------------------
+      // A third of a turn, then a little more, so the angle is nowhere near a step and a *turned square*
+      // is a visibly wider box than an upright one.
+      const stem = client(centre(resized).x, resized.y0 - 26 * perCss());
+      const spin = client(centre(resized).x + 120 * perCss(), centre(resized).y + 60 * perCss());
+      gesture(stem, spin);
+      await tick();
+      const rotated = painted();
+      const rotatedPanel = panel();
+
+      // ---- nudge: four steps right, which is 2% of the frame -------------------------------
+      for (let i = 0; i < 4; i += 1) {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      }
+      await tick();
+      const nudged = painted();
+      const nudgedPanel = panel();
+
+      return {
+        opened: opened,
+        moved: { box: moved, panel: movedPanel },
+        resized: { box: resized, panel: resizedPanel },
+        rotated: { box: rotated, panel: rotatedPanel },
+        nudged: { box: nudged, panel: nudgedPanel },
+        corner: corner,
+        perCss: perCss(),
+        frame: { width: media.width, height: media.height },
+      };
+    })()`,
+    { timeout: 120 },
+  );
+
+  if (gestures?.error) {
+    assert('the clip can be grabbed on the preview', false, gestures.error);
+  } else {
+    const { opened, moved, resized, rotated, nudged } = gestures;
+    // The panel names the clip the row names: one selection, shown in both places, and compared against
+    // the row itself rather than against a file name this harness would have to keep in step.
+    const rowName = String(opened.row).replace(/^[^\w]*\s*/, '');
+    assert(
+      'clicking the clip\u2019s row opens its transform panel, named for that clip',
+      opened.visible === true && String(opened.panel.name).includes(rowName) && rowName.length > 0,
+      `the row read ${JSON.stringify(opened.row)} and the panel ${JSON.stringify(opened.panel.name)}`,
+    );
+    assert(
+      'the panel reports the box in pixels as well as as a fraction of the frame',
+      /% at .*% \u00b7 \d+\u00d7\d+ px/.test(String(opened.panel.where)),
+      `the panel said ${JSON.stringify(opened.panel.where)}`,
+    );
+
+    // Dragging the body: the picture moves by the drag, and the panel follows it.
+    const dx = (moved.box.x0 + moved.box.x1) / 2 - (opened.clip.x0 + opened.clip.x1) / 2;
+    const dy = (moved.box.y0 + moved.box.y1) / 2 - (opened.clip.y0 + opened.clip.y1) / 2;
+    assert(
+      'dragging the clip\u2019s body moves the picture by the drag, under the cursor',
+      Math.abs(dx / gestures.perCss + 60) <= 3 && Math.abs(dy / gestures.perCss + 40) <= 3,
+      `the picture moved ${(dx / gestures.perCss).toFixed(1)}\u00d7${(dy / gestures.perCss).toFixed(1)} CSS px`,
+    );
+    assert(
+      'and the size is untouched by a move',
+      Math.abs(moved.box.width - opened.clip.width) <= 2 && Math.abs(moved.box.height - opened.clip.height) <= 2,
+      `the box was ${opened.clip.width}\u00d7${opened.clip.height} and is ${moved.box.width}\u00d7${moved.box.height}`,
+    );
+    assert(
+      'and the panel\u2019s numbers moved with it',
+      moved.panel.x !== opened.panel.x || moved.panel.y !== opened.panel.y,
+      `the panel still read ${moved.panel.x} / ${moved.panel.y}`,
+    );
+
+    // A corner handle: the box grows in both directions, and the corner *opposite* the one dragged
+    // stays exactly where it was. Which corner that is depends on which one had room, so the pinned
+    // corner is read off the gesture rather than assumed.
+    const dragged = gestures.corner === 'se' ? 'bottom-right' : 'top-left';
+    const pinned = gestures.corner === 'se' ? 'top-left' : 'bottom-right';
+    const before = gestures.corner === 'se' ? [moved.box.x0, moved.box.y0] : [moved.box.x1, moved.box.y1];
+    const after = gestures.corner === 'se' ? [resized.box.x0, resized.box.y0] : [resized.box.x1, resized.box.y1];
+    assert(
+      `dragging the ${dragged} handle grows the clip in both directions`,
+      resized.box.width > moved.box.width + 20 && resized.box.height > moved.box.height + 20,
+      `the box was ${moved.box.width}\u00d7${moved.box.height} and is ${resized.box.width}\u00d7${resized.box.height}`,
+    );
+    assert(
+      `and the ${pinned} corner, opposite the handle, did not move`,
+      Math.abs(after[0] - before[0]) <= 2 && Math.abs(after[1] - before[1]) <= 2,
+      `the ${pinned} corner went from (${before[0]},${before[1]}) to (${after[0]},${after[1]})`,
+    );
+    assert(
+      'and the panel\u2019s width and height readouts followed the handle',
+      resized.panel.w !== moved.panel.w || resized.panel.h !== moved.panel.h,
+      `the panel still read ${resized.panel.w}\u00d7${resized.panel.h}`,
+    );
+
+    // The round handle: a turn that is nowhere near a step, so the angle is the drag's own and the clip
+    // really is at an angle — a turned square is a wider box on screen than an upright one.
+    const angle = Number(String(rotated.panel.rotation).replace(/[^0-9.-]/g, ''));
+    assert(
+      'dragging the round handle above the clip turns it, and the panel reports the angle',
+      Number.isFinite(angle) && Math.abs(angle) > 20 && Math.abs(angle) < 180 && Math.abs(angle - 90) > 5,
+      `the panel read ${JSON.stringify(rotated.panel.rotation)}`,
+    );
+    assert(
+      'and the turn is on the frame: a turned square is a wider box than an upright one',
+      rotated.box && rotated.box.width > resized.box.width + 8,
+      `the painted box went from ${resized.box.width}\u00d7${resized.box.height} to ${rotated.box?.width}\u00d7${rotated.box?.height}`,
+    );
+
+    // Arrow keys: a nudge is a move, and it goes through the same panel.
+    // Four steps of 0.005 of the frame is 2% of it, measured on the layer the clip is painted on.
+    const nudgedDx = (nudged.box.x0 + nudged.box.x1) / 2 - (rotated.box.x0 + rotated.box.x1) / 2;
+    assert(
+      'arrow keys nudge the selected clip, one step at a time',
+      Math.abs(nudgedDx - 4 * 0.005 * gestures.frame.width) <= 3,
+      `the picture moved ${nudgedDx.toFixed(1)} of the ${(4 * 0.005 * gestures.frame.width).toFixed(1)} px four steps ask for`,
+    );
+    assert(
+      'and the panel\u2019s numbers followed the nudge',
+      nudged.panel.x !== rotated.panel.x,
+      `the panel still read ${nudged.panel.x}`,
+    );
+    console.log(
+      `  \u2022 the box: moved 60\u00d740 px, resized to ${resized.box.width}\u00d7${resized.box.height} px of the layer, turned to ${rotated.panel.rotation}, nudged four steps`,
+    );
+  }
+
+  // ---- fit, stretch and reset, which is where the picture's own shape is at stake ---------------
+  const shapes = await evaluate(
+    cdp,
+    `(async () => {
+      const media = document.querySelector('#media-canvas');
+      const painted = () => {
+        const d = media.getContext('2d').getImageData(0, 0, media.width, media.height).data;
+        let x0 = media.width;
+        let y0 = media.height;
+        let x1 = -1;
+        let y1 = -1;
+        for (let i = 3; i < d.length; i += 4) {
+          if (d[i] <= 10) continue;
+          const p = (i - 3) / 4;
+          const x = p % media.width;
+          const y = Math.floor(p / media.width);
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+        return { x0: x0, y0: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+      };
+      const tick = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const text = (id) => document.querySelector('#' + id).textContent;
+
+      // Back to the clip as it arrived — upright, its own shape — so what the fit settings do to the
+      // picture is measured on an unturned box. A square turned 120\u00b0 has a *wider* bounding box than the
+      // square itself, which is exactly the kind of thing that makes a fit check read as a failure.
+      document.querySelector('#clip-reset').click();
+      await tick();
+      document.querySelector('#clip-fit-frame').click();
+      await tick();
+      const contained = painted();
+
+      const fit = document.querySelector('#clip-fit');
+      fit.value = 'stretch';
+      fit.dispatchEvent(new Event('change', { bubbles: true }));
+      await tick();
+      const stretched = painted();
+      const stretchedFit = document.querySelector('#clip-fit').value;
+      const stretchedWhere = text('clip-inspector-where');
+
+      document.querySelector('#clip-reset').click();
+      await tick();
+      const reset = painted();
+
+      return {
+        frame: { width: media.width, height: media.height },
+        contained: contained,
+        stretched: stretched,
+        stretchedFit: stretchedFit,
+        stretchedWhere: stretchedWhere,
+        reset: reset,
+        resetFit: document.querySelector('#clip-fit').value,
+        resetRotation: text('clip-rot-out'),
+        resetWhere: text('clip-inspector-where'),
+      };
+    })()`,
+    { timeout: 120 },
+  );
+
+  if (shapes?.frame) {
+    // A 64\u00d764 image: contained in a 16:9 frame it is a square band in the middle, stretched it fills the
+    // frame exactly. The two are different pictures of the same file, which is the whole point of fit.
+    assert(
+      'Fit frame fits a square picture inside the frame without distorting it',
+      Math.abs(shapes.contained.width - shapes.contained.height) <= 2 && shapes.contained.width < shapes.frame.width - 10,
+      `a 64\u00d764 file painted ${shapes.contained.width}\u00d7${shapes.contained.height} on a ${shapes.frame.width}\u00d7${shapes.frame.height} layer`,
+    );
+    assert(
+      'and stretch fills the box exactly, which is the one setting that distorts',
+      shapes.stretchedFit === 'stretch' &&
+        /stretch/.test(String(shapes.stretchedWhere)) &&
+        Math.abs(shapes.stretched.width - shapes.frame.width) <= 2 &&
+        Math.abs(shapes.stretched.height - shapes.frame.height) <= 2,
+      `the panel said ${JSON.stringify(shapes.stretchedWhere)} and stretch painted ${shapes.stretched.width}\u00d7${shapes.stretched.height} of a ${shapes.frame.width}\u00d7${shapes.frame.height} layer`,
+    );
+    assert(
+      'Reset puts the picture back to its own shape, upright and centred',
+      shapes.resetFit === 'contain' &&
+        shapes.resetRotation === '0\u00b0' &&
+        Math.abs(shapes.reset.width - shapes.reset.height) <= 2,
+      `fit ${shapes.resetFit}, rotation ${shapes.resetRotation}, painted ${shapes.reset.width}\u00d7${shapes.reset.height}`,
+    );
+    console.log(
+      `  \u2022 fit: contained ${shapes.contained.width}\u00d7${shapes.contained.height}, stretched ${shapes.stretched.width}\u00d7${shapes.stretched.height}, reset ${shapes.reset.width}\u00d7${shapes.reset.height} on a ${shapes.frame.width}\u00d7${shapes.frame.height} frame`,
+    );
+  } else {
+    assert('the fit controls can be driven from the panel', false, 'the clip was not painted at all');
+  }
+
+  // Hand the selection back. A clip and a caption are never both selected — clicking either one clears
+  // the other, so the two panels can never describe different things — and the sections below edit a
+  // caption. Clicking a caption row is also the *proof* of that rule: the clip's panel must close.
+  await evaluate(cdp, 'document.querySelector("#blocks .row")?.click()');
+  await check(
+    cdp,
+    'selecting a caption closes the clip\u2019s transform panel',
+    'document.querySelector("#clip-inspector").hidden',
+    (v) => v === true,
+  );
+
   console.log('\n■ templates');
   await evaluate(cdp, '[...document.querySelectorAll("#templates .tile")].find(t=>t.dataset.id==="veed-karaoke").click()');
   await waitFor(cdp, 'document.querySelector("#template-status").textContent', (v) => String(v).includes('Karaoke'), {

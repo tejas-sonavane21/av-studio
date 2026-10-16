@@ -331,6 +331,67 @@
               master track under <b>Audio</b> is the programme's sound. No clips loaded.
             </div>
             <div class="clip-list" id="media-list"><div class="empty">—</div></div>
+
+            <!--
+              The transform panel for the selected clip. It is filled from the document by
+              `renderClipInspector()` in `main.js`, is shown only while a clip is selected (in the
+              preview, on the Clips lane, or from the list above), and its sliders are the same edits
+              the handles make — one model, two ways to ask.
+            -->
+            <div class="clip-inspector" id="clip-inspector" hidden>
+              <div class="clip-inspector-head">
+                <span class="clip-inspector-title" id="clip-inspector-name">—</span>
+                <span class="clip-inspector-where mono" id="clip-inspector-where"></span>
+              </div>
+              <div class="style-bar">
+                <label class="field-inline">
+                  <span>X <b id="clip-x-out">0%</b></span>
+                  <input type="range" id="clip-x" min="0" max="1" step="0.002" value="0" disabled />
+                </label>
+                <label class="field-inline">
+                  <span>Y <b id="clip-y-out">0%</b></span>
+                  <input type="range" id="clip-y" min="0" max="1" step="0.002" value="0" disabled />
+                </label>
+                <label class="field-inline">
+                  <span>Width <b id="clip-w-out">0%</b></span>
+                  <input type="range" id="clip-w" min="0.04" max="1" step="0.002" value="0.4" disabled />
+                </label>
+                <label class="field-inline">
+                  <span>Height <b id="clip-h-out">0%</b></span>
+                  <input type="range" id="clip-h" min="0.04" max="1" step="0.002" value="0.4" disabled />
+                </label>
+                <label class="field-inline">
+                  <span>Rotate <b id="clip-rot-out">0°</b></span>
+                  <input type="range" id="clip-rot" min="-180" max="180" step="1" value="0" disabled />
+                </label>
+                <label class="field-inline">
+                  <span>Opacity <b id="clip-opacity-out">100%</b></span>
+                  <input type="range" id="clip-opacity" min="0" max="1" step="0.01" value="1" disabled />
+                </label>
+                <label class="field-inline">
+                  <span>Fit</span>
+                  <select id="clip-fit" disabled title="contain keeps the whole picture and never distorts it; cover fills the box and crops; stretch distorts it to the box, which is the only setting that can">
+                    <option value="contain">contain — the whole picture</option>
+                    <option value="cover">cover — fill and crop</option>
+                    <option value="stretch">stretch — to the box</option>
+                  </select>
+                </label>
+                <label class="check" title="Hold the picture's shape while dragging a handle. Shift inverts this for one drag.">
+                  <input type="checkbox" id="clip-lock" checked /> lock shape
+                </label>
+                <button class="ghost" id="clip-flip-x" type="button" disabled title="Mirror the picture left to right">Flip H</button>
+                <button class="ghost" id="clip-flip-y" type="button" disabled title="Mirror the picture top to bottom">Flip V</button>
+                <button class="ghost" id="clip-fit-frame" type="button" disabled title="Fit the whole picture inside the frame">Fit frame</button>
+                <button class="ghost" id="clip-fill-frame" type="button" disabled title="Fill the frame with the picture, cropping what hangs over">Fill frame</button>
+                <button class="ghost" id="clip-center" type="button" disabled title="Centre the box on the frame">Centre</button>
+                <button class="ghost" id="clip-reset" type="button" disabled title="Back to how it arrived: its own shape, centred, upright, opaque">Reset</button>
+              </div>
+              <div class="hint" id="clip-inspector-hint">
+                Drag the clip on the preview to move it, its square handles to resize and the round one
+                above it to turn it. Arrow keys nudge, shift-move resizes further, and holding <b>Alt</b>
+                drags without the guides pulling the box.
+              </div>
+            </div>
           </div>
 
           <div class="field">

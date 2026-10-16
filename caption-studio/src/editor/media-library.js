@@ -161,8 +161,15 @@ export function createMediaLibrary({ revoke = (url) => URL.revokeObjectURL(url) 
     ids() {
       return [...entries.keys()];
     },
-    /** How many files are loaded. */
-    get size() {
+    /**
+     * How many files are loaded.
+     *
+     * `count`, not `size` — and that is a fixed bug rather than a preference: an object literal cannot
+     * hold a `size(id)` method and a `size` getter at once, and the getter (being later in the literal)
+     * silently won, so every `mediaLibrary.size(clipId)` threw "not a function". Nothing called it until
+     * the clip's transform panel wanted a file's own size, which is exactly when it would have broken.
+     */
+    get count() {
       return entries.size;
     },
     /** Forget everything, releasing every URL. */

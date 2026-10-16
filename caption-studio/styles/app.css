@@ -546,6 +546,25 @@ button.ghost { background: var(--bg-2); border-color: var(--border); color: var(
 .timeline-handle:hover { background: var(--accent); }
 
 /*
+ * The selected clip's transform panel, under the clip list.
+ *
+ * Shown only while a clip is selected, so it costs nothing when there are no clips and cannot be
+ * mistaken for setting up a clip that does not exist. The purple border is the lane's colour: one
+ * kind of thing, one colour, wherever it appears.
+ */
+.clip-inspector {
+  margin-top: 10px; padding: 10px 10px 8px;
+  border: 1px solid rgba(168, 85, 247, 0.45); border-radius: var(--radius);
+  background: rgba(168, 85, 247, 0.06);
+}
+.clip-inspector[hidden] { display: none; }
+.clip-inspector-head {
+  display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px;
+}
+.clip-inspector-title { font-size: 12px; color: var(--text-0); }
+.clip-inspector-where { margin-left: auto; font-size: 11px; color: var(--text-2); }
+
+/*
  * The overlay-clip lane.
  *
  * A third kind of thing, so it does not reuse the caption background or the blue/green cut lanes: an

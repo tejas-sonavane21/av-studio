@@ -1,25 +1,41 @@
 /**
  * editor/canvas-overlay.js — the interactive placement layer.
  *
- * This module exists so that *moving a caption* is a geometry problem with a thin event adapter,
+ * This module exists so that *moving a thing* is a geometry problem with a thin event adapter,
  * rather than the other way round. Every rule that could be wrong — where the anchor goes, what
- * snaps to what, how far a box may travel before it leaves the frame — lives in
- * `render/placement.js` and is unit-tested there. What is left here is:
+ * snaps to what, how far a box may travel before it leaves the frame, what a resize handle does to a
+ * rotated box — lives in `render/placement.js` (captions) and `render/media-placement.js` (overlay
+ * clips) and is unit-tested there. What is left here is:
  *
  *   1. **Coordinate conversion.** The preview canvas is laid out by CSS, so a pointer event's
  *      client coordinates have to be mapped back into the renderer's *logical* space before any
  *      geometry runs. `pointToLogical()` is that function, and it is exported because getting it
  *      wrong is invisible until the text is dragged somewhere other than the cursor.
- *   2. **Hit testing.** Which caption box is under the pointer? Topmost-first, with a small padding
- *      so a one-line caption is still clickable.
- *   3. **The guide layer.** A separate `<canvas>` above the preview draws the snap lines and the
- *      selection rectangle. It is deliberately *not* the renderer's own guide drawing: the
- *      renderer's guides are a static debugging aid (`opts.guides`), while these appear only while
- *      dragging, must never be mistaken for output, and must never be part of an export.
+ *   2. **Hit testing.** Which thing is under the pointer? The order is the rule: the *handles and the
+ *      body of the selected clip* first (a thing you have selected stays grabbable even where a
+ *      caption overlaps it), then caption boxes, then any other clip topmost-first, with a small
+ *      padding so a one-line caption is still clickable.
+ *   3. **The guide layer.** A separate `<canvas>` above the preview draws the snap lines, the
+ *      selection rectangle and the clip handles. It is deliberately *not* the renderer's own guide
+ *      drawing: the renderer's guides are a static debugging aid (`opts.guides`), while these appear
+ *      only while dragging, must never be mistaken for output, and must never be part of an export.
  *
- * Nothing here mutates the document. Drags and nudges call back with a new anchor and the caller
- * (`main.js`, via `templates/merge.js#setBlockPlacement`) decides whether to keep it — which is what
- * keeps undo, per-block overrides and "reset position" one-liners instead of special cases.
+ * Nothing here mutates the document. Drags, nudges, resizes and rotations call back with a new anchor,
+ * box or angle and the caller (`main.js`) decides whether to keep it — which is what keeps undo,
+ * per-block overrides and "reset position" one-liners instead of special cases.
+ *
+ * ## The clip gestures
+ *
+ * An overlay clip is not placed by an anchor: it *is* a box, so its gestures are the box's. Drag the
+ * body to move it, one of the eight handles to resize it (shift holds the shape), the round handle
+ * above the top edge to turn it (shift steps the angle by 15 degrees), and the arrow keys to nudge it.
+ * All four publish a box or an angle; none of them touch a clip directly.
+ *
+ * **Alt places freely.** Guides are the default for every drag (a box wants to sit on the centre, an
+ * edge, a third, or in line with a caption), and a deliberate off-centre position is exactly the thing
+ * that is hard to land with them on. Holding Alt takes the targets away for the rest of that gesture,
+ * clip or caption, and takes the guide lines away with them so the screen never promises a pull that
+ * will not happen.
  */
 
 import {
@@ -31,6 +47,24 @@ import {
   placeAnchor,
   presetFor,
 } from '../render/placement.js';
+import {
+  HANDLE_SIDE_PX,
+  boxFromHandle,
+  boxFromMove,
+  clipPixels,
+  clipQuad,
+  handlePoints,
+  hitClip,
+  hitHandle,
+  hitRotateHandle,
+  pointInClip,
+  rotateHandlePoint,
+  rotateStemPoint,
+  rotationFromPointer,
+  snapBox,
+  snapRotation,
+} from '../render/media-placement.js';
+import { clipPixelAspect } from '../model/media.js';
 
 /** One keyboard nudge, as a fraction of the canvas (so zoom level cannot change it). */
 export const DEFAULT_NUDGE_STEP = 0.005;
@@ -38,6 +72,14 @@ export const DEFAULT_NUDGE_STEP = 0.005;
 export const NUDGE_MULTIPLIER = 4;
 /** Extra px of slop around a box for hit testing — a single line of small text is short. */
 export const HIT_PADDING_PX = 6;
+/**
+ * No snap targets at all, which is what Alt holds a gesture to.
+ *
+ * One shared object rather than a fresh `{ x: [], y: [] }` per event, so "is the modifier on?" is a
+ * comparison instead of a search — and the guide layer draws from this same set, so an empty one means
+ * "nothing will pull, and nothing is drawn to suggest otherwise".
+ */
+const NO_TARGETS = Object.freeze({ x: Object.freeze([]), y: Object.freeze([]) });
 
 const ARROW_STEPS = {
   ArrowLeft: { dxSteps: -1, dySteps: 0 },
@@ -48,6 +90,9 @@ const ARROW_STEPS = {
 
 /** Colour of the *active* snap line — the same lime the parity underline uses. */
 const GUIDE_COLOURS = { active: '#22c55e', passive: 'rgba(255,255,255,0.22)' };
+
+/** The selection colour, for a caption's outline and a clip's outline and handles. */
+const SELECT_COLOUR = '#22c55e';
 
 // ---------------------------------------------------------------------------
 // pure geometry (exported for tests)
@@ -200,15 +245,30 @@ export function dragAnchor({ grabOffset, pointer, canvas }) {
  * @param {HTMLCanvasElement} options.canvas    the preview canvas (the thing being measured)
  * @param {HTMLCanvasElement} options.overlay   the guide canvas (the thing receiving events)
  * @param {object} options.preview              `editor/preview.js` instance
- * @param {(blockId: string)=>void} [options.onSelect]
- * @param {(blockId: string, anchor: object, info: object)=>void} [options.onPlace]
+ * @param {()=>Array<object>} [options.getClips]  the document's overlay clips, live
+ * @param {(clipId:string)=>({width:number,height:number}|null)} [options.clipSize]
+ *        the media's own pixel size, for a shape-locked resize
+ * @param {(blockId:string)=>void} [options.onSelect]
+ * @param {(blockId:string, anchor:object, info:object)=>void} [options.onPlace]
+ * @param {(clipId:string|null)=>void} [options.onClipSelect]
+ * @param {(clipId:string, box:object, info:object)=>void} [options.onClipBox]
+ * @param {(clipId:string, degrees:number, info:object)=>void} [options.onClipRotate]
+ * @param {()=>boolean} [options.keepAspect]
+ *        whether a resize holds the picture's shape — the panel's lock. Shift inverts it for one drag,
+ *        which is the convention every editor shares: the lock says what the *default* is.
  */
 export function createCanvasOverlay({
   canvas,
   overlay,
   preview,
+  getClips = () => [],
+  clipSize = () => null,
+  keepAspect = () => true,
   onSelect = null,
   onPlace = null,
+  onClipSelect = null,
+  onClipBox = null,
+  onClipRotate = null,
   snapTolerance = DEFAULT_SNAP_TOLERANCE_PX,
   showAllTargets = true,
 } = {}) {
@@ -217,8 +277,10 @@ export function createCanvasOverlay({
 
   const ctx = overlay.getContext?.('2d') ?? null;
   let selectedId = null;
+  let selectedClipId = null;
   let enabled = true;
-  let drag = null; // { blockId, grabOffset, anchor, box }
+  let drag = null; // { blockId, grabOffset, anchor, layout }
+  let clipDrag = null; // { mode, clipId, handle, startBox, startRotation, startPoint, box, rotation, moved }
   let guides = { targets: { x: [], y: [] }, snappedX: null, snappedY: null };
   let lastKey = '';
   let observers = [];
@@ -257,8 +319,35 @@ export function createCanvasOverlay({
     return (preview.layouts ?? []).find((l) => l.blockId === selectedId) ?? null;
   }
 
-  /** Snap targets for a drag: canvas centre/thirds/safe areas/edges + the other visible blocks. */
-  function targetsFor(excludeBlockId) {
+  /** Every overlay clip in the document, live. */
+  function clips() {
+    const list = getClips?.() ?? [];
+    return Array.isArray(list) ? list.filter(Boolean) : [];
+  }
+
+  /** A clip by id, or `null`. */
+  function clipById(id) {
+    return id ? clips().find((clip) => clip.id === id) ?? null : null;
+  }
+
+  /** The clip the overlay is drawing handles for: the one being dragged, else the selected one. */
+  function activeClip() {
+    if (clipDrag) return clipById(clipDrag.clipId);
+    return clipById(selectedClipId);
+  }
+
+  /**
+   * The pixel ratio a shape-locked resize holds: the media's own shape when its size is known, and the
+   * box's own shape when it is not (an offline clip is still resizable, and its box is all there is).
+   */
+  function aspectFor(clip) {
+    const media = clipSize?.(clip.id) ?? null;
+    if (media && media.width > 0 && media.height > 0) return media.width / media.height;
+    return clipPixelAspect(clip, preview.renderer.size);
+  }
+
+  /** Snap targets for any drag: canvas centre/thirds/safe areas/edges + the visible captions. */
+  function targetsFor(excludeBlockId = null) {
     return buildSnapTargets({
       canvas: preview.renderer.size,
       layouts: preview.layouts ?? [],
@@ -274,7 +363,7 @@ export function createCanvasOverlay({
     ctx.clearRect(0, 0, w, h);
     const to = (p) => logicalToOverlay(p, geo);
 
-    for (const line of guideLinesFor({ canvas: geo.size, ...guides, showAll: drag ? showAllTargets : false })) {
+    for (const line of guideLinesFor({ canvas: geo.size, ...guides, showAll: drag || clipDrag ? showAllTargets : false })) {
       const a = to({ x: line.x1, y: line.y1 });
       const b = to({ x: line.x2, y: line.y2 });
       ctx.save?.();
@@ -288,18 +377,78 @@ export function createCanvasOverlay({
       ctx.restore?.();
     }
 
+    // The selected clip first: its outline is the box the handles belong to, and both follow a drag
+    // exactly because they are drawn from the clip's *live* box when there is one being dragged.
+    const clip = activeClip();
+    if (clip) paintClip(clip, geo, to);
+
     // Selection outline: drawn from the *placed* anchor, so it tracks a drag exactly.
     const layout = selectedLayout() ?? drag?.layout ?? null;
     const anchor = drag?.anchor ?? preview.document?.blocks?.find((b) => b.id === selectedId)?.placement ?? null;
     if (layout && anchor) {
       const r = selectionRect(anchor, geo.size, { width: layout.width, height: layout.height });
       const tl = to({ x: r.x, y: r.y });
-      const scale = geo.scale;
       ctx.save?.();
       ctx.strokeStyle = 'rgba(34,197,94,0.9)';
       ctx.lineWidth = 1;
       ctx.setLineDash?.([5, 4]);
-      ctx.strokeRect?.(tl.x, tl.y, r.w * scale, r.h * scale);
+      ctx.strokeRect?.(tl.x, tl.y, r.w * geo.scale, r.h * geo.scale);
+      ctx.restore?.();
+    }
+  }
+
+  /**
+   * The selected clip: its rotated outline, the stem and round handle for turning it, and the eight
+   * resize handles.
+   *
+   * Every position comes from `render/media-placement.js` — the same `handlePoints()` the hit test uses
+   * — so a handle is always drawn exactly where it can be grabbed. Sizes are scaled by the preview's
+   * own zoom (logical pixels → what is on screen), so a handle is the same size to the hand whatever the
+   * window is.
+   */
+  function paintClip(clip, geo, to) {
+    if (!ctx) return;
+    const scale = geo.scale;
+    const side = Math.max(7, HANDLE_SIDE_PX * scale);
+    const quad = clipQuad(clip, geo.size).map(to);
+
+    ctx.save?.();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = SELECT_COLOUR;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash?.([]);
+    ctx.beginPath?.();
+    ctx.moveTo?.(quad[0].x, quad[0].y);
+    for (let i = 1; i < quad.length; i++) ctx.lineTo?.(quad[i].x, quad[i].y);
+    ctx.closePath?.();
+    ctx.stroke?.();
+    ctx.restore?.();
+
+    // The turning handle: a stem out of the top edge into a round grip.
+    const stemStart = to(rotateStemPoint(clip, geo.size));
+    const grip = to(rotateHandlePoint(clip, geo.size));
+    ctx.save?.();
+    ctx.strokeStyle = SELECT_COLOUR;
+    ctx.lineWidth = 1;
+    ctx.beginPath?.();
+    ctx.moveTo?.(stemStart.x, stemStart.y);
+    ctx.lineTo?.(grip.x, grip.y);
+    ctx.stroke?.();
+    ctx.beginPath?.();
+    ctx.arc?.(grip.x, grip.y, Math.max(5, side * 0.6), 0, Math.PI * 2);
+    ctx.fillStyle = '#0b0b0b';
+    ctx.fill?.();
+    ctx.stroke?.();
+    ctx.restore?.();
+
+    for (const handle of handlePoints(clip, geo.size)) {
+      const p = to(handle);
+      ctx.save?.();
+      ctx.fillStyle = '#0b0b0b';
+      ctx.strokeStyle = SELECT_COLOUR;
+      ctx.lineWidth = 1.5;
+      ctx.fillRect?.(p.x - side / 2, p.y - side / 2, side, side);
+      ctx.strokeRect?.(p.x - side / 2, p.y - side / 2, side, side);
       ctx.restore?.();
     }
   }
@@ -308,9 +457,10 @@ export function createCanvasOverlay({
   function refresh({ force = false } = {}) {
     // Nothing to draw and nothing to hit-test: skip before building the key, so an idle editor
     // does not allocate on every animation frame.
-    if (!force && !selectedId && !drag) return false;
+    if (!force && !selectedId && !selectedClipId && !drag && !clipDrag) return false;
     const size = preview.renderer.size;
     const cRect = canvas.getBoundingClientRect?.() ?? { left: 0, top: 0, width: size.width, height: size.height };
+    const clip = activeClip();
     const key = [
       size.width,
       size.height,
@@ -319,7 +469,9 @@ export function createCanvasOverlay({
       Math.round(cRect.width),
       Math.round(cRect.height),
       selectedId ?? '',
+      searchKey(clip),
       drag ? 'drag' : '',
+      clipDrag?.mode ?? '',
       preview.layouts?.length ?? 0,
       (preview.layouts ?? []).map((l) => `${l.blockId}:${Math.round(l.x)}:${Math.round(l.y)}`).join(','),
     ].join('|');
@@ -329,15 +481,90 @@ export function createCanvasOverlay({
     return true;
   }
 
+  /** The part of the paint that depends on a clip's own numbers, rounded so sub-pixel noise is not a change. */
+  function searchKey(clip) {
+    if (!clip) return '';
+    return [
+      clip.id,
+      Math.round(clip.box.x * 1e4),
+      Math.round(clip.box.y * 1e4),
+      Math.round(clip.box.w * 1e4),
+      Math.round(clip.box.h * 1e4),
+      Math.round((Number(clip.rotation) || 0) * 100),
+    ].join(':');
+  }
+
   function select(blockId) {
     selectedId = blockId ?? null;
+    if (selectedId && selectedClipId) {
+      selectedClipId = null;
+      onClipSelect?.(null);
+    }
     onSelect?.(selectedId);
     refresh({ force: true });
     return selectedId;
   }
 
+  function selectClip(clipId) {
+    const next = clipId ?? null;
+    selectedClipId = next;
+    if (next && selectedId) {
+      selectedId = null;
+      onSelect?.(null);
+    }
+    onClipSelect?.(next);
+    refresh({ force: true });
+    return selectedClipId;
+  }
+
+  /**
+   * Nothing is selected: both selections cleared, each change published.
+   *
+   * The caption side is published even when nothing was selected, because a click on empty space is how a
+   * person says "none of these" — a panel still describing the last block after that click would be
+   * arguing with them. The clip side is published only when there was a clip: it is a whole object with
+   * nothing to re-assert, and a notification per empty click would be noise.
+   */
+  function clearSelection() {
+    const hadClip = Boolean(selectedClipId);
+    selectedId = null;
+    selectedClipId = null;
+    onSelect?.(null);
+    if (hadClip) onClipSelect?.(null);
+    refresh({ force: true });
+    return true;
+  }
+
   function emitPlace(blockId, anchor, info) {
     onPlace?.(blockId, anchor, info);
+  }
+
+  function emitClipBox(clipId, box, info) {
+    onClipBox?.(clipId, box, info);
+  }
+
+  function emitClipRotate(clipId, degrees, info) {
+    onClipRotate?.(clipId, degrees, info);
+  }
+
+  /**
+   * Hold Alt to place something freely.
+   *
+   * Every edge, centre, third, safe area and visible caption is a snap target, which is what makes a
+   * deliberately off-centre position hard to land — so the modifier takes the targets away for the rest
+   * of the gesture. The guide lines go with them (`paint()` draws from the same set), so the overlay can
+   * never promise a pull it will not make. Letting go puts the full set back, mid-drag included, so a
+   * position can be nudged close with guides and then finished by hand.
+   */
+  function applyGuideModifier(free) {
+    if (!guides) return;
+    if (free) {
+      guides.targets = NO_TARGETS;
+      guides.snappedX = null;
+      guides.snappedY = null;
+      return;
+    }
+    if (guides.targets === NO_TARGETS) guides.targets = targetsFor(drag ? drag.blockId : null);
   }
 
   /** Drag: pointer down on a block. */
@@ -346,51 +573,190 @@ export function createCanvasOverlay({
     const geo = geometry();
     const size = geo.size;
     const point = pointToLogical({ rect: geo.cRect, size, clientX: e.clientX, clientY: e.clientY });
+
+    // 1. The selected clip — its handles first, then its own body, so the thing the user has selected
+    //    stays grabbable even where a caption overlaps it.
+    const selectedClip = clipById(selectedClipId);
+    if (selectedClip) {
+      const gesture = beginGestureOn(point, selectedClip, size);
+      if (gesture) {
+        startClipDrag(gesture, point, e);
+        return;
+      }
+    }
+
+    // 2. A caption box.
     const layout = hitTest(preview.layouts ?? [], point);
-    if (!layout) {
-      select(null);
+    if (layout) {
+      const anchor = layoutAnchor(layout.blockId) ?? { posX: 0.5, posY: 0.5, gravity: 'center' };
+      drag = {
+        blockId: layout.blockId,
+        layout,
+        anchor,
+        grabOffset: {
+          dx: point.x - (anchor.posX ?? 0.5) * size.width,
+          dy: point.y - (anchor.posY ?? 0.5) * size.height,
+        },
+      };
+      select(layout.blockId);
+      guides = { targets: targetsFor(layout.blockId), snappedX: null, snappedY: null };
+      applyGuideModifier(e.altKey === true);
+      overlay.setPointerCapture?.(e.pointerId);
+      e.preventDefault?.();
       return;
     }
-    const anchor = layoutAnchor(layout.blockId) ?? { posX: 0.5, posY: 0.5, gravity: 'center' };
-    drag = {
-      blockId: layout.blockId,
-      layout,
-      anchor,
-      grabOffset: {
-        dx: point.x - (anchor.posX ?? 0.5) * size.width,
-        dy: point.y - (anchor.posY ?? 0.5) * size.height,
-      },
+
+    // 3. Any other clip, topmost first.
+    const clip = hitClip(point, clips(), size);
+    if (clip) {
+      startClipDrag({ mode: 'move', clipId: clip.id, handle: null }, point, e);
+      return;
+    }
+
+    // 4. Nothing.
+    clearSelection();
+  }
+
+  /** Which clip gesture the pointer starts, or `null` when it is not one — see `media-placement.js`. */
+  function beginGestureOn(point, clip, size) {
+    if (hitRotateHandle(point, clip, size)) {
+      return { mode: 'rotate', clipId: clip.id, handle: 'rotate' };
+    }
+    const handle = hitHandle(point, handlePoints(clip, size));
+    if (handle) return { mode: 'resize', clipId: clip.id, handle: handle.id };
+    if (pointInClip(point, clip, size)) return { mode: 'move', clipId: clip.id, handle: null };
+    return null;
+  }
+
+  /** Begin a clip gesture: remember where it started, so every move is measured from the same place. */
+  function startClipDrag(gesture, point, e) {
+    const clip = clipById(gesture.clipId);
+    if (!clip) return false;
+    selectClip(clip.id);
+    const size = preview.renderer.size;
+    clipDrag = {
+      mode: gesture.mode,
+      clipId: clip.id,
+      handle: gesture.handle,
+      startBox: { ...clip.box },
+      startRotation: Number(clip.rotation) || 0,
+      startPoint: point,
+      // The angle the rotation handle had when it was grabbed. Measuring from the *handle* rather
+      // than from the clip's own angle is what stops a clip that is already turned from jumping to
+      // zero the moment the gesture starts.
+      startGrip: gesture.mode === 'rotate' ? rotateHandlePoint(clip, size) : null,
+      aspect: aspectFor(clip),
+      box: null,
+      rotation: null,
+      moved: false,
     };
-    select(layout.blockId);
-    guides = { targets: targetsFor(layout.blockId), snappedX: null, snappedY: null };
+    guides = { targets: targetsFor(null), snappedX: null, snappedY: null };
+    applyGuideModifier(e.altKey === true);
     overlay.setPointerCapture?.(e.pointerId);
     e.preventDefault?.();
+    refresh({ force: true });
+    return true;
   }
 
   /** Drag: pointer move. Snap + clamp, then publish the new anchor immediately (live preview). */
   function onPointerMove(e) {
-    if (!drag) return;
+    if (!enabled) return;
     const geo = geometry();
     const size = geo.size;
     const point = pointToLogical({ rect: geo.cRect, size, clientX: e.clientX, clientY: e.clientY });
-    const raw = dragAnchor({ grabOffset: drag.grabOffset, pointer: point, canvas: size });
-    const box = { width: drag.layout.width, height: drag.layout.height };
-    const placed = placeAnchor(raw, {
-      canvas: size,
-      box,
-      targets: guides.targets,
-      tolerance: snapTolerance,
-    });
-    drag.anchor = placed.anchor;
-    guides.snappedX = placed.snappedX;
-    guides.snappedY = placed.snappedY;
-    emitPlace(drag.blockId, placed.anchor, { preset: presetFor(placed.anchor), live: true, guides: placed });
-    refresh({ force: true });
-    e.preventDefault?.();
+    // The modifier is read per event, not per gesture, so pressing or releasing Alt *during* a drag does
+    // what it says: the guides come back under the key, which is how a person nudges something close and
+    // then finishes the last few pixels by hand.
+    if (drag || clipDrag) applyGuideModifier(e.altKey === true);
+
+    if (clipDrag) {
+      const clip = clipById(clipDrag.clipId);
+      if (!clip) return;
+      if (clipDrag.mode === 'rotate') {
+        // `clipPixels` answers a *rect*, so its centre is `cx`/`cy` — the angle functions take a point,
+        // and handing them the rect would turn the clip about its top-left corner instead of its middle.
+        const start = clipPixels({ box: clipDrag.startBox }, size);
+        const degrees = rotationFromPointer({
+          centre: { x: start.cx, y: start.cy },
+          from: clipDrag.startGrip,
+          to: point,
+          startRotation: clipDrag.startRotation,
+        });
+        // Shift is "put it on the step": the angle then takes the nearest 15 degrees however far away
+        // that is, which is how a person asks for exactly 45 without aiming at it.
+        const snapped = snapRotation(degrees, { force: e.shiftKey === true });
+        clipDrag.rotation = snapped.degrees;
+        clipDrag.moved = true;
+        emitClipRotate(clip.id, snapped.degrees, { live: true, snapped: snapped.snapped, commit: false });
+      } else if (clipDrag.mode === 'resize') {
+        const resized = boxFromHandle({
+          handle: clipDrag.handle,
+          startBox: clipDrag.startBox,
+          point,
+          size,
+          rotation: clipDrag.startRotation,
+          // The lock is the default and shift inverts it, so one gesture can always do the other thing
+          // than whatever the panel is set to.
+          keepAspect: Boolean(keepAspect?.()) !== (e.shiftKey === true),
+          aspect: clipDrag.aspect,
+        });
+        clipDrag.box = resized.box;
+        clipDrag.moved = true;
+        emitClipBox(clip.id, resized.box, { live: true, commit: false, resize: true, handle: clipDrag.handle });
+      } else {
+        const moved = boxFromMove({ startBox: clipDrag.startBox, startPoint: clipDrag.startPoint, point, size });
+        const snapped = snapBox(moved, { targets: guides.targets, size, tolerance: snapTolerance });
+        clipDrag.box = snapped.box;
+        clipDrag.moved = true;
+        guides.snappedX = snapped.snappedX;
+        guides.snappedY = snapped.snappedY;
+        emitClipBox(clip.id, snapped.box, { live: true, commit: false, guides: snapped });
+      }
+      refresh({ force: true });
+      e.preventDefault?.();
+      return;
+    }
+
+    if (drag) {
+      const raw = dragAnchor({ grabOffset: drag.grabOffset, pointer: point, canvas: size });
+      const box = { width: drag.layout.width, height: drag.layout.height };
+      const placed = placeAnchor(raw, {
+        canvas: size,
+        box,
+        targets: guides.targets,
+        tolerance: snapTolerance,
+      });
+      drag.anchor = placed.anchor;
+      guides.snappedX = placed.snappedX;
+      guides.snappedY = placed.snappedY;
+      emitPlace(drag.blockId, placed.anchor, { preset: presetFor(placed.anchor), live: true, guides: placed });
+      refresh({ force: true });
+      e.preventDefault?.();
+      return;
+    }
+
+    // Nothing is being dragged: the cursor says what a press would do here.
+    updateCursor(point, geo);
   }
 
   /** Drag: pointer up. `commit` tells the caller this value should survive (undo/history). */
   function onPointerUp(e) {
+    if (clipDrag) {
+      const { clipId, mode, moved } = clipDrag;
+      const box = clipDrag.box ?? clipDrag.startBox;
+      const rotation = clipDrag.rotation ?? clipDrag.startRotation;
+      clipDrag = null;
+      guides = { targets: { x: [], y: [] }, snappedX: null, snappedY: null };
+      // A press that never moved is a *selection*, not an edit: committing one would log a change to a
+      // clip nobody changed.
+      if (moved) {
+        if (mode === 'rotate') emitClipRotate(clipId, rotation, { live: false, commit: true });
+        else emitClipBox(clipId, box, { live: false, commit: true });
+      }
+      overlay.releasePointerCapture?.(e?.pointerId);
+      refresh({ force: true });
+      return;
+    }
     if (!drag) return;
     const { blockId, anchor } = drag;
     drag = null;
@@ -400,10 +766,49 @@ export function createCanvasOverlay({
     refresh({ force: true });
   }
 
+  /** The cursor for the thing under the pointer: a handle's own, `move` over anything draggable, else none. */
+  function updateCursor(point, geo) {
+    if (!overlay.style) return;
+    const clip = clipById(selectedClipId);
+    if (clip) {
+      if (hitRotateHandle(point, clip, geo.size)) {
+        overlay.style.cursor = 'grab';
+        return;
+      }
+      const handle = hitHandle(point, handlePoints(clip, geo.size));
+      if (handle) {
+        overlay.style.cursor = handle.cursor;
+        return;
+      }
+    }
+    overlay.style.cursor = hitClip(point, clips(), geo.size) || hitTest(preview.layouts ?? [], point) ? 'move' : '';
+  }
+
   /** Keyboard nudge. Ignored while typing, so arrow keys in a text field still work. */
   function onKeyDown(e) {
     const step = ARROW_STEPS[e.key];
-    if (!enabled || !step || !selectedId || isTyping(e.target)) return;
+    if (!enabled || !step || isTyping(e.target)) return;
+
+    // A selected clip is nudged *as a box*: the same step as a caption, applied to its position,
+    // clamped into the frame by the model on the way out.
+    const clip = clipById(selectedClipId);
+    if (clip) {
+      const multiplier = e.shiftKey ? NUDGE_MULTIPLIER : 1;
+      e.preventDefault?.();
+      emitClipBox(
+        clip.id,
+        {
+          ...clip.box,
+          x: clip.box.x + step.dxSteps * DEFAULT_NUDGE_STEP * multiplier,
+          y: clip.box.y + step.dySteps * DEFAULT_NUDGE_STEP * multiplier,
+        },
+        { live: false, commit: true, keyboard: true },
+      );
+      refresh({ force: true });
+      return;
+    }
+
+    if (!selectedId) return;
     const anchor = layoutAnchor(selectedId);
     if (!anchor) return;
     const next = nudgeAnchor(anchor, {
@@ -455,6 +860,7 @@ export function createCanvasOverlay({
     observers.forEach((o) => o.disconnect?.());
     observers = [];
     drag = null;
+    clipDrag = null;
   }
 
   function setEnabled(next) {
@@ -467,10 +873,27 @@ export function createCanvasOverlay({
 
   return {
     select,
+    selectClip,
     refresh,
     setEnabled,
     dispose,
     nudge: (steps, { multiplier = 1 } = {}) => {
+      // A selected clip nudges as a box; a selected caption as an anchor. One entry point, because a
+      // toolbar button should not have to know which kind of thing is selected.
+      const clip = clipById(selectedClipId);
+      if (clip) {
+        emitClipBox(
+          clip.id,
+          {
+            ...clip.box,
+            x: clip.box.x + (steps.dxSteps ?? 0) * DEFAULT_NUDGE_STEP * multiplier,
+            y: clip.box.y + (steps.dySteps ?? 0) * DEFAULT_NUDGE_STEP * multiplier,
+          },
+          { live: false, commit: true },
+        );
+        refresh({ force: true });
+        return clip.box;
+      }
       if (!selectedId) return null;
       const anchor = layoutAnchor(selectedId);
       if (!anchor) return null;
@@ -482,11 +905,17 @@ export function createCanvasOverlay({
     get selectedId() {
       return selectedId;
     },
+    get selectedClipId() {
+      return selectedClipId;
+    },
     get enabled() {
       return enabled;
     },
     get dragging() {
-      return Boolean(drag);
+      return Boolean(drag || clipDrag);
+    },
+    get clipDragging() {
+      return clipDrag ? { ...clipDrag, startBox: { ...clipDrag.startBox } } : null;
     },
     get guides() {
       return { ...guides };

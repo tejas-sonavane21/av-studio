@@ -13,26 +13,35 @@ import assert from 'node:assert/strict';
 
 import {
   DEFAULT_BOX_WIDTH,
+  MEDIA_FITS,
   MIN_BOX,
   MIN_CLIP,
   addMediaClip,
   boxForMedia,
   boxRect,
+  centerClipBox,
   clipDrawRect,
   clipLength,
+  clipPixelAspect,
   clipSourceTime,
   clipsAt,
   describeClip,
   ensureMedia,
   findClip,
+  fitClipToFrame,
+  flipMediaClip,
   kindFromFile,
   mediaClips,
   moveMediaClip,
   normalizeBox,
   normalizeClip,
   normalizeClips,
+  normalizeRotation,
   planClip,
   removeMediaClip,
+  resetMediaClip,
+  rotateMediaClip,
+  setClipBox,
   trimMediaClip,
   updateMediaClip,
 } from '../../src/model/media.js';
@@ -242,4 +251,111 @@ test('a clip with no readable size draws nothing rather than a stretched rectang
   const drawn = clipDrawRect({ box: { x: 0, y: 0, w: 0.5, h: 0.5 } }, null, { width: 1000, height: 500 });
   assert.equal(drawn.width, 0);
   assert.equal(drawn.height, 0);
+});
+
+// --------------------------------------------------------------------------- //
+// turning, mirroring and stretching one
+// --------------------------------------------------------------------------- //
+
+test('a rotation is wrapped into one half turn either way, and upright is exactly zero', () => {
+  assert.equal(normalizeRotation(0), 0);
+  assert.equal(normalizeRotation(45), 45);
+  assert.equal(normalizeRotation(270), -90, 'a three-quarter turn is a quarter turn the other way');
+  assert.equal(normalizeRotation(540), 180);
+  assert.equal(normalizeRotation(-180), 180, 'and the half turn is stored one way round');
+  assert.equal(normalizeRotation(-90), -90);
+  assert.equal(normalizeRotation(-450), -90, 'a whole turn is not a rotation');
+  assert.equal(normalizeRotation('nonsense'), 0);
+  assert.equal(normalizeRotation(1e-12), 0, 'a rounding error is not a rotation');
+  // Two clips that look identical store the same number: the point of wrapping rather than clamping.
+  assert.equal(normalizeRotation(-90), normalizeRotation(270));
+});
+
+test('a clip carries its turn, its mirrors and its fit, and refuses a fit it does not know', () => {
+  const turned = clip({ rotation: 370, flipX: true, fit: 'cover' });
+  assert.equal(turned.rotation, 10);
+  assert.equal(turned.flipX, true);
+  assert.equal(turned.flipY, false, 'a mirror is per axis, and off unless asked for');
+  assert.equal(turned.fit, 'cover');
+  assert.deepEqual([...MEDIA_FITS], ['contain', 'cover', 'stretch']);
+  assert.equal(clip({ fit: 'stretch' }).fit, 'stretch', 'stretch is a setting, not an accident');
+  assert.equal(clip({ fit: 'squash' }).fit, 'contain', 'an unknown fit falls back rather than being trusted');
+  // Booleans are not truthy-shaped: `flipX: 'yes'` is not a mirror, because nothing writes a string.
+  assert.equal(clip({ flipX: 'yes' }).flipX, false);
+});
+
+test('stretch fills the box exactly, and is the only fit that can change a shape', () => {
+  const size = { width: 1000, height: 500 };
+  const square = { width: 200, height: 200 };
+  const stretched = clipDrawRect({ box: { x: 0.1, y: 0.2, w: 0.4, h: 0.4 }, fit: 'stretch' }, square, size);
+  assert.deepEqual(stretched, { x: 100, y: 100, width: 400, height: 200 });
+  const contained = clipDrawRect({ box: { x: 0.1, y: 0.2, w: 0.4, h: 0.4 }, fit: 'contain' }, square, size);
+  assert.deepEqual(contained, { x: 200, y: 100, width: 200, height: 200 }, 'contain letterboxes instead');
+  // Stretch needs no measurement: the box *is* the rectangle, so an unmeasured file still fills it —
+  // which is what was asked for, and the one case where an unknown size is not a reason to draw nothing.
+  assert.deepEqual(
+    clipDrawRect({ box: { x: 0, y: 0, w: 0.5, h: 0.5 }, fit: 'stretch' }, null, size),
+    { x: 0, y: 0, width: 500, height: 250 },
+  );
+});
+
+test('a box can be placed, turned, mirrored and put back, through the model', () => {
+  const doc = { media: [clip()] };
+  setClipBox(doc, 'c1', { x: 0.2, y: 0.3, w: 0.5, h: 0.25 });
+  assert.deepEqual(findClip(doc, 'c1').box, { x: 0.2, y: 0.3, w: 0.5, h: 0.25 });
+  setClipBox(doc, 'c1', { x: 99, y: -5, w: 0.5, h: 0.25 });
+  assert.deepEqual(findClip(doc, 'c1').box, { x: 0.5, y: 0, w: 0.5, h: 0.25 }, 'the model keeps it on the frame');
+
+  rotateMediaClip(doc, 'c1', 30);
+  assert.equal(findClip(doc, 'c1').rotation, 30);
+  rotateMediaClip(doc, 'c1', 405);
+  assert.equal(findClip(doc, 'c1').rotation, 45, 'the angle is absolute, and a whole turn is dropped');
+  rotateMediaClip(doc, 'c1', -90);
+  assert.equal(findClip(doc, 'c1').rotation, -90);
+  rotateMediaClip(doc, 'c1', 0);
+  assert.equal(findClip(doc, 'c1').rotation, 0, 'and upright is one exact number');
+
+  flipMediaClip(doc, 'c1', 'x');
+  assert.equal(findClip(doc, 'c1').flipX, true);
+  flipMediaClip(doc, 'c1', 'x');
+  assert.equal(findClip(doc, 'c1').flipX, false, 'a mirror button toggles');
+  flipMediaClip(doc, 'c1', 'y');
+  assert.equal(findClip(doc, 'c1').flipY, true);
+  assert.equal(findClip(doc, 'c1').flipX, false, 'and each axis is its own');
+
+  assert.equal(rotateMediaClip(doc, 'nope', 30), null);
+  assert.equal(flipMediaClip(doc, 'nope', 'x'), null);
+  assert.equal(setClipBox(doc, 'nope', { w: 1, h: 1 }), null);
+});
+
+test('fit-to-frame, centre and reset are the three ways back to somewhere sensible', () => {
+  const doc = { media: [clip()] };
+  fitClipToFrame(doc, 'c1', { mode: 'contain' });
+  assert.deepEqual(findClip(doc, 'c1').box, { x: 0, y: 0, w: 1, h: 1 });
+  assert.equal(findClip(doc, 'c1').fit, 'contain', 'contain fits the whole picture inside the frame');
+  fitClipToFrame(doc, 'c1', { mode: 'cover' });
+  assert.equal(findClip(doc, 'c1').fit, 'cover', 'cover fills it and crops');
+
+  setClipBox(doc, 'c1', { x: 0.05, y: 0.05, w: 0.2, h: 0.2 });
+  centerClipBox(doc, 'c1');
+  assert.deepEqual(findClip(doc, 'c1').box, { x: 0.4, y: 0.4, w: 0.2, h: 0.2 });
+
+  rotateMediaClip(doc, 'c1', 45);
+  flipMediaClip(doc, 'c1', 'x');
+  updateMediaClip(doc, 'c1', { opacity: 0.4 });
+  resetMediaClip(doc, 'c1', { media: entry, canvas });
+  const back = findClip(doc, 'c1');
+  assert.deepEqual(back.box, boxForMedia(entry, canvas), 'the box a dropped file gets');
+  assert.equal(back.rotation, 0);
+  assert.equal(back.flipX, false);
+  assert.equal(back.opacity, 1);
+  assert.equal(back.fit, 'contain');
+  assert.equal(back.start, 2, 'and resetting the look does not move the clip in time');
+});
+
+test('a shape is held in pixels, which is the only ratio that means anything on screen', () => {
+  const squareBox = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
+  assert.equal(clipPixelAspect({ box: squareBox }, { width: 1920, height: 1080 }), 16 / 9);
+  assert.equal(clipPixelAspect({ box: squareBox }, { width: 1080, height: 1920 }), 9 / 16, 'the same box, a phone');
+  assert.equal(clipPixelAspect({ box: { w: 0, h: 0 } }, canvas), 1, 'a degenerate box is not a division by zero');
 });
