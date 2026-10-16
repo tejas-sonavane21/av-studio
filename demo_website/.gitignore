@@ -1,0 +1,5 @@
+node_modules/
+
+# Bookings captured by the local demo server are runtime data, not source.
+data/bookings.json
+data/bookings.json.tmp

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-label="Aqualux Watersports, Ajit Beach Alibag">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b3550"/>
+      <stop offset=".55" stop-color="#0f7f97"/>
+      <stop offset="1" stop-color="#17c3d6"/>
+    </linearGradient>
+    <linearGradient id="hull" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f2fbff"/>
+      <stop offset="1" stop-color="#bfe6f2"/>
+    </linearGradient>
+    <radialGradient id="sun" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#ffe6b0" stop-opacity=".95"/>
+      <stop offset="1" stop-color="#ffe6b0" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#sky)"/>
+  <circle cx="960" cy="150" r="150" fill="url(#sun)"/>
+
+  <path d="M0 430c160-26 320 16 480 4s320-42 480-18 240 26 240 26v188H0z" fill="#05566d" opacity=".55"/>
+  <path d="M0 470c180-22 340 20 520 8s340-34 500-12 180 20 180 20v144H0z" fill="#043d52" opacity=".7"/>
+
+  <g transform="translate(690 330) scale(.62)">
+    <path d="M96 244c34 32 114 48 224 48 120 0 220-18 276-52l24-18c-14-16-48-26-100-30l-220-4c-100-2-170 22-204 56z" fill="url(#hull)"/>
+    <path d="M132 232c110-16 250-22 420-10-160 22-300 28-420 34z" fill="#12c7d4"/>
+    <path d="M118 246c30-24 70-38 122-44l10 14c-46 8-80 20-104 40z" fill="#ff7549"/>
+    <rect x="268" y="152" width="156" height="38" rx="16" fill="#06202e"/>
+    <path d="M448 192l16-52" fill="none" stroke="#06202e" stroke-width="12" stroke-linecap="round"/>
+    <path d="M428 138l70-10" fill="none" stroke="#06202e" stroke-width="10" stroke-linecap="round"/>
+    <path d="M92 250l-30-6v22l30-4z" fill="#06202e"/>
+  </g>
+
+  <text x="90" y="250" font-family="Sora, Segoe UI, system-ui, sans-serif" font-size="96" font-weight="800" fill="#ffffff" letter-spacing="4">AQUALUX</text>
+  <text x="90" y="330" font-family="Sora, Segoe UI, system-ui, sans-serif" font-size="52" font-weight="600" fill="#7ce9df" letter-spacing="16">WATERSPORTS</text>
+  <text x="92" y="404" font-family="Outfit, Segoe UI, system-ui, sans-serif" font-size="30" fill="#d6eef6">Jetcar rides at Shreenika Coastal Retreat</text>
+  <text x="92" y="446" font-family="Outfit, Segoe UI, system-ui, sans-serif" font-size="30" fill="#9fd6e4">Akshi Beach, Alibag - Arabian Sea</text>
+</svg>
