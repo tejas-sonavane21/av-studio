@@ -88,8 +88,26 @@ export const DEFAULT_CLIP_SECONDS = 5;
  */
 export const FULL_CROP = Object.freeze({ x: 0, y: 0, w: 1, h: 1 });
 
-/** The smallest crop, as a fraction of the media. Below this it is a speck, not a picture. */
-export const MIN_CROP = 0.02;
+/**
+ * The smallest crop, as a fraction of the media. Below this it is a speck, not a picture.
+ *
+ * A *fraction* floor rather than a pixel one, because the model has to hold a crop for a file nobody
+ * has measured yet. It is deliberately far below `MIN_CROP_PX` so that it never becomes the real floor:
+ * wherever the file's size is known (the panel and the preview) the whole-pixel minimum governs, and a
+ * 0.05% strip of a 4000 px picture — 2 px — is smaller than the 8 px a hand can still grab. The earlier
+ * 2% floor was 80 px on the same file, which is too coarse to cut a logo out of a screenshot.
+ */
+export const MIN_CROP = 0.0005;
+
+/**
+ * The smallest crop, in the file's own pixels.
+ *
+ * Eight pixels is the smallest region that can still be seen and grabbed: below it a crop is a line,
+ * and a line is something a hand cannot recover by dragging. Every pixel-editing path (the panel's
+ * fields, the preview's handles) refuses to go under it, so "as small as it goes" is one number rather
+ * than a different fraction on every file.
+ */
+export const MIN_CROP_PX = 8;
 
 const finite = (x) => typeof x === 'number' && Number.isFinite(x);
 
@@ -144,16 +162,247 @@ export function isFullCrop(crop) {
 }
 
 /**
+ * The aspect ratios a crop can be held to, as the list the panel's picker shows. Pure data.
+ *
+ * `free` and `source` are not numbers: free is "no constraint", and source is the file's own ratio,
+ * which is what "Original" means and which cannot be written down without the file. The rest are the
+ * ratios a person actually asks for — a square avatar, the two verticals the shorts apps publish, and
+ * the cinema width.
+ */
+export const CROP_ASPECTS = Object.freeze([
+  Object.freeze({ id: 'free', label: 'Free' }),
+  Object.freeze({ id: 'source', label: 'Original' }),
+  Object.freeze({ id: '1:1', label: '1:1', ratio: 1 }),
+  Object.freeze({ id: '16:9', label: '16:9', ratio: 16 / 9 }),
+  Object.freeze({ id: '9:16', label: '9:16', ratio: 9 / 16 }),
+  Object.freeze({ id: '4:3', label: '4:3', ratio: 4 / 3 }),
+  Object.freeze({ id: '3:4', label: '3:4', ratio: 3 / 4 }),
+  Object.freeze({ id: '3:2', label: '3:2', ratio: 3 / 2 }),
+  Object.freeze({ id: '2:3', label: '2:3', ratio: 2 / 3 }),
+  Object.freeze({ id: '21:9', label: '21:9', ratio: 21 / 9 }),
+]);
+
+/** A media's size, as whole pixels, or zeros. Pure. */
+function mediaPixels(media) {
+  return {
+    width: Math.max(0, Math.round(Number(media?.width) || 0)),
+    height: Math.max(0, Math.round(Number(media?.height) || 0)),
+  };
+}
+
+/**
+ * The crop as a rectangle **in whole file pixels** — the numbers the panel shows and the handles cut on.
+ *
+ * Stored as fractions (so a project file does not depend on one decode of one file), but edited and
+ * displayed as pixels, because a fraction of a 3840 px file is not a number anyone can act on. The
+ * rectangle is rounded and clamped to the file, so a crop read back out of here is always a region the
+ * `drawImage` call can actually take — no half pixels, and never an edge past the last column.
+ *
+ * A media nobody has measured answers `0×0×0×0`: there are no pixels to name yet.
+ */
+export function cropPixels(crop, media) {
+  const { width, height } = mediaPixels(media);
+  if (!(width > 0) || !(height > 0)) return { x: 0, y: 0, w: 0, h: 0 };
+  const c = normalizeCrop(crop);
+  const x = clamp(Math.round(c.x * width), 0, Math.max(0, width - 1));
+  const y = clamp(Math.round(c.y * height), 0, Math.max(0, height - 1));
+  const w = clamp(Math.round(c.w * width), 1, width - x);
+  const h = clamp(Math.round(c.h * height), 1, height - y);
+  return { x, y, w, h };
+}
+
+/**
+ * Fractions from a crop **given in whole file pixels**. Pure.
+ *
+ * The inverse of `cropPixels`, plus the clamping that makes it safe as an edit: the size is held to the
+ * file and never under `minPx`, and the origin is then slid back inside — so typing `3800` into X on a
+ * 3840 px file leaves the crop where it fits rather than asking `drawImage` for columns that are not
+ * there. A crop with no measured file is left alone.
+ */
+export function cropFromPixels(rect, media, { minPx = MIN_CROP_PX } = {}) {
+  const { width, height } = mediaPixels(media);
+  if (!(width > 0) || !(height > 0)) return normalizeCrop(null);
+  const minW = Math.min(Math.max(1, Math.round(minPx)), width);
+  const minH = Math.min(Math.max(1, Math.round(minPx)), height);
+  // `width`/`height`, and `w`/`h` too: the model names rectangles `w`/`h` everywhere, and the canvas API
+  // names them `width`/`height`. Accepting both means a caller holding `cropPixels()`'s answer does not
+  // silently ask for a zero-sized crop and get the floor.
+  const w = clamp(Math.round(Number(rect?.width ?? rect?.w) || 0) || minW, minW, width);
+  const h = clamp(Math.round(Number(rect?.height ?? rect?.h) || 0) || minH, minH, height);
+  const x = clamp(Math.round(Number(rect?.x) || 0), 0, width - w);
+  const y = clamp(Math.round(Number(rect?.y) || 0), 0, height - h);
+  return normalizeCrop({ x: x / width, y: y / height, w: w / width, h: h / height });
+}
+
+/** The pixel aspect of a crop — its ratio **as pixels**, which is the only ratio that ever matters. */
+export function cropAspect(crop, media) {
+  const p = cropPixels(crop, media);
+  return p.w > 0 && p.h > 0 ? p.w / p.h : 0;
+}
+
+/**
+ * Which picker entry a crop is currently on. Pure.
+ *
+ * Measured rather than remembered: a crop that happens to be 16:9 says 16:9, and one a handle was
+ * dragged to says Free — which is the only honest answer, and the reason the ratio is not a stored
+ * setting that could disagree with the rectangle it describes. `source` is checked before the named
+ * ratios because a file's own shape is the answer a person chose when they picked "Original".
+ */
+export function cropAspectId(crop, media, { tolerance = 0.015 } = {}) {
+  const aspect = cropAspect(crop, media);
+  if (!(aspect > 0)) return 'free';
+  const { width, height } = mediaPixels(media);
+  const source = width > 0 && height > 0 ? width / height : 0;
+  const near = (value) => value > 0 && Math.abs(aspect / value - 1) <= tolerance;
+  if (near(source)) return 'source';
+  const match = CROP_ASPECTS.find((entry) => entry.ratio && near(entry.ratio));
+  return match ? match.id : 'free';
+}
+
+/**
+ * The largest crop of `ratio` that fits inside the current crop, centred on it. Pure.
+ *
+ * Inside the *current* crop rather than inside the file on purpose: picking a ratio is a question about
+ * the framing the user already chose ("make this a square"), and re-framing the whole file would throw
+ * away the edges they had just lined up. The result is whole pixels, so the shape can be a pixel off a
+ * perfect ratio — which is what any real image is.
+ */
+export function fitCropAspect(crop, media, ratio) {
+  const { width, height } = mediaPixels(media);
+  if (!(Number(ratio) > 0) || !(width > 0) || !(height > 0)) return normalizeCrop(crop);
+  const p = cropPixels(crop, media);
+  if (!(p.w > 0) || !(p.h > 0)) return normalizeCrop(crop);
+  let w = p.w;
+  let h = w / ratio;
+  if (h > p.h) {
+    h = p.h;
+    w = h * ratio;
+  }
+  // The file is the outer bound: a ratio picker cannot ask for a crop larger than the picture.
+  if (w > width) {
+    w = width;
+    h = w / ratio;
+  }
+  if (h > height) {
+    h = height;
+    w = h * ratio;
+  }
+  w = Math.max(Math.min(MIN_CROP_PX, width), Math.round(w));
+  h = Math.max(Math.min(MIN_CROP_PX, height), Math.round(h));
+  const cx = p.x + p.w / 2;
+  const cy = p.y + p.h / 2;
+  return cropFromPixels({ x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), width: w, height: h }, media);
+}
+
+/**
+ * Slide the crop window inside the file, by whole pixels. Pure.
+ *
+ * This is the gesture a precise crop needs and a set of inset sliders cannot express: keeping the shape
+ * and moving the frame. The size never changes, and the window stops at the file's edges rather than
+ * shrinking, because a pan that quietly resized the crop would be a different edit than the one asked
+ * for.
+ */
+export function moveCrop(crop, media, dxPx = 0, dyPx = 0) {
+  const { width, height } = mediaPixels(media);
+  if (!(width > 0) || !(height > 0)) return normalizeCrop(crop);
+  const p = cropPixels(crop, media);
+  return cropFromPixels(
+    {
+      x: p.x + Math.round(Number(dxPx) || 0),
+      y: p.y + Math.round(Number(dyPx) || 0),
+      width: p.w,
+      height: p.h,
+    },
+    media,
+  );
+}
+
+/**
+ * Resize the crop from its **top-left corner**, in whole pixels. Pure.
+ *
+ * `width`/`height` are the dimension the user typed or dragged; an omitted one stays as it is. With a
+ * `ratio` the other dimension follows the one that was asked for, which is what a locked picker means —
+ * and the origin stays put, so a number typed into W grows the crop rightwards instead of re-centring
+ * it under the pointer.
+ */
+export function resizeCrop(crop, media, { width = null, height = null } = {}, { ratio = 0 } = {}) {
+  const { width: fileWidth, height: fileHeight } = mediaPixels(media);
+  if (!(fileWidth > 0) || !(fileHeight > 0)) return normalizeCrop(crop);
+  const p = cropPixels(crop, media);
+  const minW = Math.min(MIN_CROP_PX, fileWidth);
+  const minH = Math.min(MIN_CROP_PX, fileHeight);
+  // `null`/`undefined` mean "this dimension was not asked about" — `Number(null)` is `0`, which would
+  // read as a request for a zero-wide crop and then clamp to the floor. One of the two must be a real
+  // number for the call to mean anything; the other follows it, or stays as it was.
+  const asked = (value) => (value === null || value === undefined || String(value).trim() === '' ? NaN : Number(value));
+  const askW = asked(width);
+  const askH = asked(height);
+  let w = Number.isFinite(askW) ? askW : p.w;
+  let h = Number.isFinite(askH) ? askH : p.h;
+  if (Number(ratio) > 0) {
+    if (Number.isFinite(askW) && !Number.isFinite(askH)) h = w / ratio;
+    else if (Number.isFinite(askH) && !Number.isFinite(askW)) w = h * ratio;
+    else if (Number.isFinite(askW) && Number.isFinite(askH)) h = w / ratio;
+  }
+  // Grown from the top-left, so the most either dimension may be is what is left of the file. This is
+  // the difference between "resize" and "re-fit": widening a crop near the right edge stops at the edge
+  // rather than jumping the crop back to the left one.
+  w = clamp(Math.round(w), minW, Math.max(minW, fileWidth - p.x));
+  h = clamp(Math.round(h), minH, Math.max(minH, fileHeight - p.y));
+  if (Number(ratio) > 0) {
+    if (w / h > ratio) h = Math.max(minH, Math.round(w / ratio));
+    else w = Math.max(minW, Math.round(h * ratio));
+    w = Math.min(w, Math.max(minW, fileWidth - p.x));
+    h = Math.min(h, Math.max(minH, fileHeight - p.y));
+  }
+  return cropFromPixels({ x: p.x, y: p.y, width: w, height: h }, media);
+}
+
+/** The crop's four edges, in whole file pixels. `right`/`bottom` are exclusive, like `drawImage`. Pure. */
+export function cropEdgesPx(crop, media) {
+  const p = cropPixels(crop, media);
+  return { left: p.x, top: p.y, right: p.x + p.w, bottom: p.y + p.h };
+}
+
+/**
+ * Fractions from four pixel edges, clamped into the file with a pixel floor on each dimension. Pure.
+ *
+ * Edges rather than an origin and a size because that is how a drag on a handle is measured: the edges
+ * that are not being dragged must land on exactly the pixels they started on, or a corner drag would
+ * creep the opposite corner of the crop by a pixel per gesture.
+ */
+export function cropFromEdgesPx(edges, media, { minPx = MIN_CROP_PX } = {}) {
+  const { width, height } = mediaPixels(media);
+  if (!(width > 0) || !(height > 0)) return normalizeCrop(null);
+  const minW = Math.min(Math.max(1, Math.round(minPx)), width);
+  const minH = Math.min(Math.max(1, Math.round(minPx)), height);
+  const left = clamp(Math.round(Number(edges?.left) || 0), 0, width - minW);
+  const top = clamp(Math.round(Number(edges?.top) || 0), 0, height - minH);
+  const right = clamp(Math.round(Number(edges?.right) || 0), left + minW, width);
+  const bottom = clamp(Math.round(Number(edges?.bottom) || 0), top + minH, height);
+  return normalizeCrop({
+    x: left / width,
+    y: top / height,
+    w: (right - left) / width,
+    h: (bottom - top) / height,
+  });
+}
+
+/**
  * The crop as a rectangle **in the file's own pixels** — what `drawImage` needs. Pure.
  *
  * A media whose size is not known yet answers `0×0`: there is no source rectangle to take from a file
- * nobody has measured, and every caller skips a zero-sized draw.
+ * nobody has measured, and every caller skips a zero-sized draw. The rectangle is rounded to whole
+ * pixels and never runs past the file: the source of a draw is a discrete grid, and a half-pixel source
+ * is a resampled edge on every output frame — which is exactly the softness a pixel-precise crop is
+ * meant to avoid.
  */
 export function cropSourceRect(crop, media) {
-  const width = Math.max(0, Number(media?.width) || 0);
-  const height = Math.max(0, Number(media?.height) || 0);
-  const c = normalizeCrop(crop);
-  return { x: c.x * width, y: c.y * height, width: c.w * width, height: c.h * height };
+  const width = Math.max(0, Math.round(Number(media?.width) || 0));
+  const height = Math.max(0, Math.round(Number(media?.height) || 0));
+  if (!(width > 0) || !(height > 0)) return { x: 0, y: 0, width: 0, height: 0 };
+  const p = cropPixels(crop, media);
+  return { x: p.x, y: p.y, width: p.w, height: p.h };
 }
 
 /**

@@ -23,6 +23,9 @@ import {
   clipPixels,
   clipQuad,
   cropFromHandle,
+  cropFromMove,
+  cropRectIn,
+  cropShadeBands,
   describeTransform,
   handleCursor,
   handlePoints,
@@ -435,6 +438,95 @@ test('a crop handle on a turned clip cuts the edge that is under the pointer', (
     cropFromHandle({ handle: 'e', startCrop: { x: 0, y: 0, w: 1, h: 1 }, startRect: rect, point: { x: 50, y: 70 }, rotation: 90 }),
     { x: 0, y: 0, w: 0.7, h: 1 },
   );
+});
+
+// --------------------------------------------------------------------------- //
+// the crop in file pixels: snapping, a held ratio, and a pan
+// --------------------------------------------------------------------------- //
+
+const FILE = { width: 800, height: 400 };
+const FRAME = { x: 0, y: 0, w: 800, h: 400 };
+
+function px(crop) {
+  return {
+    x: Math.round(crop.x * FILE.width),
+    y: Math.round(crop.y * FILE.height),
+    w: Math.round(crop.w * FILE.width),
+    h: Math.round(crop.h * FILE.height),
+  };
+}
+
+test('with the file measured a cut lands on the pixel under the pointer, not on a float', () => {
+  // The frame is 800 px wide for an 800 px file, so one screen pixel is one file pixel. A third of the
+  // way across a 3840 px picture is 1280 — a fraction that is *never* a binary number, and the reason the
+  // cut is snapped where it can be.
+  const cut = cropFromHandle({ handle: 'e', startCrop: { x: 0, y: 0, w: 1, h: 1 }, startRect: FRAME, point: { x: 267, y: 0 }, media: FILE });
+  assert.deepEqual(px(cut), { x: 0, y: 0, w: 267, h: 400 }, 'the edge is the pointer\u2019s own column');
+  // Same again, from a picture whose frame is drawn smaller than the file: the pointer is still mapped to
+  // a file pixel, so the rectangle handed to `drawImage` is an integer at any preview zoom.
+  const zoomed = cropFromHandle({
+    handle: 'w',
+    startCrop: { x: 0, y: 0, w: 1, h: 1 },
+    startRect: { x: 100, y: 50, w: 400, h: 200 },
+    point: { x: 300, y: 150 },
+    media: FILE,
+  });
+  assert.deepEqual(px(zoomed), { x: 400, y: 0, w: 400, h: 400 });
+});
+
+test('a held ratio makes a corner hold it, and an edge grow about its opposite edge\u2019s centre', () => {
+  // A corner: the pointer's own box is 400 wide and 300 tall, and the ratio fits *inside* it — anchored at
+  // the corner that is not being dragged, so the crop never overtakes the hand.
+  const corner = cropFromHandle({ handle: 'se', startCrop: { x: 0, y: 0, w: 1, h: 1 }, startRect: FRAME, point: { x: 400, y: 300 }, media: FILE, ratio: 1 });
+  assert.deepEqual(px(corner), { x: 0, y: 0, w: 300, h: 300 });
+
+  // The same drag on an edge: the dragged dimension decides, the other follows about the edge's centre.
+  const edge = cropFromHandle({ handle: 'e', startCrop: { x: 0, y: 0, w: 1, h: 1 }, startRect: FRAME, point: { x: 400, y: 200 }, media: FILE, ratio: 1 });
+  assert.deepEqual(px(edge), { x: 0, y: 0, w: 400, h: 400 }, 'a square, from the left edge');
+
+  // And the ratio survives a cut that starts inside an existing crop: half the file, squared, anchored at
+  // the right edge that was already there.
+  const inner = cropFromHandle({
+    handle: 'w',
+    startCrop: { x: 0.25, y: 0, w: 0.75, h: 1 },
+    startRect: FRAME,
+    point: { x: 200, y: 200 },
+    media: FILE,
+    ratio: 1,
+  });
+  assert.equal(px(inner).w, px(inner).h, 'the shape is the picker\u2019s, not the pointer\u2019s');
+  assert.equal(px(inner).x + px(inner).w, 800, 'and the right edge stayed where it was');
+});
+
+test('a ratio cannot ask for less than the pixel floor, in either direction', () => {
+  const thin = cropFromHandle({ handle: 'e', startCrop: { x: 0, y: 0, w: 1, h: 1 }, startRect: FRAME, point: { x: 0, y: 200 }, media: FILE, ratio: 21 / 9 });
+  const size = px(thin);
+  assert.ok(size.w >= 8 && size.h >= 8, `the crop is still grabbable: ${size.w}\u00d7${size.h}`);
+  assert.ok(Math.abs(size.w / size.h - 21 / 9) < 0.05, 'and it is still the ratio that was asked for');
+});
+
+test('a drag inside the crop moves the window without changing its size', () => {
+  const start = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
+  const panned = cropFromMove({ startCrop: start, startRect: FRAME, from: { x: 400, y: 200 }, to: { x: 500, y: 250 }, media: FILE });
+  assert.deepEqual(px(panned), { x: 300, y: 150, w: 400, h: 200 });
+  // The window stops at the file instead of shrinking against it, which is the difference between a pan
+  // and a crop.
+  const stuck = cropFromMove({ startCrop: start, startRect: FRAME, from: { x: 400, y: 200 }, to: { x: 5000, y: 5000 }, media: FILE });
+  assert.deepEqual(px(stuck), { x: 400, y: 200, w: 400, h: 200 });
+});
+
+test('the crop rectangle and the dimmed bands are the frame minus the crop, in pixels', () => {
+  assert.deepEqual(cropRectIn(FRAME, { x: 0.25, y: 0, w: 0.5, h: 0.5 }), { x: 200, y: 0, w: 400, h: 200 });
+  // Four bands around a crop, and only the four: a band of no width is not drawn, so a whole-file crop
+  // dims nothing at all.
+  const bands = cropShadeBands(FRAME, { x: 200, y: 200, w: 400, h: 200 });
+  assert.deepEqual(bands, [
+    { x: 0, y: 0, w: 800, h: 200 },
+    { x: 0, y: 400, w: 800, h: 0 },
+    { x: 0, y: 200, w: 200, h: 200 },
+    { x: 600, y: 200, w: 200, h: 200 },
+  ].filter((band) => band.w > 0.01 && band.h > 0.01));
+  assert.deepEqual(cropShadeBands(FRAME, { x: 0, y: 0, w: 800, h: 400 }), [], 'nothing is being cut');
 });
 
 test('a crop with no frame to cut (an offline clip) changes nothing', () => {

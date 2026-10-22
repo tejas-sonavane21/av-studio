@@ -27,7 +27,19 @@
  * hit-tested against the very same points, so what is on screen and what is grabbable cannot drift.
  */
 
-import { MIN_BOX, MIN_CROP, boxRect, normalizeBox, normalizeCrop, normalizeRotation } from '../model/media.js';
+import {
+  MIN_BOX,
+  MIN_CROP,
+  MIN_CROP_PX,
+  boxRect,
+  cropEdgesPx,
+  cropFromEdgesPx,
+  cropPixels,
+  moveCrop,
+  normalizeBox,
+  normalizeCrop,
+  normalizeRotation,
+} from '../model/media.js';
 import { snapValue } from './placement.js';
 import { clamp, isPlainObject } from '../util/math.js';
 
@@ -167,17 +179,75 @@ export function handlePointsForRect(rect, rotation = 0) {
 }
 
 /**
- * A crop cut by dragging one handle of the crop frame. Pure.
+ * The crop's rectangle **on screen**, inside the whole-picture frame the handles live on. Pure.
  *
- * `startRect` is the crop frame the gesture began with — in pixels, drawn around the **whole** picture
- * (see `editor/canvas-overlay.js`), which is what makes the maths below a fraction of the file. The
- * dragged edges follow the pointer and the opposite ones stay put, exactly as a box resize does; the
- * answer is in fractions of the media, and the crop the gesture started with is what the fractions are
- * applied to — so cutting a tenth off the left of an already-cropped picture cuts a tenth of what is
- * *left*, not a tenth of the original file.
+ * The frame is what `clipDrawRect({...clip, crop: FULL_CROP})` answers, and it stands in for the file:
+ * every fraction of the crop is a fraction of that rectangle. One multiplication per axis, and it is
+ * the same one the overlay draws with and the gesture measures against, which is why a handle cannot be
+ * drawn somewhere it is not grabbable.
+ */
+export function cropRectIn(frame, crop) {
+  const f = frame ?? { x: 0, y: 0, w: 0, h: 0 };
+  const c = normalizeCrop(crop);
+  return { x: f.x + c.x * f.w, y: f.y + c.y * f.h, w: c.w * f.w, h: c.h * f.h };
+}
+
+/**
+ * The four rectangles of the whole-picture frame that the crop cuts away, in pixels. Pure.
  *
- * Works in the clip's own frame, so cropping a turned clip moves the edge under the pointer rather than
- * an edge at right angles to it.
+ * The overlay paints these to dim what is being cut. Four bands rather than one path with a hole
+ * (`fill('evenodd')`) because a path with a hole is a single call the test canvas cannot count, while
+ * four bands are four rectangles a reader — and a test — can check against the frame and the crop.
+ * Empty bands are dropped: a full-file crop has nothing to dim, and a fill of zero area is a call that
+ * only exists to be explained.
+ */
+export function cropShadeBands(frame, cropRect) {
+  const f = frame ?? { x: 0, y: 0, w: 0, h: 0 };
+  const c = cropRect ?? { x: f.x, y: f.y, w: 0, h: 0 };
+  const right = f.x + f.w;
+  const bottom = f.y + f.h;
+  const bands = [
+    { x: f.x, y: f.y, w: f.w, h: c.y - f.y },
+    { x: f.x, y: c.y + c.h, w: f.w, h: bottom - (c.y + c.h) },
+    { x: f.x, y: c.y, w: c.x - f.x, h: c.h },
+    { x: c.x + c.w, y: c.y, w: right - (c.x + c.w), h: c.h },
+  ];
+  return bands.filter((band) => band.w > 0.01 && band.h > 0.01);
+}
+
+/** Whether a point is inside a rotated pixel rect. Pure. */
+export function pointInRect(point, rect, rotation = 0) {
+  if (!point || !rect || !(rect.w > 0) || !(rect.h > 0)) return false;
+  const centre = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+  const local = rotatePoint(point, centre, -rotation);
+  const eps = EDGE_EPSILON;
+  return (
+    local.x >= rect.x - eps &&
+    local.x <= rect.x + rect.w + eps &&
+    local.y >= rect.y - eps &&
+    local.y <= rect.y + rect.h + eps
+  );
+}
+
+/**
+ * A crop cut by dragging one handle of the crop rectangle. Pure.
+ *
+ * `startRect` is the **whole picture's** frame — in pixels, as `editor/canvas-overlay.js` draws it — so
+ * the pointer's position across it is a fraction of the *file*, whatever part of it is currently shown.
+ * The dragged edges follow the pointer; the opposite edges stay on the pixels they were on. Two
+ * consequences worth naming, because both are the whole reason this signature looks like this:
+ *
+ * * `startCrop` is the crop at pointer-down, in fractions of the file. A second cut is therefore a cut
+ *   of what is left, not of the original file.
+ * * With `media` known, the result is worked out in **whole file pixels** and handed back as fractions —
+ *   so the edge lands on the pixel under the pointer, a corner drag cannot creep the opposite corner by
+ *   a rounding error per gesture, and an `ratio` (the panel's picker) is enforced in the same pixels the
+ *   picture is made of.
+ *
+ * `ratio` is a pixel ratio; `0`/absent means free. On a corner the pointer's box sets the scale and the
+ * ratio fits inside it, anchored at the opposite corner — the same rule `fitRect` uses, so a locked
+ * corner never leaves the pointer. On an edge the dragged dimension decides, and the other follows about
+ * that edge's centre, which is how a locked side handle behaves in the editors people compare this to.
  */
 export function cropFromHandle({
   handle,
@@ -185,7 +255,10 @@ export function cropFromHandle({
   startRect,
   point,
   rotation = 0,
+  media = null,
+  ratio = 0,
   minSize = MIN_CROP,
+  minPx = MIN_CROP_PX,
 } = {}) {
   const axes = AXES[handle];
   const crop = normalizeCrop(startCrop);
@@ -193,29 +266,140 @@ export function cropFromHandle({
   const centre = { x: startRect.x + startRect.w / 2, y: startRect.y + startRect.h / 2 };
   const local = rotatePoint(point ?? { x: 0, y: 0 }, centre, -rotation);
   const [ax, ay] = axes;
-  let { x, y, w, h } = crop;
-  // The kept fraction is measured from the edge that is *not* being dragged, which is the one that stays
-  // put: the left edge for a right handle, the right edge for a left one.
-  if (ax < 0) {
-    const keep = clampFraction((startRect.x + startRect.w - local.x) / startRect.w);
-    x = crop.x + crop.w * (1 - keep);
-    w = crop.w * keep;
-  } else if (ax > 0) {
-    w = crop.w * clampFraction((local.x - startRect.x) / startRect.w);
+  const fileWidth = Math.max(0, Math.round(Number(media?.width) || 0));
+  const fileHeight = Math.max(0, Math.round(Number(media?.height) || 0));
+
+  if (!(fileWidth > 0) || !(fileHeight > 0)) {
+    // No measured file: the same cut in fractions. The preview never takes this path (it only offers
+    // crop handles once a picture is drawn), but the maths has to exist without a file so it can be
+    // tested — and so an offline clip is left exactly as it was rather than refused.
+    let { x, y, w, h } = crop;
+    if (ax < 0) {
+      const keep = clampFraction((startRect.x + startRect.w - local.x) / startRect.w);
+      x = crop.x + crop.w * (1 - keep);
+      w = crop.w * keep;
+    } else if (ax > 0) {
+      w = crop.w * clampFraction((local.x - startRect.x) / startRect.w);
+    }
+    if (ay < 0) {
+      const keep = clampFraction((startRect.y + startRect.h - local.y) / startRect.h);
+      y = crop.y + crop.h * (1 - keep);
+      h = crop.h * keep;
+    } else if (ay > 0) {
+      h = crop.h * clampFraction((local.y - startRect.y) / startRect.h);
+    }
+    return normalizeCrop({ x, y, w: Math.max(minSize, w), h: Math.max(minSize, h) });
   }
-  if (ay < 0) {
-    const keep = clampFraction((startRect.y + startRect.h - local.y) / startRect.h);
-    y = crop.y + crop.h * (1 - keep);
-    h = crop.h * keep;
-  } else if (ay > 0) {
-    h = crop.h * clampFraction((local.y - startRect.y) / startRect.h);
+
+  const start = cropEdgesPx(crop, media);
+  const minW = Math.min(Math.max(1, Math.round(minPx)), fileWidth);
+  const minH = Math.min(Math.max(1, Math.round(minPx)), fileHeight);
+  const pointerX = ((local.x - startRect.x) / startRect.w) * fileWidth;
+  const pointerY = ((local.y - startRect.y) / startRect.h) * fileHeight;
+
+  let { left, top, right, bottom } = start;
+  if (ax < 0) left = clamp(Math.round(pointerX), 0, right - minW);
+  else if (ax > 0) right = clamp(Math.round(pointerX), left + minW, fileWidth);
+  if (ay < 0) top = clamp(Math.round(pointerY), 0, bottom - minH);
+  else if (ay > 0) bottom = clamp(Math.round(pointerY), top + minH, fileHeight);
+
+  let width = right - left;
+  let height = bottom - top;
+  const locked = Number(ratio) > 0;
+  if (locked) {
+    if (ax !== 0 && ay !== 0) {
+      // A corner: the pointer's own box, with the ratio fitted inside it, so the crop never overtakes
+      // the hand that is pulling it.
+      if (width / height > ratio) width = Math.round(height * ratio);
+      else height = Math.round(width / ratio);
+    } else if (ax !== 0) {
+      height = Math.round(width / ratio);
+    } else {
+      width = Math.round(height * ratio);
+    }
+    width = Math.max(width, Math.round(minH * ratio), minW);
+    height = Math.max(height, Math.round(minW / ratio), minH);
+    // How much room the anchors leave. A locked drag near an edge can ask for a shape the file cannot
+    // hold from where it is anchored; the answer is to shrink the shape (and keep the ratio), never to
+    // shift it and break the ratio, and never to let it run off the file.
+    const cx = (start.left + start.right) / 2;
+    const cy = (start.top + start.bottom) / 2;
+    const roomW = ax < 0 ? right : ax > 0 ? fileWidth - left : 2 * Math.min(cx, fileWidth - cx);
+    const roomH = ay < 0 ? bottom : ay > 0 ? fileHeight - top : 2 * Math.min(cy, fileHeight - cy);
+    const fit = Math.min(1, roomW / width, roomH / height);
+    if (fit < 1) {
+      width = Math.max(minW, Math.floor(width * fit));
+      height = Math.max(minH, Math.floor(height * fit));
+      // The floor can leave one dimension above what the other would allow on a very thin ratio; scale
+      // once more against the dimension that is actually free.
+      if (width > roomW) width = Math.max(minW, Math.floor(roomW));
+      if (height > roomH) height = Math.max(minH, Math.floor(roomH));
+    }
   }
-  return normalizeCrop({
-    x,
-    y,
-    w: Math.max(minSize, w),
-    h: Math.max(minSize, h),
-  });
+
+  // Rebuild from the edges that are *not* being dragged: the opposite corner, or the middle of an edge
+  // whose perpendicular dimension the ratio just changed.
+  if (ax < 0) left = right - width;
+  else if (ax > 0) right = left + width;
+  else {
+    const cx = (start.left + start.right) / 2;
+    left = Math.round(cx - width / 2);
+    right = left + width;
+  }
+  if (ay < 0) top = bottom - height;
+  else if (ay > 0) bottom = top + height;
+  else {
+    const cy = (start.top + start.bottom) / 2;
+    top = Math.round(cy - height / 2);
+    bottom = top + height;
+  }
+
+  // A locked edge drag can grow the crop past the file on one side; slide it back inside, holding the
+  // shape, rather than letting the clamp quietly change the ratio.
+  if (left < 0) {
+    right -= left;
+    left = 0;
+  }
+  if (top < 0) {
+    bottom -= top;
+    top = 0;
+  }
+  if (right > fileWidth) {
+    left -= right - fileWidth;
+    right = fileWidth;
+  }
+  if (bottom > fileHeight) {
+    top -= bottom - fileHeight;
+    bottom = fileHeight;
+  }
+  return cropFromEdgesPx({ left: Math.max(0, left), top: Math.max(0, top), right, bottom }, media, { minPx });
+}
+
+/**
+ * The crop **panned** by a drag inside it — the same window, moved inside the file. Pure.
+ *
+ * A crop is a window, and the thing that makes a crop precise is that its edges and its position are
+ * separate questions: a handle changes the edges, a drag inside changes where the window sits. Measured
+ * from pointer-down, in the clip's own frame, so a turned clip pans the way the picture appears to move.
+ */
+export function cropFromMove({ startCrop, startRect, from, to, rotation = 0, media = null } = {}) {
+  const crop = normalizeCrop(startCrop);
+  if (!startRect || !(startRect.w > 0) || !(startRect.h > 0) || !from || !to) return crop;
+  const centre = { x: startRect.x + startRect.w / 2, y: startRect.y + startRect.h / 2 };
+  const a = rotatePoint(from, centre, -rotation);
+  const b = rotatePoint(to, centre, -rotation);
+  const dx = (b.x - a.x) / startRect.w;
+  const dy = (b.y - a.y) / startRect.h;
+  const fileWidth = Math.max(0, Math.round(Number(media?.width) || 0));
+  const fileHeight = Math.max(0, Math.round(Number(media?.height) || 0));
+  if (!(fileWidth > 0) || !(fileHeight > 0)) {
+    return normalizeCrop({
+      ...crop,
+      x: clamp(crop.x + dx, 0, 1 - crop.w),
+      y: clamp(crop.y + dy, 0, 1 - crop.h),
+    });
+  }
+  return moveCrop(crop, media, dx * fileWidth, dy * fileHeight);
 }
 
 /**

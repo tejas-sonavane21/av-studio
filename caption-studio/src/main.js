@@ -60,7 +60,7 @@ import { createCanvasOverlay } from './editor/canvas-overlay.js';
 import { createMediaLibrary } from './editor/media-library.js';
 import { createTimeline } from './editor/timeline.js';
 import {
-  MIN_CROP,
+  CROP_ASPECTS,
   addMediaClip,
   boxRect,
   centerClipBox,
@@ -75,8 +75,12 @@ import {
   mediaClips,
   moveMediaClip,
   planClip,
-  normalizeCrop,
+  cropAspectId,
+  cropFromPixels,
+  cropPixels,
+  fitCropAspect,
   removeMediaClip,
+  resizeCrop,
   reorderClip,
   resetClipCrop,
   resetMediaClip,
@@ -1206,6 +1210,27 @@ function clipCropMode() {
 }
 
 /**
+ * The pixel ratio the crop picker is holding: `0` for Free, the file's own for Original, the named
+ * ratio otherwise.
+ *
+ * The picker is a **tool setting**, like the shape lock: it says what the *next* handle drag holds, not
+ * what the rectangle currently is (the size line says that). It therefore starts on Free and is never
+ * overwritten by a render — a reset that silently switched it back to a ratio the user had chosen would
+ * be the panel changing a tool under their hand.
+ */
+function selectedCropRatio() {
+  const id = $('#clip-crop-aspect')?.value ?? 'free';
+  const entry = CROP_ASPECTS.find((item) => item.id === id);
+  if (entry?.ratio) return entry.ratio;
+  if (id !== 'source') return 0;
+  const clip = selectedMediaClip();
+  const media = clip ? mediaLibrary.size(clip.id) : null;
+  const width = Number(media?.width) || 0;
+  const height = Number(media?.height) || 0;
+  return width > 0 && height > 0 ? width / height : 0;
+}
+
+/**
  * The one place a clip's *frame* changes — the preview's handles, the panel's sliders and their commit
  * lines all come through here.
  *
@@ -1218,7 +1243,7 @@ function clipCropMode() {
  * it plays, so the lane has nothing to say about it, and re-rendering the lane sixty times a second to
  * prove that is work nobody asked for.
  */
-function editClip(id, patch, { live = false, what = 'adjusted' } = {}) {
+function editClip(id, patch, { live = false, what = 'adjusted', refreshPanel = true } = {}) {
   const doc = preview?.document;
   const clip = mediaClips(doc).find((c) => c.id === id);
   if (!doc || !clip) return null;
@@ -1236,7 +1261,9 @@ function editClip(id, patch, { live = false, what = 'adjusted' } = {}) {
   // which cannot have changed — a box says nothing about when a clip plays.
   preview?.setMedia(mediaClips(doc), (clipId) => mediaLibrary.element(clipId));
   redraw();
-  renderClipInspector();
+  // A caller that is *typing* into the panel re-renders it itself, with the field under the hand left
+  // alone — rewriting the text someone is entering moves their caret to the end after every digit.
+  if (refreshPanel) renderClipInspector();
   return next;
 }
 
@@ -1359,17 +1386,36 @@ function renderClipInspector({ except = null } = {}) {
   const media = mediaLibrary.size(clip.id);
   // Where the clip sits in the stack, which is the one number the picture itself cannot show: two clips
   // that overlap in time also overlap on the frame, and only the panel can say which one is winning.
-  // The crop, as the four *insets* the panel edits: left/right/top/bottom, which is how a person describes
-  // a cut ("a bit off the left") where the stored rectangle describes what is left.
-  const crop = normalizeCrop(clip.crop);
-  set('clip-crop-left', crop.x);
-  set('clip-crop-top', crop.y);
-  set('clip-crop-right', 1 - crop.x - crop.w);
-  set('clip-crop-bottom', 1 - crop.y - crop.h);
-  text('clip-crop-left-out', pct(crop.x));
-  text('clip-crop-top-out', pct(crop.y));
-  text('clip-crop-right-out', pct(1 - crop.x - crop.w));
-  text('clip-crop-bottom-out', pct(1 - crop.y - crop.h));
+  // The crop as the rectangle in the file's own pixels: X/Y/W/H are the numbers a person can check
+  // against the picture, and the line beside them says what is kept out of what the file is. A percent
+  // of a 3840 px picture is not a number anyone can act on, and the stored fractions are an
+  // implementation detail until they are multiplied back out.
+  const crop = cropPixels(clip.crop, media);
+  const fileWidth = Math.round(Number(media?.width) || 0);
+  const fileHeight = Math.round(Number(media?.height) || 0);
+  set('clip-crop-x', crop.x);
+  set('clip-crop-y', crop.y);
+  set('clip-crop-w', crop.w);
+  set('clip-crop-h', crop.h);
+  for (const [id, max] of [
+    ['clip-crop-x', fileWidth],
+    ['clip-crop-y', fileHeight],
+    ['clip-crop-w', fileWidth],
+    ['clip-crop-h', fileHeight],
+  ]) {
+    const input = $(`#${id}`);
+    if (input && max > 0) input.max = String(max);
+  }
+  // The size line names the rectangle *and* the shape it currently has: the picker says what the handles
+  // will hold, which is a tool setting, and this says what the picture is.
+  const shape = cropAspectId(clip.crop, media);
+  const shapeLabel = shape === 'source' ? 'Original' : shape === 'free' ? '' : shape;
+  text(
+    'clip-crop-size',
+    media
+      ? `${crop.w}\u00d7${crop.h} of ${fileWidth}\u00d7${fileHeight} px${shapeLabel ? ` \u00b7 ${shapeLabel}` : ''}`
+      : 'file not loaded \u2014 no pixels to cut yet',
+  );
 
   const layer = layerPosition(doc, clip.id);
   text('clip-inspector-name', `${clip.kind === 'video' ? '\u25b6' : '\u25a2'} ${clip.name}`);
@@ -1384,7 +1430,7 @@ function renderClipInspector({ except = null } = {}) {
   const hint = $('#clip-inspector-hint');
   if (hint) {
     hint.textContent = mediaLibrary.has(clip.id)
-      ? 'Drag the clip on the preview to move it, the square handles to resize it, the round handle above it to turn it, and Alt to drag with no guides. Arrow keys nudge; shift inverts the shape lock for one drag.'
+      ? 'Drag the clip on the preview to move it, the square handles to resize it, the round handle above it to turn it, and Alt to drag with no guides. Arrow keys nudge; shift inverts the shape lock for one drag. In crop mode the handles cut the clip\u2019s own picture, a drag inside the crop moves it, the arrow keys move it a pixel at a time (shift: ten), and the four fields are the same rectangle in the file\u2019s own pixels.'
       : `No file is loaded for "${clip.name}" \u2014 Relink it in the list above. Its window and its box are still editable, and nothing is drawn until the file is back.`;
   }
   // The stack buttons are only meaningful with something to stack: a single clip has nowhere to go, and
@@ -1401,9 +1447,15 @@ function renderClipInspector({ except = null } = {}) {
   }
 
   // Enabled only while a clip is selected: a panel offering to edit nothing is worse than no panel.
-  for (const id of ['clip-x', 'clip-y', 'clip-w', 'clip-h', 'clip-rot', 'clip-opacity', 'clip-fit', 'clip-flip-x', 'clip-flip-y', 'clip-fit-frame', 'clip-fill-frame', 'clip-center', 'clip-reset', 'clip-duplicate', 'clip-front', 'clip-forward', 'clip-backward', 'clip-back', 'clip-crop-toggle', 'clip-crop-left', 'clip-crop-top', 'clip-crop-right', 'clip-crop-bottom', 'clip-crop-reset']) {
+  for (const id of ['clip-x', 'clip-y', 'clip-w', 'clip-h', 'clip-rot', 'clip-opacity', 'clip-fit', 'clip-flip-x', 'clip-flip-y', 'clip-fit-frame', 'clip-fill-frame', 'clip-center', 'clip-reset', 'clip-duplicate', 'clip-front', 'clip-forward', 'clip-backward', 'clip-back', 'clip-crop-toggle', 'clip-crop-reset']) {
     const control = $(`#${id}`);
     if (control) control.disabled = false;
+  }
+  // The pixel fields and the ratio picker need a measured file: there is no rectangle to name, and no
+  // ratio to hold, for a picture that has not been read. Disabled rather than guessed at.
+  for (const id of ['clip-crop-x', 'clip-crop-y', 'clip-crop-w', 'clip-crop-h', 'clip-crop-aspect']) {
+    const control = $(`#${id}`);
+    if (control) control.disabled = !(fileWidth > 0 && fileHeight > 0);
   }
 }
 
@@ -1482,28 +1534,75 @@ function wireClipInspector() {
   };
 
   /**
-   * A crop edit keeps the edge opposite the one being moved: a slider says how much to cut off *one* side,
-   * so the other three stay where the user put them. The floor is the model's own `MIN_CROP`, so a slider
-   * cannot ask for a crop the model would refuse.
+   * A crop edit, from any control.
+   *
+   * The rectangle is in the file's own pixels, so every field is a whole number of pixels and the model
+   * owns the clamping: the panel cannot ask for a crop the renderer would have to round, shrink or
+   * refuse. A live edit is a gesture or a typed digit in progress — the picture follows, nothing is
+   * logged — and a change is the commit.
    */
-  const cropEdit = (patch, opts = {}) => {
+  const cropEdit = (crop, opts = {}) => {
     const clip = selectedMediaClip();
     if (!clip) return null;
-    return editClip(clip.id, { crop: normalizeCrop({ ...clip.crop, ...patch }) }, { live: opts.live, what: 'cropped' });
+    return editClip(clip.id, { crop }, { live: opts.live, what: 'cropped', refreshPanel: opts.refreshPanel });
   };
-  const cropFrom = (side, value, opts) => {
-    const clip = selectedMediaClip();
-    if (!clip) return null;
-    const c = normalizeCrop(clip.crop);
-    if (side === 'left') return cropEdit({ x: value, w: Math.max(MIN_CROP, c.x + c.w - value) }, opts);
-    if (side === 'top') return cropEdit({ y: value, h: Math.max(MIN_CROP, c.y + c.h - value) }, opts);
-    if (side === 'right') return cropEdit({ w: Math.max(MIN_CROP, 1 - value - c.x) }, opts);
-    return cropEdit({ h: Math.max(MIN_CROP, 1 - value - c.y) }, opts);
+
+  /**
+   * One of the four pixel fields. X/Y move the window (size held), W/H resize it from the top-left, and
+   * a held ratio makes the other dimension follow — the four edits the handles make, in numbers.
+   */
+  const bindCropField = (id, apply) => {
+    const input = $(`#${id}`);
+    if (!input) return;
+    const run = (live) => {
+      const clip = selectedMediaClip();
+      const media = clip ? mediaLibrary.size(clip.id) : null;
+      const value = Number(input.value);
+      if (!clip || !media || !(Number.isFinite(value) && String(input.value ?? '').trim() !== '')) return;
+      cropEdit(apply(clip.crop, media, value, selectedCropRatio()), { live, refreshPanel: false });
+    };
+    input.addEventListener('input', () => {
+      run(true);
+      // Every other field and the size line follow the model, so a lock that changed H, or a clamp that
+      // moved X, is visible while it happens. The field under the hand is left alone: rewriting the text
+      // someone is typing is how a number input loses its caret.
+      renderClipInspector({ except: id });
+    });
+    input.addEventListener('change', () => run(false));
   };
-  bindRange('clip-crop-left', (value, opts) => cropFrom('left', value, opts));
-  bindRange('clip-crop-top', (value, opts) => cropFrom('top', value, opts));
-  bindRange('clip-crop-right', (value, opts) => cropFrom('right', value, opts));
-  bindRange('clip-crop-bottom', (value, opts) => cropFrom('bottom', value, opts));
+  // X/Y are a *move*: the size is read first and passed back untouched, so typing a position cannot
+  // resize the crop. (Passing `cropPixels`'s `{x, y, w, h}` straight in would look like a zero-sized
+  // crop to `cropFromPixels`, which reads `width`/`height`.)
+  const moveTo = (axis) => (crop, media, value) => {
+    const p = cropPixels(crop, media);
+    return cropFromPixels({ x: p.x, y: p.y, width: p.w, height: p.h, [axis]: value }, media);
+  };
+  bindCropField('clip-crop-x', moveTo('x'));
+  bindCropField('clip-crop-y', moveTo('y'));
+  bindCropField('clip-crop-w', (crop, media, value, ratio) => resizeCrop(crop, media, { width: value }, { ratio }));
+  bindCropField('clip-crop-h', (crop, media, value, ratio) => resizeCrop(crop, media, { height: value }, { ratio }));
+
+  // The ratio picker: one list for the model and the panel, and a pick that fits the largest rectangle
+  // of that shape inside the crop the user already framed — changing the shape, not the framing.
+  const aspectPicker = $('#clip-crop-aspect');
+  if (aspectPicker) {
+    aspectPicker.replaceChildren(
+      ...CROP_ASPECTS.map((entry) => {
+        const option = document.createElement('option');
+        option.value = entry.id;
+        option.textContent = entry.label;
+        return option;
+      }),
+    );
+    aspectPicker.addEventListener('change', () => {
+      const clip = selectedMediaClip();
+      const media = clip ? mediaLibrary.size(clip.id) : null;
+      if (!clip || !media) return;
+      const ratio = selectedCropRatio();
+      if (!(ratio > 0)) return;
+      cropEdit(fitCropAspect(clip.crop, media, ratio));
+    });
+  }
   command('clip-crop-reset', 'crop reset to the whole file', (doc, clip) => Boolean(resetClipCrop(doc, clip.id)));
 
   command('clip-front', 'brought to the front', (doc, clip) => Boolean(reorderClip(doc, clip.id, 'front')));
@@ -3901,6 +4000,9 @@ function createOverlay() {
     clipSize: (id) => mediaLibrary.size(id),
     keepAspect: () => clipShapeLocked(),
     cropMode: () => clipCropMode(),
+    // The ratio a crop handle holds, read from the panel each event — the same value the pixel fields
+    // use, so a handle drag and a typed number cannot hold different shapes.
+    cropRatio: () => selectedCropRatio(),
     onSelect: (id) => {
       selectedBlockId = id ?? null;
       updateSelectionUI();
