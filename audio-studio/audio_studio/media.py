@@ -73,6 +73,18 @@ class Audio:
             "duration": round(self.duration, 3),
             "decodedBy": self.decoded_by,
         }
+        # The *decoded* samples, not the container: two machines can hold the same file and
+        # hand the model different bytes (a different decoder, a resampler with a different
+        # default), and `sha256` above cannot see that. Recorded whenever the audio was
+        # decoded, because a transcript whose `source` block cannot say what the model
+        # listened to is a transcript nobody can compare with another machine's.
+        if self.samples is not None:
+            from .fingerprint import samples_digest
+
+            digest = samples_digest(self.samples)
+            if digest:
+                out["samplesSha256"] = digest["sha256"]
+                out["samples"] = digest["samples"]
         if self.source_sample_rate is not None:
             out["sourceSampleRate"] = self.source_sample_rate
         if self.channels is not None:

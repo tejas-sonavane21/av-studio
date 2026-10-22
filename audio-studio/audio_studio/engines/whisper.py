@@ -46,7 +46,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .. import models
+from .. import fingerprint, modelstore, models
 from ..config import TranscribeOptions
 from ..media import Audio
 from ..model import Segment, Transcript, Word
@@ -188,44 +188,60 @@ def _load_model(options: TranscribeOptions, on_progress: Optional[ProgressHook] 
         return cached
 
     plan = load_plan(model_name)
-    if on_progress:
-        on_progress(0.02, plan["message"])
+    # The verified store, before anything else is asked: when it holds this model the hub is
+    # not contacted at all, so a machine with no network and a machine with one load the same
+    # bytes. `require` raises rather than falling back when the copy does not match its
+    # manifest - a fallback would transcribe with weights nobody verified, which is the whole
+    # failure this order exists to prevent. See `modelstore.py`.
+    stored = modelstore.require(model_name)
 
     model_kwargs: dict = {"device": options.device, "compute_type": options.compute_type}
     if options.cpu_threads:
         model_kwargs["cpu_threads"] = options.cpu_threads
-    if plan["revision"]:
-        # The verified commit, not whatever the hub serves today. A short name is not a
-        # version, and a transcript that cannot be reproduced is a transcript nobody can
-        # check — see `models.py`.
-        model_kwargs["revision"] = plan["revision"]
 
     started = time.perf_counter()
-    source = "download" if plan["downloaded"] is False else "disk"
-    if plan["localOnly"]:
-        # Cached weights, and the hub is not asked about them: the model is already here,
-        # so a network round-trip can only add a wait or fail a run that would have worked
-        # offline. A snapshot that turns out to be incomplete falls back to the network
-        # below, once, rather than failing the job.
-        try:
-            model = WhisperModel(model_name, local_files_only=True, **model_kwargs)
-            note = ""
-        except Exception as exc:  # noqa: BLE001 - only to retry with the hub reachable
-            if on_progress:
-                on_progress(0.02, f"{plan['family']}: the cached copy is incomplete ({exc}); fetching it")
-            source = "download"
-            model, note = _load_with_pin(model_name, model_kwargs, plan)
-    else:
-        model, note = _load_with_pin(model_name, model_kwargs, plan)
-
-    # Which weights, in the artifact. The pin when the pin held; and when it did not, the commit
-    # the hub's `main` resolved to - read off the `refs/main` the fetch just wrote, because
-    # "main, whatever it was that afternoon" is not something two machines can be compared with.
-    revision = plan["revision"]
-    if note:
-        revision = models.cached_commit(plan["repo"])
+    if stored is not None:
         if on_progress:
-            on_progress(0.02, note)
+            on_progress(0.02, f"{plan['family']} is reading from the verified model store (no hub, no download)")
+        model = WhisperModel(str(stored), **model_kwargs)
+        note = ""
+        source = "store"
+        revision = plan["revision"]
+    else:
+        if on_progress:
+            on_progress(0.02, plan["message"])
+        if plan["revision"]:
+            # The verified commit, not whatever the hub serves today. A short name is not a
+            # version, and a transcript that cannot be reproduced is a transcript nobody can
+            # check — see `models.py`.
+            model_kwargs["revision"] = plan["revision"]
+
+        source = "download" if plan["downloaded"] is False else "disk"
+        if plan["localOnly"]:
+            # Cached weights, and the hub is not asked about them: the model is already here,
+            # so a network round-trip can only add a wait or fail a run that would have worked
+            # offline. A snapshot that turns out to be incomplete falls back to the network
+            # below, once, rather than failing the job.
+            try:
+                model = WhisperModel(model_name, local_files_only=True, **model_kwargs)
+                note = ""
+            except Exception as exc:  # noqa: BLE001 - only to retry with the hub reachable
+                if on_progress:
+                    on_progress(0.02, f"{plan['family']}: the cached copy is incomplete ({exc}); fetching it")
+                source = "download"
+                model, note = _load_with_pin(model_name, model_kwargs, plan)
+        else:
+            model, note = _load_with_pin(model_name, model_kwargs, plan)
+
+        # Which weights, in the artifact. The pin when the pin held; and when it did not, the
+        # commit the hub's `main` resolved to - read off the `refs/main` the fetch just wrote,
+        # because "main, whatever it was that afternoon" is not something two machines can be
+        # compared with.
+        revision = plan["revision"]
+        if note:
+            revision = models.cached_commit(plan["repo"])
+            if on_progress:
+                on_progress(0.02, note)
 
     seconds = time.perf_counter() - started
     _MODEL_CACHE[key] = model
@@ -235,10 +251,16 @@ def _load_model(options: TranscribeOptions, on_progress: Optional[ProgressHook] 
         "repo": plan["repo"],
         "device": options.device,
         "computeType": options.compute_type,
+        "cpuThreads": options.cpu_threads or None,
         "revision": revision,
         "revisionNote": note,
         "source": source,
         "seconds": round(seconds, 2),
+        # The files this machine actually loaded, not the revision it asked for. A pin
+        # says which snapshot the loader wanted; this is the answer to whether it got it.
+        # Hashed once per process (see `fingerprint.py`), so a queue of jobs pays for it
+        # once rather than per job.
+        "weights": fingerprint.weights_digest(model_name, revision=revision or None),
     }
     return model
 
@@ -273,6 +295,7 @@ class WhisperEngine(Engine):
             where = {
                 "disk": "from the cache",
                 "download": "just fetched from the hub",
+                "store": "from the verified model store",
             }.get(load_note.get("source"), "")
             took = f" in {load_note['seconds']}s" if load_note.get("seconds") else ""
             # The pin, shortened, on the line that says a model was loaded: "which weights"
@@ -349,6 +372,14 @@ class WhisperEngine(Engine):
                 # to, and `modelRevisionFallback` says what happened.
                 "modelRevision": load_note.get("revision"),
                 "modelRevisionFallback": load_note.get("revisionNote") or None,
+                # The weights themselves, and the thread count the loader was given, so a
+                # transcript made on one machine can be compared with a transcript made on
+                # another without either machine needing to be present. `cpuThreads: null`
+                # means "let the library decide", which is a different run from `4` even
+                # when the answer usually comes out the same.
+                "modelWeightsSha256": (load_note.get("weights") or {}).get("sha256"),
+                "cpuThreads": load_note.get("cpuThreads"),
+                "cpuCapability": fingerprint.cpu_capability(),
             },
         )
 

@@ -190,6 +190,10 @@ def _stub_faster_whisper(monkeypatch, construct):
     module = types.ModuleType("faster_whisper")
     module.WhisperModel = construct  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "faster_whisper", module)
+    # The verified store answers before the cache, and the answers are on disk — a machine
+    # that has filled its store would otherwise short-circuit every decision these tests are
+    # about. `test_modelstore.py` is where the store's own precedence is tested.
+    monkeypatch.setattr("audio_studio.engines.whisper.modelstore.require", lambda *a, **k: None)
     return module
 
 

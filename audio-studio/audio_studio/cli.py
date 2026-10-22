@@ -6,6 +6,8 @@ Subcommands:
 ``transcribe``  audio (or video) → transcript artifacts
 ``emit``        re-emit a saved transcript as SRT/VTT/Veed JSON
 ``doctor``      report what is installed and what can actually run
+``models``      the verified model store: import, verify, export (see ``modelstore.py``)
+``parity``      hash every stage of one clip, so two machines can be compared (see ``parity.py``)
 ``serve``       a local HTTP server for ``caption-studio`` (see ``server.py``)
 ``version``     print the version
 
@@ -30,6 +32,7 @@ from .align import DEFAULT_ALIGNER, aligner_names, available_aligners
 from .artifact import ArtifactError, load
 from .config import (
     DEFAULT_ALIGN_MODEL,
+    DEFAULT_COMPUTE_TYPE,
     DEFAULT_PRESET,
     PRESETS,
     AlignOptions,
@@ -41,7 +44,8 @@ from .emit import DEFAULT_KINDS, kinds, safe_stem, write_bundle
 from .engines import available_engines, engine_names, get_engine
 from .media import MediaError, describe, load_audio
 from .model import validate
-from . import models, pins
+from . import fingerprint, modelstore, models, pins
+from .parity import ParityError, run_parity
 from .pipeline import PassUnavailable, PipelineOptions, post_process, summarise_passes
 from .reference import Reference, ReferenceParseError
 from .runlog import build_manifest, write_manifest
@@ -146,6 +150,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         model=args.model,
         language=args.language,
         beam_size=args.beam,
+        # The two knobs that change *numbers* and used to have no flag at all: a run could
+        # only be reproduced on another machine if that machine's defaults happened to
+        # match. See `fingerprint.py` for why that mattered.
+        compute_type=args.compute_type,
+        cpu_threads=args.cpu_threads,
         word_timestamps=False if args.no_word_timestamps else True,
         vad_filter=True if args.vad else False,
     )
@@ -317,7 +326,16 @@ def build_doctor_report() -> dict:
         # machines disagree. See `models.py`.
         "presetDetails": models.preset_details(PRESETS),
         "modelCache": str(models.cache_dir()),
+        # The verified store, which wins over the cache when it has the model. Reported beside
+        # the cache because the two are the same question answered two ways: "which weights
+        # will this machine load" - see `modelstore.py`.
+        "modelStore": str(models.store_root()),
         "models": models.catalog(),
+        # The arithmetic, not just the packages: which vector kernel the CPU exposes, what
+        # thread counts the numeric libraries chose, and what the installed set is pinned
+        # against. Two machines can agree on every version here and still differ in a
+        # transcript, which is what `parity` is for - see `fingerprint.py`.
+        "environment": fingerprint.environment(),
     }
 
 
@@ -331,6 +349,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"  python        {report['python']}  ({report['executable']})")
     print(f"  virtualenv    {'yes' if report['virtualenv'] else 'NO - the studio should run inside .venv'}")
     print(f"  platform      {report['platform']}, {report['cpuCount']} CPUs")
+    kernel = (report.get("environment") or {}).get("cpuCapability") or "unknown"
+    print(f"  cpu kernel    {kernel}  (this decides which vectorised path every model takes)")
     print(f"  ffmpeg        {report['ffmpeg'] or 'not on PATH (PyAV is bundled with the [asr] extra)'}")
     print("  packages")
     for name, version in report["packages"].items():
@@ -357,14 +377,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # The aligner is not a preset and has no row in the table below, but its weights are
     # downloaded and pinned the same way - and a re-timing pass that differs between two
     # machines is as unexplainable as a transcript that does. See `models.py`.
-    print(f"  aligner pin   {models.ALIGN_MODEL} @{models.ALIGN_REVISION[:8]}")
+    aligner = models.describe(models.ALIGN_MODEL)
+    aligner_state = "stored" if aligner.get("stored") else ("cached" if aligner.get("downloaded") else "will download")
+    print(f"  aligner pin   {models.ALIGN_MODEL} @{models.ALIGN_REVISION[:8]} - {aligner_state}")
     print("  validators")
     for validator in report["validators"]:
         mark = "ok " if validator["available"] else "no "
         print(f"    [{mark}] {validator['name']:<16} {validator['reason']}")
     print(f"  presets       {', '.join(report['presets'])} (default: {report['defaultPreset']})")
     for row in report.get("presetDetails", []):
-        mark = "cached" if row["downloaded"] else ("will download" if row["downloaded"] is False else "unknown")
+        if row.get("stored"):
+            mark = "stored"
+        else:
+            mark = "cached" if row["downloaded"] else ("will download" if row["downloaded"] is False else "unknown")
         size = f", {row['params']}" if row["params"] else ""
         # The pin is shortened to the commit's first eight characters: enough to compare
         # two machines by eye, and the artifact records all forty. `unpinned` is printed
@@ -376,11 +401,122 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # worth knowing about a machine that behaves differently is *where* it looks for a model.
     to_fetch = [row for row in report.get("presetDetails", []) if row["downloaded"] is False]
     print(f"  model cache   {report.get('modelCache', '?')}")
+    print(f"  model store   {report.get('modelStore', '?')}  (verified copies win over the cache)")
     if to_fetch:
         names = ", ".join(f"{row['id']} ({row['modelName']})" for row in to_fetch)
         print(f"    ! not downloaded yet: {names} - the first run fetches it from the hub")
     if not report["virtualenv"]:
         print("\n  ! Not inside a virtualenv. Create one with: python -m venv .venv")
+    return 0
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    """The verified model store: import it, verify it, export it."""
+    store = models.store_root()
+
+    if args.import_model:
+        wanted = modelstore.known_models() if args.import_model in ("all", "") else [args.import_model]
+        imported: list[dict] = []
+        failed = 0
+        for model_id in wanted:
+            try:
+                imported.append(modelstore.import_model(model_id, args.source, overwrite=args.overwrite))
+            except modelstore.ModelStoreError as exc:
+                _err(f"{model_id}: {exc}")
+                failed += 1
+        if args.json:
+            print(json.dumps({"store": str(store), "imported": imported}, indent=2))
+        else:
+            print(f"model store   {store}")
+            for row in imported:
+                print(f"  {row['status']:<8} {row['model']:<34} {str(row['sha256'])[:12]}  {row['files']} file(s)")
+        return 0 if not failed else 1
+
+    if args.export:
+        # "Copy my store", not "copy the catalogue": a store holding the two models this
+        # studio runs on would otherwise fail to export, reporting three absent models
+        # nobody asked for. `--model` still names one explicitly.
+        wanted = [args.model] if args.model else modelstore.present_models()
+        if not wanted:
+            _err(f"the store at {store} is empty; nothing to export (fill it with `models --import`)")
+            return 1
+        exported: list[dict] = []
+        failed = 0
+        for model_id in wanted:
+            try:
+                exported.append(modelstore.export(model_id, args.export))
+            except modelstore.ModelStoreError as exc:
+                _err(f"{model_id}: {exc}")
+                failed += 1
+        if args.json:
+            print(json.dumps({"store": str(store), "exported": exported}, indent=2))
+        else:
+            for row in exported:
+                print(f"  exported {row['model']:<34} {row['directory']}")
+        return 0 if not failed else 1
+
+    rows = modelstore.inventory(check=args.verify)
+    if args.json:
+        print(json.dumps({"store": str(store), "models": rows, "verified": bool(args.verify)}, indent=2))
+    else:
+        print(f"model store   {store}")
+        for row in rows:
+            if not row["present"]:
+                mark = "missing"
+            elif row["ok"] is None:
+                mark = "stored"
+            else:
+                mark = "ok" if row["ok"] else "FAILED"
+            digest = (row["sha256"] or "")[:12]
+            print(f"  [{mark:<7}] {row['model']:<34} {digest}")
+        if not any(row["present"] for row in rows):
+            print("\n  Empty. Fill it once on a machine that has the weights: audio-studio models --import all")
+    if args.verify and any(row["present"] and not row["ok"] for row in rows):
+        return 1
+    return 0
+
+
+def cmd_parity(args: argparse.Namespace) -> int:
+    """One clip, every stage, one hash per stage - for comparing two machines."""
+    try:
+        report = run_parity(
+            args.audio,
+            seconds=args.seconds or None,
+            model=args.model,
+            compute_type=args.compute_type,
+            cpu_threads=args.cpu_threads,
+            align_model=args.align_model,
+            on_progress=_progress_factory(False),
+        )
+    except (ParityError, MediaError, OSError) as exc:
+        _err(str(exc))
+        return 1
+
+    produced = [stage for stage in ("pcm", "transcript", "emissions", "alignment") if report.get(stage)]
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0 if produced else 1
+
+    env = report.get("environment") or {}
+    print(f"audio-studio {report['audioStudio']} - parity for {report['source']['file']} ({report['clipSeconds']}s)")
+    print(
+        f"  machine      {env.get('platform', '?')} {env.get('machine', '')}  "
+        f"kernel {env.get('cpuCapability') or 'unknown'}  torch threads {env.get('torchThreads')}"
+    )
+    print(f"  settings     model {report['model']}, {report['computeType']}, cpu_threads {report['cpuThreads']}")
+    weights = report.get("weights") or {}
+    print(f"  weights      {weights.get('revision') or '-'}  {weights.get('sha256') or weights.get('error') or '-'}")
+    print("  stages")
+    for line in fingerprint.summarise(report):
+        print(line)
+    if report.get("transcript"):
+        print(f"  first words  {report['transcript']['first']}")
+    for warning in report.get("warnings") or []:
+        print(f"  ! {warning}")
+    if not produced:
+        return 1
+    print("\n  Compare this line-for-line on the other machine: the first stage that differs is the cause.")
     return 0
 
 
@@ -533,6 +669,20 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--model", default=None, help="override the preset's model (e.g. small, medium, distil-large-v3)")
     t.add_argument("--language", default=None, help="force a language code (e.g. en); default: autodetect")
     t.add_argument("--beam", type=int, default=None, help="beam size (default: the preset's)")
+    t.add_argument(
+        "--compute-type",
+        default=DEFAULT_COMPUTE_TYPE,
+        help=(
+            f"CTranslate2 precision (default: {DEFAULT_COMPUTE_TYPE}); int8 is the fastest, "
+            "float32 the most portable across CPUs - see `audio-studio parity`"
+        ),
+    )
+    t.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=0,
+        help="threads CTranslate2 may use (default: 0 - let it decide from the core count)",
+    )
     t.add_argument("--emit", type=_parse_kinds, default=list(DEFAULT_KINDS), help="comma list: json,veed,srt,vtt")
     t.add_argument("--word-level", action="store_true", help="one subtitle cue per word")
     t.add_argument("--emphasis", default="none", choices=("none", "all", "auto"), help="keyword highlighting in the Veed output (auto = the words the llm validator picked)")
@@ -563,6 +713,50 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="report installed packages and usable engines")
     d.add_argument("--json", action="store_true", help="machine-readable report on stdout")
     d.set_defaults(func=cmd_doctor)
+
+    md = sub.add_parser("models", help="the verified model store: import, verify, export")
+    md.add_argument(
+        "--import",
+        dest="import_model",
+        default=None,
+        metavar="MODEL",
+        help="copy a model into the store ('all' = every preset model plus the aligner)",
+    )
+    md.add_argument(
+        "--from",
+        dest="source",
+        default="hf",
+        metavar="SOURCE",
+        help="'hf' (this machine's pinned cache) or a directory of model files (default: hf)",
+    )
+    md.add_argument("--export", default=None, metavar="DIR", help="copy the stored models to DIR")
+    md.add_argument("--model", default=None, help="limit --export to one model")
+    md.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace a store copy that does not match the source (never silent)",
+    )
+    md.add_argument("--verify", action="store_true", help="re-hash every stored model against its manifest")
+    md.add_argument("--json", action="store_true", help="machine-readable report on stdout")
+    md.set_defaults(func=cmd_models)
+
+    p = sub.add_parser(
+        "parity",
+        help="hash every stage of one clip, so two machines can be compared",
+    )
+    p.add_argument("audio", help="the clip to compare (both machines must be given the same file)")
+    p.add_argument(
+        "--seconds",
+        type=float,
+        default=30.0,
+        help="how much of the file to compare (default: 30; 0 = the whole file)",
+    )
+    p.add_argument("--model", default=None, help="the transcriber's model (default: the preset default)")
+    p.add_argument("--compute-type", default=DEFAULT_COMPUTE_TYPE, help=f"CTranslate2 precision (default: {DEFAULT_COMPUTE_TYPE})")
+    p.add_argument("--cpu-threads", type=int, default=0, help="threads CTranslate2 may use (default: 0 - let it decide)")
+    p.add_argument("--align-model", default=DEFAULT_ALIGN_MODEL, help=f"the aligner's model (default: {DEFAULT_ALIGN_MODEL})")
+    p.add_argument("--json", action="store_true", help="machine-readable report on stdout")
+    p.set_defaults(func=cmd_parity)
 
     a = sub.add_parser("align", help="re-time a saved transcript against its audio")
     a.add_argument("artifact", help="path to a *.speech.json")
