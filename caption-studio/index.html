@@ -368,6 +368,33 @@
                   <span>Opacity <b id="clip-opacity-out">100%</b></span>
                   <input type="range" id="clip-opacity" min="0" max="1" step="0.01" value="1" disabled />
                 </label>
+                <!--
+                  Crop. The rectangle is cut from the clip's *own file*, so the same crop keeps meaning
+                  the same thing after a move, a resize or a rotation. The toggle is a mode rather than
+                  an edit: while it is on, the preview's eight handles belong to the crop rectangle,
+                  drawn inside the whole picture — and the four fields are that same rectangle in the
+                  unit the file is made of, whole pixels, because a percentage of a 3840 px picture is
+                  not a number anyone can check against the thing they are looking at.
+                -->
+                <span class="clip-crop-group">
+                  <label class="check" title="While this is on, the preview's handles cut the picture instead of resizing the box; drag inside the crop to move it">
+                    <input type="checkbox" id="clip-crop-toggle" disabled /> crop on the preview
+                  </label>
+                  <label class="field-inline">
+                    <span>Ratio</span>
+                    <!-- The entries are rendered from CROP_ASPECTS, so the panel and the model cannot
+                         disagree about which ratios exist. -->
+                    <select id="clip-crop-aspect" disabled title="Hold the crop to a shape. Shift frees it for one drag; Free lets each edge move on its own."></select>
+                  </label>
+                  <button class="ghost" id="clip-crop-reset" type="button" disabled title="Show the whole file again">Reset crop</button>
+                </span>
+                <span class="clip-crop-numbers" title="The crop rectangle, in the file's own pixels — type a number, or nudge with the arrow keys on the preview">
+                  <label class="field-inline"><span>X</span><input type="number" id="clip-crop-x" step="1" min="0" value="0" disabled /></label>
+                  <label class="field-inline"><span>Y</span><input type="number" id="clip-crop-y" step="1" min="0" value="0" disabled /></label>
+                  <label class="field-inline"><span>W</span><input type="number" id="clip-crop-w" step="1" min="1" value="0" disabled /></label>
+                  <label class="field-inline"><span>H</span><input type="number" id="clip-crop-h" step="1" min="1" value="0" disabled /></label>
+                  <span class="clip-crop-size mono" id="clip-crop-size">—</span>
+                </span>
                 <label class="field-inline">
                   <span>Fit</span>
                   <select id="clip-fit" disabled title="contain keeps the whole picture and never distorts it; cover fills the box and crops; stretch distorts it to the box, which is the only setting that can">
@@ -401,8 +428,9 @@
               </div>
               <div class="hint" id="clip-inspector-hint">
                 Drag the clip on the preview to move it, its square handles to resize and the round one
-                above it to turn it. Arrow keys nudge, shift-move resizes further, and holding <b>Alt</b>
-                drags without the guides pulling the box.
+                above it to turn it. Arrow keys nudge, shift inverts the shape lock, and holding <b>Alt</b>
+                drags without the guides. <b>Crop on the preview</b> puts the eight handles on the whole
+                picture instead, so they cut it rather than resizing the box.
               </div>
             </div>
           </div>

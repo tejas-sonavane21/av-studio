@@ -16,18 +16,37 @@ import {
   MEDIA_FITS,
   MIN_BOX,
   MIN_CLIP,
+  FULL_CROP,
+  MIN_CROP,
+  MIN_CROP_PX,
+  CROP_ASPECTS,
   addMediaClip,
   boxForMedia,
   boxRect,
   centerClipBox,
+  clipContentAspect,
   clipDrawRect,
   clipLength,
   clipPixelAspect,
   clipSourceTime,
   clipsAt,
+  cropAspect,
+  cropAspectId,
+  cropEdgesPx,
+  cropFromEdgesPx,
+  cropFromPixels,
+  cropMediaClip,
+  cropPixels,
+  cropSourceRect,
+  fitCropAspect,
+  moveCrop,
+  resizeCrop,
   describeClip,
   drawOrder,
   duplicateClip,
+  isFullCrop,
+  normalizeCrop,
+  resetClipCrop,
   ensureMedia,
   findClip,
   fitClipToFrame,
@@ -443,4 +462,184 @@ test('a clip that arrives with a layer keeps it, and one that does not goes on t
   addMediaClip(doc, { ...findClip(doc, 'c1'), id: 'c9', layer: 0, start: 9, end: 12 });
   assert.equal(findClip(doc, 'c9')?.layer, 0);
   assert.deepEqual(drawOrder(mediaClips(doc)).map((c) => c.id), ['c1', 'c9']);
+});
+
+// --------------------------------------------------------------------------- //
+// the crop: which part of the file is shown
+// --------------------------------------------------------------------------- //
+
+test('a crop is on the file, and the picture it leaves is fitted without distorting it', () => {
+  const doc = { media: [], canvas };
+  addMediaClip(doc, clip({ id: 'c1' }));
+  assert.deepEqual(findClip(doc, 'c1').crop, { x: 0, y: 0, w: 1, h: 1 }, 'the whole file until it is cut');
+  assert.equal(isFullCrop(findClip(doc, 'c1').crop), true);
+
+  // The left half of a 400x400 file is 200x400 — twice as tall as it is wide — and no box can change that.
+  cropMediaClip(doc, 'c1', { x: 0, w: 0.5 });
+  const c = findClip(doc, 'c1');
+  assert.deepEqual(c.crop, { x: 0, y: 0, w: 0.5, h: 1 });
+  assert.equal(isFullCrop(c.crop), false);
+  assert.equal(clipContentAspect(c, entry), 0.5, 'the shape to hold is the crop, not the file');
+
+  const size = { width: 1920, height: 1080 };
+  const box = boxRect(c.box, size);
+  const rect = clipDrawRect(c, entry, size);
+  assert.equal(Math.round(rect.height), Math.round(box.height), 'the crop is fitted to the box as always');
+  assert.equal(Math.round(rect.width), Math.round(box.height / 2), 'and its own shape decides the rest');
+
+  // In the file's own pixels, which is exactly what the nine-argument drawImage is handed.
+  assert.deepEqual(cropSourceRect(c.crop, entry), { x: 0, y: 0, width: 200, height: 400 });
+  assert.deepEqual(cropSourceRect(c.crop, { width: 0, height: 0 }), { x: 0, y: 0, width: 0, height: 0 },
+    'a file nobody has measured has no source rectangle to take');
+});
+
+test('a crop is clamped into the file, so a drag past the edge cannot blank the clip', () => {
+  // The floor is a *fraction* so the model can hold a crop for an unmeasured file; the panel and the
+  // preview work in whole pixels and apply `MIN_CROP_PX` on top. It is deliberately small (0.5%): 2% of
+  // a 4000 px screenshot is 80 px, which is too coarse to cut a logo out of one.
+  const floored = normalizeCrop({ x: -1, y: 2, w: 5, h: 0 });
+  assert.deepEqual({ x: floored.x, y: floored.y, w: floored.w }, { x: 0, y: 1 - MIN_CROP, w: 1 });
+  // A tolerance on the height rather than equality: it is `1 - y`, and a binarily tiny MIN_CROP is a
+  // subtraction that does not land back on itself exactly.
+  assert.ok(Math.abs(floored.h - MIN_CROP) < 1e-12, `the height floored at ${floored.h}`);
+  // x = 0.9 leaves a tenth of the file's width, so a request for half of it is cut back to that tenth.
+  // (Compared with a tolerance because a tenth is not a binary fraction: `1 - 0.9` is 0.0999..98.)
+  const tight = normalizeCrop({ x: 0.9, y: 0, w: 0.5, h: 1 });
+  assert.deepEqual({ x: tight.x, y: tight.y, h: tight.h }, { x: 0.9, y: 0, h: 1 });
+  assert.ok(Math.abs(tight.w - 0.1) < 1e-9, `the width was clipped to the tenth left: ${tight.w}`);
+  assert.deepEqual(normalizeCrop(undefined), { x: 0, y: 0, w: 1, h: 1 });
+  assert.deepEqual(normalizeCrop({ x: 0.5, w: 0.5 }), { x: 0.5, y: 0, w: 0.5, h: 1 });
+});
+
+test('resetting a clip puts the whole file back, and a copy carries the crop', () => {
+  const doc = { media: [], canvas };
+  addMediaClip(doc, clip({ id: 'c1' }));
+  cropMediaClip(doc, 'c1', { x: 0.25, w: 0.5 });
+  const copy = duplicateClip(doc, 'c1');
+  assert.deepEqual(copy.crop, { x: 0.25, y: 0, w: 0.5, h: 1 }, 'a copy is a copy of the crop too');
+
+  resetClipCrop(doc, 'c1');
+  assert.deepEqual(findClip(doc, 'c1').crop, FULL_CROP);
+  assert.deepEqual(findClip(doc, copy.id).crop, { x: 0.25, y: 0, w: 0.5, h: 1 }, 'and the copy keeps its own');
+
+  cropMediaClip(doc, 'c1', { x: 0.1, y: 0.1, w: 0.5, h: 0.5 });
+  resetMediaClip(doc, 'c1', { media: entry, canvas });
+  assert.deepEqual(findClip(doc, 'c1').crop, FULL_CROP, 'reset means the picture as it arrived');
+});
+
+// --------------------------------------------------------------------------- //
+// the crop in whole file pixels: the numbers the panel shows and the handles cut on
+// --------------------------------------------------------------------------- //
+
+const FILE = { width: 800, height: 400 };
+
+test('a crop is edited and read back in whole file pixels, never in half ones', () => {
+  // A fraction of a 3840 px picture is not a number a person can check; the pixel rectangle is. Reading
+  // it rounds, so the same 800×400 region is named the same way twice and `drawImage` is handed integers.
+  assert.deepEqual(cropPixels({ x: 0.25, y: 0.5, w: 0.5, h: 0.5 }, FILE), { x: 200, y: 200, w: 400, h: 200 });
+  assert.deepEqual(cropPixels({ x: 0.1234, y: 0.4321, w: 0.3333, h: 0.2222 }, FILE), {
+    x: Math.round(0.1234 * 800),
+    y: Math.round(0.4321 * 400),
+    w: Math.round(0.3333 * 800),
+    h: Math.round(0.2222 * 400),
+  });
+  assert.deepEqual(cropPixels(FULL_CROP, { width: 0, height: 0 }), { x: 0, y: 0, w: 0, h: 0 }, 'nothing to name yet');
+
+  // And the other way: fractions that, multiplied back out, are exactly the pixels asked for.
+  assert.deepEqual(cropPixels(cropFromPixels({ x: 100, y: 50, width: 200, height: 100 }, FILE), FILE), {
+    x: 100,
+    y: 50,
+    w: 200,
+    h: 100,
+  });
+  // A rectangle named the way the model names it (`w`/`h`) is read too: `cropPixels` answers in that
+  // spelling, and a helper that takes it back must not read its size as zero.
+  assert.deepEqual(cropPixels(cropFromPixels({ x: 100, y: 50, w: 200, h: 100 }, FILE), FILE), {
+    x: 100,
+    y: 50,
+    w: 200,
+    h: 100,
+  });
+  // A crop cannot be smaller than `MIN_CROP_PX`, and its origin is slid back inside the file — never
+  // shrunk to fit, because "too far right" is a position and not a size.
+  assert.deepEqual(cropPixels(cropFromPixels({ x: 0, y: 0, width: 1, height: 1 }, FILE), FILE), {
+    x: 0,
+    y: 0,
+    w: MIN_CROP_PX,
+    h: MIN_CROP_PX,
+  });
+  assert.deepEqual(cropPixels(cropFromPixels({ x: 9999, y: -50, width: 200, height: 100 }, FILE), FILE), {
+    x: 600,
+    y: 0,
+    w: 200,
+    h: 100,
+  });
+});
+
+test('a ratio picker fits the largest rectangle of that shape inside the crop already framed', () => {
+  const square = cropPixels(fitCropAspect(FULL_CROP, FILE, 1), FILE);
+  assert.deepEqual(square, { x: 200, y: 0, w: 400, h: 400 }, 'a square from a 2:1 file is as tall as the file');
+  assert.equal(cropAspect(fitCropAspect(FULL_CROP, FILE, 1), FILE), 1);
+
+  // "Inside the current crop" is the whole point: the framing a person has lined up is kept, and only
+  // its shape changes. Half the file, square: the largest square inside the left half.
+  const half = cropPixels(fitCropAspect({ x: 0, y: 0, w: 0.5, h: 1 }, FILE, 1), FILE);
+  assert.deepEqual(half, { x: 0, y: 0, w: 400, h: 400 });
+  // And a free ratio is not a fit: it changes nothing.
+  assert.deepEqual(fitCropAspect({ x: 0.25, y: 0.25, w: 0.5, h: 0.5 }, FILE, 0), { x: 0.25, y: 0.25, w: 0.5, h: 0.5 });
+});
+
+test('the picker says what the rectangle is, and Original wins over a named ratio that matches it', () => {
+  assert.equal(cropAspectId(FULL_CROP, FILE), 'source');
+  assert.equal(cropAspectId({ x: 0.25, y: 0, w: 0.5, h: 1 }, FILE), '1:1');
+  assert.equal(cropAspectId({ x: 0, y: 0, w: 0.5, h: 0.5 }, FILE), 'source', 'a half-width, half-height crop is still the file\u2019s shape');
+  assert.equal(cropAspectId({ x: 0, y: 0, w: 0.3, h: 1 }, FILE), 'free', 'a shape nobody picked says Free');
+  assert.equal(cropAspectId(FULL_CROP, { width: 0, height: 0 }), 'free', 'an unmeasured file has no shape to compare');
+  // Every entry in the picker is reachable by its own ratio, so the list cannot drift from the maths.
+  for (const entry of CROP_ASPECTS.filter((item) => item.ratio)) {
+    assert.equal(cropAspectId(fitCropAspect(FULL_CROP, FILE, entry.ratio), FILE), entry.id, entry.id);
+  }
+});
+
+test('typing a size resizes from the top-left, and a held ratio makes the other side follow', () => {
+  const resized = cropPixels(resizeCrop(FULL_CROP, FILE, { width: 200 }, { ratio: 1 }), FILE);
+  assert.deepEqual(resized, { x: 0, y: 0, w: 200, h: 200 }, 'the origin stays put — a typed number grows rightwards');
+  const fromHeight = cropPixels(resizeCrop(FULL_CROP, FILE, { height: 100 }, { ratio: 16 / 9 }), FILE);
+  assert.deepEqual(fromHeight, { x: 0, y: 0, w: 178, h: 100 }, 'and the width follows the height, rounded to a pixel');
+  // Near an edge a resize stops at the edge instead of jumping the crop back to the other one.
+  const nearEdge = cropPixels(resizeCrop({ x: 0.5, y: 0, w: 0.5, h: 1 }, FILE, { width: 1000 }), FILE);
+  assert.deepEqual(nearEdge, { x: 400, y: 0, w: 400, h: 400 }, 'the right edge is the last column, not a re-fit');
+});
+
+test('a crop can be moved without being resized, and it stops at the file', () => {
+  const start = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
+  assert.deepEqual(cropPixels(moveCrop(start, FILE, 100, 50), FILE), { x: 300, y: 150, w: 400, h: 200 });
+  assert.deepEqual(cropPixels(moveCrop(start, FILE, -9999, 9999), FILE), { x: 0, y: 200, w: 400, h: 200 }, 'edges clamp, size holds');
+  assert.deepEqual(cropPixels(moveCrop(start, { width: 0, height: 0 }, 100, 50), FILE), { x: 200, y: 100, w: 400, h: 200 }, 'an unmeasured file moves nothing');
+});
+
+test('edges are the unit a drag works in, so the edges that are not dragged do not creep', () => {
+  assert.deepEqual(cropEdgesPx({ x: 0.25, y: 0.5, w: 0.5, h: 0.25 }, FILE), { left: 200, top: 200, right: 600, bottom: 300 });
+  // One edge moved; the other three are exactly where they were.
+  assert.deepEqual(
+    cropEdgesPx(cropFromEdgesPx({ left: 120, top: 200, right: 600, bottom: 300 }, FILE), FILE),
+    { left: 120, top: 200, right: 600, bottom: 300 },
+  );
+  // An edge dragged off the file clamps there, and the edge that was not dragged stays where it was.
+  assert.deepEqual(
+    cropEdgesPx(cropFromEdgesPx({ left: -50, top: 200, right: 600, bottom: 300 }, FILE), FILE),
+    { left: 0, top: 200, right: 600, bottom: 300 },
+  );
+  // Dragging an edge *past* its opposite is a zero-width crop, and the answer is the pixel floor rather
+  // than an inside-out rectangle: the dragged edge is kept and the opposite one is pushed off it.
+  assert.deepEqual(
+    cropEdgesPx(cropFromEdgesPx({ left: 700, top: 200, right: 600, bottom: 300 }, FILE), FILE),
+    { left: 700, top: 200, right: 700 + MIN_CROP_PX, bottom: 300 },
+  );
+});
+
+test('an exported crop takes whole pixels out of the file, so its edges are never resampled', () => {
+  // 0.3333 of 800 is 266.64: a source rectangle that is a third of a pixel wide is an edge the encoder
+  // would have to blur on every frame. The source rectangle is rounded; the picture is what it is.
+  assert.deepEqual(cropSourceRect({ x: 0.1, y: 0.2, w: 0.3333, h: 0.4444 }, FILE), { x: 80, y: 80, width: 267, height: 178 });
 });

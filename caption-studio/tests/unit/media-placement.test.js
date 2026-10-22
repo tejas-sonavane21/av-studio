@@ -22,9 +22,14 @@ import {
   beginClipGesture,
   clipPixels,
   clipQuad,
+  cropFromHandle,
+  cropFromMove,
+  cropRectIn,
+  cropShadeBands,
   describeTransform,
   handleCursor,
   handlePoints,
+  handlePointsForRect,
   hitClip,
   hitHandle,
   hitRotateHandle,
@@ -36,7 +41,7 @@ import {
   snapBox,
   snapRotation,
 } from '../../src/render/media-placement.js';
-import { MIN_BOX, normalizeClip } from '../../src/model/media.js';
+import { MIN_BOX, MIN_CROP, normalizeClip } from '../../src/model/media.js';
 
 const size = { width: 1000, height: 500 };
 
@@ -365,4 +370,174 @@ test('the transform is described in the terms the panel shows', () => {
     '40%×40% at 10%, 20% · 45° · flipped x · stretch · 50% opaque',
   );
   assert.equal(describeTransform({}), '—');
+});
+
+// --------------------------------------------------------------------------- //
+// cropping: cutting the picture, not the box
+// --------------------------------------------------------------------------- //
+
+test('a crop handle cuts the sides it is dragged, and leaves the others where they are', () => {
+  // The crop frame is the whole picture, drawn into the clip's box: 200 px wide and 200 px tall here, at
+  // (100, 50) — so every expected fraction below is a plain division.
+  const startRect = { x: 100, y: 50, w: 200, h: 200 };
+  const full = { x: 0, y: 0, w: 1, h: 1 };
+
+  // The right handle dragged halfway in: half the file's width is left, from the left edge.
+  assert.deepEqual(
+    cropFromHandle({ handle: 'e', startCrop: full, startRect, point: { x: 200, y: 150 } }),
+    { x: 0, y: 0, w: 0.5, h: 1 },
+  );
+  // The left handle: the same half, but it is the *right* half of the file that survives.
+  assert.deepEqual(
+    cropFromHandle({ handle: 'w', startCrop: full, startRect, point: { x: 200, y: 150 } }),
+    { x: 0.5, y: 0, w: 0.5, h: 1 },
+  );
+  // The bottom handle dragged halfway up the frame, which is the frame's own middle (y 50 to 250).
+  assert.deepEqual(
+    cropFromHandle({ handle: 's', startCrop: full, startRect, point: { x: 200, y: 150 } }),
+    { x: 0, y: 0, w: 1, h: 0.5 },
+  );
+  // A corner does both axes at once: half the width, and three quarters of the height.
+  assert.deepEqual(
+    cropFromHandle({ handle: 'se', startCrop: full, startRect, point: { x: 200, y: 200 } }),
+    { x: 0, y: 0, w: 0.5, h: 0.75 },
+  );
+
+  // Dragging *outwards* past the whole picture is not a crop of more than the file: it clamps there.
+  assert.deepEqual(
+    cropFromHandle({ handle: 'e', startCrop: full, startRect, point: { x: 999, y: 150 } }),
+    { x: 0, y: 0, w: 1, h: 1 },
+  );
+  // And inwards past the floor stops at the smallest crop rather than at zero.
+  const squeezed = cropFromHandle({ handle: 'e', startCrop: full, startRect, point: { x: 0, y: 150 } });
+  assert.equal(squeezed.w, MIN_CROP);
+});
+
+test('a crop is applied to what is left, so a second cut is a cut of the picture it left', () => {
+  const startRect = { x: 0, y: 0, w: 100, h: 100 };
+  // Already showing the right half of the file; cutting half of that leaves a quarter, starting three
+  // quarters of the way across the file.
+  assert.deepEqual(
+    cropFromHandle({ handle: 'e', startCrop: { x: 0.5, y: 0, w: 0.5, h: 1 }, startRect, point: { x: 50, y: 50 } }),
+    { x: 0.5, y: 0, w: 0.25, h: 1 },
+  );
+  // Dragging the *left* edge of that same half keeps its right edge fixed.
+  assert.deepEqual(
+    cropFromHandle({ handle: 'w', startCrop: { x: 0.5, y: 0, w: 0.5, h: 1 }, startRect, point: { x: 50, y: 50 } }),
+    { x: 0.75, y: 0, w: 0.25, h: 1 },
+  );
+});
+
+test('a crop handle on a turned clip cuts the edge that is under the pointer', () => {
+  // The frame turned a quarter turn about its centre: its right edge now lies along the *bottom* of the
+  // screen, and its top edge along the right. A pointer 20 px below the frame's middle is therefore 70% of
+  // the way across the picture, which is what the right handle cuts. Without the rotation in the maths this
+  // would cut the wrong axis, and the cut would look like it ignored the drag.
+  const rect = { x: 0, y: 0, w: 100, h: 100 };
+  assert.deepEqual(
+    cropFromHandle({ handle: 'e', startCrop: { x: 0, y: 0, w: 1, h: 1 }, startRect: rect, point: { x: 50, y: 70 }, rotation: 90 }),
+    { x: 0, y: 0, w: 0.7, h: 1 },
+  );
+});
+
+// --------------------------------------------------------------------------- //
+// the crop in file pixels: snapping, a held ratio, and a pan
+// --------------------------------------------------------------------------- //
+
+const FILE = { width: 800, height: 400 };
+const FRAME = { x: 0, y: 0, w: 800, h: 400 };
+
+function px(crop) {
+  return {
+    x: Math.round(crop.x * FILE.width),
+    y: Math.round(crop.y * FILE.height),
+    w: Math.round(crop.w * FILE.width),
+    h: Math.round(crop.h * FILE.height),
+  };
+}
+
+test('with the file measured a cut lands on the pixel under the pointer, not on a float', () => {
+  // The frame is 800 px wide for an 800 px file, so one screen pixel is one file pixel. A third of the
+  // way across a 3840 px picture is 1280 — a fraction that is *never* a binary number, and the reason the
+  // cut is snapped where it can be.
+  const cut = cropFromHandle({ handle: 'e', startCrop: { x: 0, y: 0, w: 1, h: 1 }, startRect: FRAME, point: { x: 267, y: 0 }, media: FILE });
+  assert.deepEqual(px(cut), { x: 0, y: 0, w: 267, h: 400 }, 'the edge is the pointer\u2019s own column');
+  // Same again, from a picture whose frame is drawn smaller than the file: the pointer is still mapped to
+  // a file pixel, so the rectangle handed to `drawImage` is an integer at any preview zoom.
+  const zoomed = cropFromHandle({
+    handle: 'w',
+    startCrop: { x: 0, y: 0, w: 1, h: 1 },
+    startRect: { x: 100, y: 50, w: 400, h: 200 },
+    point: { x: 300, y: 150 },
+    media: FILE,
+  });
+  assert.deepEqual(px(zoomed), { x: 400, y: 0, w: 400, h: 400 });
+});
+
+test('a held ratio makes a corner hold it, and an edge grow about its opposite edge\u2019s centre', () => {
+  // A corner: the pointer's own box is 400 wide and 300 tall, and the ratio fits *inside* it — anchored at
+  // the corner that is not being dragged, so the crop never overtakes the hand.
+  const corner = cropFromHandle({ handle: 'se', startCrop: { x: 0, y: 0, w: 1, h: 1 }, startRect: FRAME, point: { x: 400, y: 300 }, media: FILE, ratio: 1 });
+  assert.deepEqual(px(corner), { x: 0, y: 0, w: 300, h: 300 });
+
+  // The same drag on an edge: the dragged dimension decides, the other follows about the edge's centre.
+  const edge = cropFromHandle({ handle: 'e', startCrop: { x: 0, y: 0, w: 1, h: 1 }, startRect: FRAME, point: { x: 400, y: 200 }, media: FILE, ratio: 1 });
+  assert.deepEqual(px(edge), { x: 0, y: 0, w: 400, h: 400 }, 'a square, from the left edge');
+
+  // And the ratio survives a cut that starts inside an existing crop: half the file, squared, anchored at
+  // the right edge that was already there.
+  const inner = cropFromHandle({
+    handle: 'w',
+    startCrop: { x: 0.25, y: 0, w: 0.75, h: 1 },
+    startRect: FRAME,
+    point: { x: 200, y: 200 },
+    media: FILE,
+    ratio: 1,
+  });
+  assert.equal(px(inner).w, px(inner).h, 'the shape is the picker\u2019s, not the pointer\u2019s');
+  assert.equal(px(inner).x + px(inner).w, 800, 'and the right edge stayed where it was');
+});
+
+test('a ratio cannot ask for less than the pixel floor, in either direction', () => {
+  const thin = cropFromHandle({ handle: 'e', startCrop: { x: 0, y: 0, w: 1, h: 1 }, startRect: FRAME, point: { x: 0, y: 200 }, media: FILE, ratio: 21 / 9 });
+  const size = px(thin);
+  assert.ok(size.w >= 8 && size.h >= 8, `the crop is still grabbable: ${size.w}\u00d7${size.h}`);
+  assert.ok(Math.abs(size.w / size.h - 21 / 9) < 0.05, 'and it is still the ratio that was asked for');
+});
+
+test('a drag inside the crop moves the window without changing its size', () => {
+  const start = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
+  const panned = cropFromMove({ startCrop: start, startRect: FRAME, from: { x: 400, y: 200 }, to: { x: 500, y: 250 }, media: FILE });
+  assert.deepEqual(px(panned), { x: 300, y: 150, w: 400, h: 200 });
+  // The window stops at the file instead of shrinking against it, which is the difference between a pan
+  // and a crop.
+  const stuck = cropFromMove({ startCrop: start, startRect: FRAME, from: { x: 400, y: 200 }, to: { x: 5000, y: 5000 }, media: FILE });
+  assert.deepEqual(px(stuck), { x: 400, y: 200, w: 400, h: 200 });
+});
+
+test('the crop rectangle and the dimmed bands are the frame minus the crop, in pixels', () => {
+  assert.deepEqual(cropRectIn(FRAME, { x: 0.25, y: 0, w: 0.5, h: 0.5 }), { x: 200, y: 0, w: 400, h: 200 });
+  // Four bands around a crop, and only the four: a band of no width is not drawn, so a whole-file crop
+  // dims nothing at all.
+  const bands = cropShadeBands(FRAME, { x: 200, y: 200, w: 400, h: 200 });
+  assert.deepEqual(bands, [
+    { x: 0, y: 0, w: 800, h: 200 },
+    { x: 0, y: 400, w: 800, h: 0 },
+    { x: 0, y: 200, w: 200, h: 200 },
+    { x: 600, y: 200, w: 200, h: 200 },
+  ].filter((band) => band.w > 0.01 && band.h > 0.01));
+  assert.deepEqual(cropShadeBands(FRAME, { x: 0, y: 0, w: 800, h: 400 }), [], 'nothing is being cut');
+});
+
+test('a crop with no frame to cut (an offline clip) changes nothing', () => {
+  assert.deepEqual(cropFromHandle({ handle: 'e', startCrop: { x: 0.2, y: 0, w: 0.5, h: 1 } }), { x: 0.2, y: 0, w: 0.5, h: 1 });
+  assert.deepEqual(cropFromHandle({}), { x: 0, y: 0, w: 1, h: 1 });
+});
+
+test('the transform line says what is left of the file, not what was cut off it', () => {
+  assert.equal(
+    describeTransform({ box: { x: 0, y: 0, w: 0.5, h: 0.5 }, crop: { x: 0.25, y: 0, w: 0.5, h: 1 } }),
+    '50%×50% at 0%, 0% · cropped to 50%×100%',
+  );
+  assert.equal(describeTransform({ box: { x: 0, y: 0, w: 0.5, h: 0.5 } }), '50%×50% at 0%, 0%', 'nothing to say when nothing is cut');
 });

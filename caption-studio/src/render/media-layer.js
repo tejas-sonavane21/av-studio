@@ -14,7 +14,7 @@
  * (the preview does), and `size` is always the frame expressed in the units the context is drawing in.
  */
 
-import { boxRect, clipDrawRect, clipsAt } from '../model/media.js';
+import { boxRect, clipDrawRect, clipsAt, cropSourceRect } from '../model/media.js';
 
 /**
  * A media's own pixel size, whichever kind of drawing source it is — 0×0 until it has one.
@@ -62,6 +62,10 @@ export function mediaSizeOf(element) {
  * @param {number} options.time                        source time in seconds — the clock captions use
  * @param {(id:string)=>(HTMLImageElement|HTMLVideoElement|null)} [options.resolve]
  * @returns {number} how many clips were actually painted
+ *
+ * A **cropped** clip is drawn with the nine-argument `drawImage`: the crop's rectangle out of the file,
+ * fitted into the box. That is what makes a crop a re-frame rather than a hole in the picture — see
+ * `clipDrawRect`, which fits the *cropped* shape so nothing is ever distorted by a crop.
  */
 export function drawMediaClips(ctx, { clips, size, time, resolve = () => null } = {}) {
   const width = Math.max(0, Number(size?.width) || 0);
@@ -72,8 +76,16 @@ export function drawMediaClips(ctx, { clips, size, time, resolve = () => null } 
   for (const clip of clipsAt({ media: clips }, time)) {
     const element = resolve(clip.id);
     if (!element) continue;
-    const rect = clipDrawRect(clip, mediaSizeOf(element), { width, height });
+    const media = mediaSizeOf(element);
+    const rect = clipDrawRect(clip, media, { width, height });
     if (!(rect.width > 0 && rect.height > 0)) continue;
+    // Which part of the file is drawn. The nine-argument `drawImage` is what makes a crop a *re-frame*
+    // rather than a mask: the surviving piece is fitted into the box by the same `fit` as ever, and the
+    // preview and the export hand the same source rectangle over — so neither can crop differently.
+    // A file whose size is not known yet has no source rectangle, and is drawn whole (the stretch case,
+    // which needs no measurement at all); an empty one would ask for zero pixels and paint nothing.
+    const source = cropSourceRect(clip.crop, media);
+    const cropped = source.width > 0 && source.height > 0;
     ctx.globalAlpha = clip.opacity;
     const turned = Math.abs(Number(clip.rotation) || 0) > 1e-6;
     const mirrored = clip.flipX === true || clip.flipY === true;
@@ -89,7 +101,11 @@ export function drawMediaClips(ctx, { clips, size, time, resolve = () => null } 
         if (mirrored) ctx.scale?.(clip.flipX ? -1 : 1, clip.flipY ? -1 : 1);
         ctx.translate?.(-cx, -cy);
       }
-      ctx.drawImage(element, rect.x, rect.y, rect.width, rect.height);
+      if (cropped) {
+        ctx.drawImage(element, source.x, source.y, source.width, source.height, rect.x, rect.y, rect.width, rect.height);
+      } else {
+        ctx.drawImage(element, rect.x, rect.y, rect.width, rect.height);
+      }
       if (wrapped) ctx.restore?.();
       drawn += 1;
     } catch {
