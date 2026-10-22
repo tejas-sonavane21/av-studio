@@ -193,11 +193,88 @@ def revision_for(identifier: str) -> Optional[str]:
 
 
 def repo_dir(model_id: str, *, root: Optional[Path] = None, env: Optional[Mapping[str, str]] = None) -> Optional[Path]:
-    """The cache directory a model would live in, or ``None`` for a model we do not know by name."""
+    """
+    The cache directory a model would live in, or ``None`` for a name we cannot place.
+
+    The aligner is in this map even though it is not a preset: it is downloaded from the same
+    hub and cached the same way, and answering ``None`` for it made "is the aligner on this
+    machine?" - the question a machine missing the acoustic model asks - unanswerable.
+    """
     entry = MODELS.get(model_id)
-    if not entry:
+    repo = entry["repo"] if entry else (ALIGN_MODEL if str(model_id) == ALIGN_MODEL else None)
+    if not repo:
         return None
-    return (Path(root) if root else cache_dir(env)) / repo_cache_name(entry["repo"])
+    return (Path(root) if root else cache_dir(env)) / repo_cache_name(repo)
+
+
+#: Environment variable that relocates the verified model store. A path on a shared drive
+#: lets three machines read one copy of the same bytes; the default is this checkout's
+#: `models/`, which is gitignored because the weights are hundreds of megabytes.
+STORE_ENV = "AUDIO_STUDIO_MODELS"
+
+
+def store_root(env: Optional[Mapping[str, str]] = None) -> Path:
+    """
+    Where the verified weights live, if this machine has any.
+
+    A *store* is not a cache. The hub cache is addressed by repository and, inside it, by a
+    commit the hub chose; a store is addressed by the commit *this project* verified and
+    carries a manifest of the exact files, so "same model" is a fact rather than a name.
+    It also answers the failure a pin cannot: a cache can be half-written, and the first run
+    that reads it will be the one that finds out.
+
+    ``AUDIO_STUDIO_MODELS`` exists so the three machines do not each need a copy: point it at
+    a read-only share and every run loads the same files. See ``modelstore.py``.
+    """
+    source = os.environ if env is None else env
+    value = source.get(STORE_ENV)
+    if value:
+        return Path(value)
+    return Path(__file__).resolve().parents[1] / STORE_DIRECTORY
+
+
+#: The default store, beside the package rather than in a hidden user directory: a backup
+#: that nobody can find is a backup nobody restores.
+STORE_DIRECTORY = "models"
+
+
+def store_dir(
+    model_id: str,
+    *,
+    revision: Optional[str] = None,
+    root: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[Path]:
+    """
+    The store directory for one model, or ``None`` when it has no commit to name.
+
+    ``None`` is the honest answer for an unpinned model (``large-v3``, a hub id from
+    outside the catalogue, a local path): the store is addressed by commit, and there is
+    no verified commit to address. Those keep loading the way they always did.
+    """
+    repo = str(model_id)
+    entry = MODELS.get(str(model_id))
+    if entry is not None:
+        repo = str(entry["repo"])
+    commit = revision if revision is not None else revision_for(model_id)
+    if not commit:
+        return None
+    return (Path(root) if root else store_root(env)) / repo_cache_name(repo) / str(commit)
+
+
+def in_store(
+    model_id: str,
+    *,
+    revision: Optional[str] = None,
+    root: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """Is this model in the verified store? A directory is not enough - the manifest is the claim."""
+    directory = store_dir(model_id, revision=revision, root=root, env=env)
+    try:
+        return bool(directory and (directory / ".model-manifest.json").is_file())
+    except OSError:
+        return False
 
 
 def is_downloaded(
@@ -308,23 +385,33 @@ def describe(
     model_id: str,
     *,
     root: Optional[Path] = None,
+    store: Optional[Path] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> dict:
-    """One catalogue row, with this machine's answer for whether it is already cached."""
+    """One catalogue row, with this machine's answer for whether it is already cached.
+
+    ``root`` is the hub cache to look in and ``store`` the verified store; both default to
+    this machine's, and both are parameters so a report can be written about a directory
+    that is not the one running the report (the tests, and `doctor --json` consumers).
+    """
     entry = MODELS.get(model_id)
     if entry is None:
         # An unknown name is not an error: `--model` takes any path or hub id the library
-        # understands, and a name we cannot describe is still a name it can load.
+        # understands, and a name we cannot describe is still a name it can load. The aligner
+        # lands here - it has no preset but it is pinned, cached and stored like the rest.
+        recognized = str(model_id) == ALIGN_MODEL
         return {
             "id": str(model_id),
             "repo": str(model_id),
-            "family": str(model_id),
+            "family": "wav2vec2 (aligner)" if recognized else str(model_id),
             "params": "",
             "languages": "",
-            "note": "not in the catalogue; passed to the engine as given",
+            "note": "the forced aligner; not a transcriber preset" if recognized else "not in the catalogue; passed to the engine as given",
             "known": False,
-            "downloaded": None,
-            "revision": None,
+            "downloaded": is_downloaded(str(model_id), root=root, env=env),
+            "revision": revision_for(str(model_id)),
+            "stored": in_store(str(model_id), root=store, env=env),
+            "storePath": str(store_dir(str(model_id), root=store, env=env) or ""),
         }
     return {
         "id": str(model_id),
@@ -336,18 +423,28 @@ def describe(
         "known": True,
         "downloaded": is_downloaded(model_id, root=root, env=env),
         "revision": entry.get("revision") or None,
+        # The verified store, which wins over the hub cache when it is present. A machine
+        # with the store never contacts the hub at all - see `modelstore.py`.
+        "stored": in_store(model_id, root=store, env=env),
+        "storePath": str(store_dir(model_id, root=store, env=env) or ""),
     }
 
 
-def catalog(*, root: Optional[Path] = None, env: Optional[Mapping[str, str]] = None) -> list[dict]:
+def catalog(
+    *,
+    root: Optional[Path] = None,
+    store: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> list[dict]:
     """Every model we know, in the order the catalogue lists them. Free of imports."""
-    return [describe(model_id, root=root, env=env) for model_id in MODELS]
+    return [describe(model_id, root=root, store=store, env=env) for model_id in MODELS]
 
 
 def preset_details(
     presets: Mapping[str, Mapping[str, object]],
     *,
     root: Optional[Path] = None,
+    store: Optional[Path] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> list[dict]:
     """
@@ -361,7 +458,7 @@ def preset_details(
     rows: list[dict] = []
     for preset_id, spec in presets.items():
         model_id = str(spec.get("model", ""))
-        info = describe(model_id, root=root, env=env)
+        info = describe(model_id, root=root, store=store, env=env)
         rows.append(
             {
                 "id": preset_id,
@@ -375,6 +472,7 @@ def preset_details(
                 "note": PRESET_NOTES.get(preset_id, ""),
                 "known": info["known"],
                 "revision": info["revision"],
+                "stored": info.get("stored"),
             }
         )
     return rows
@@ -402,7 +500,12 @@ __all__ = [
     "ALIGN_REVISION",
     "MODELS",
     "PRESET_NOTES",
+    "STORE_DIRECTORY",
+    "STORE_ENV",
     "cache_dir",
+    "in_store",
+    "store_dir",
+    "store_root",
     "cached_commit",
     "catalog",
     "describe",

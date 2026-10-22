@@ -38,6 +38,7 @@ import math
 from array import array
 from typing import Any, Optional, Sequence
 
+from .. import fingerprint, modelstore
 from ..config import DEFAULT_ALIGN_MODEL, ALIGN_FRAME_HOP, AlignOptions
 from ..media import Audio
 from ..models import cached_commit, revision_for, revision_unavailable
@@ -84,6 +85,16 @@ def _load_pair(model_name: str, revision: Optional[str], device: str):
     never a pin to honour.
     """
     from transformers import AutoTokenizer, Wav2Vec2ForCTC  # type: ignore
+
+    # The verified store, before the hub or the cache is consulted. Same rule as the
+    # transcriber's: identical files on every machine, and a mismatch is an error rather than
+    # a quiet fallback to a copy nobody verified. See `modelstore.py`.
+    stored = modelstore.require(model_name)
+    if stored is not None:
+        tokenizer = AutoTokenizer.from_pretrained(str(stored), local_files_only=True)
+        model = Wav2Vec2ForCTC.from_pretrained(str(stored), local_files_only=True).to(device)
+        model.eval()
+        return tokenizer, model, ""
 
     def fetch(pin: Optional[str]):
         kwargs = {"revision": pin} if pin else {}
@@ -219,6 +230,16 @@ def compute_emissions(
     frames, channels = int(logits.shape[0]), int(logits.shape[1])
     data = array("d", logits.reshape(-1).tolist())
     return _Emissions(frames, channels, data)
+
+
+def _torch_threads() -> Optional[int]:
+    """What torch chose, not what was configured: the number that changes a matmul's order."""
+    try:
+        import torch  # type: ignore
+
+        return int(torch.get_num_threads())
+    except Exception:  # noqa: BLE001 - provenance must not be the thing that fails a run
+        return None
 
 
 def build_targets(
@@ -401,6 +422,16 @@ class Wav2VecAligner(Aligner):
                 "revision": revision,
                 "revisionFallback": loaded.get("note") or None,
                 "device": options.device,
+                # The files that produced these emissions, and the kernel/thread count they ran
+                # on. Two machines that disagree about a word's onset can compare these three
+                # numbers before anyone blames the algorithm: a different hash is different
+                # weights, a different capability is a different kernel, and a different thread
+                # count *can* change the last bits of a matmul.
+                "weightsSha256": (
+                    fingerprint.weights_digest(model_name, revision=revision or None).get("sha256")
+                ),
+                "torchThreads": _torch_threads(),
+                "cpuCapability": fingerprint.cpu_capability(),
                 "frames": emissions.frames,
                 "channels": emissions.channels,
                 "frameHop": hop,

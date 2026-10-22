@@ -191,6 +191,117 @@ the aligner hand that commit to the loader:
   carries the sentence, so a transcript that came from other weights is a fact on the file rather than
   something to infer from a date.
 
+### The weights are kept, not just cached
+
+A pin narrows *which commit* a run asks for. It cannot say anything about the files that
+machine ended up with: the hub cache records no checksum, so an interrupted download, a bad
+disk read or a copy between machines all load, and all produce a different transcript.
+
+The **model store** is the half a cache does not have. It is a directory of weight files with
+a manifest of every file's size and SHA-256, and it is used **instead of** the hub when it has
+the model:
+
+```bash
+# once, on a machine that already has the weights (from the pinned hub cache)
+python -m audio_studio models --import all
+
+# on any machine, or the same one: re-hash everything against the manifest
+python -m audio_studio models --verify
+
+# copy a model to a USB stick / share, manifest included
+python -m audio_studio models --export D:/weights
+```
+
+The store holds the set this studio actually runs on: **`medium`** (1.5 GB) and the
+`facebook/wav2vec2-base-960h` aligner (361 MB) — 1.8 GB, both `[ok]` under `models --verify`.
+`--import all` also takes `base`, `small` and `distil-large-v3`, which is two more gigabytes for
+presets nothing here selects; import one by name (`models --import small`) on a machine that
+wants it. A preset that is not in the store is not blocked — it just loads from the hub cache,
+unverified, and `models` lists it as `missing` so that difference is visible before a run.
+
+The default location is `audio-studio/models/` (gitignored, because the weights are
+hundreds of megabytes). `AUDIO_STUDIO_MODELS` moves it, so three machines can point at one
+read-only copy on a share and load the same bytes without each holding 800 MB.
+
+Three rules make it worth having:
+
+* **The store wins.** When it has the model the hub is never contacted, so an offline run is
+exactly the same run as an online one.
+* **A mismatch is an error, not a fallback.** A corrupted or tampered copy refuses to load
+and says which file disagreed. Quietly using the cache instead would transcribe with
+weights nobody verified, which is the failure the store exists to prevent.
+* **A commit is written once.** Importing different files under the same commit is refused
+rather than one of them silently winning; `--overwrite` makes replacing it deliberate.
+
+The digest is computed the same way for a store copy and a hub snapshot, so
+`engine.modelWeightsSha256` in an artifact is comparable regardless of which one made it,
+and importing the same weights from either place produces the same number.
+
+### The same song, a different laptop
+
+"It is much better on this machine" is the hardest bug report in this studio, because nothing in a
+transcript said *what* the run was made of. Two machines can agree on the commit, the preset, the
+model name and the recording, and still disagree in the output — so the first job was to find out
+which of those assumptions is false. Measured on this 4-core box, 60 s of the 182 s fixture, `small`:
+
+| change | words | word onsets |
+|---|---|---|
+| `int8`, 4 threads vs 1 thread | 78/78 identical | identical |
+| `int8` vs `int8_float32` | identical | identical |
+| `int8` vs `float32` | 77/78 | up to **0.30 s** apart |
+| `torch` 1 thread vs 4, on the aligner over a 403-word transcript | — | 403/403 identical |
+
+Two conclusions, both worth having before blaming the aligner: **thread count is not the cause**
+(the int8 GEMM is exact, and the wav2vec2 path is stable across thread counts), and **the numeric
+path is** — a different precision moves the *timings Whisper hands to the aligner*, which is the
+input the alignment is built on. The aligner itself is deterministic given a transcript and a clip.
+
+So the differences that survive are: the **weights actually loaded** (a pin can fall forward, a
+snapshot can be half-downloaded), the **decoded PCM** (PyAV on one machine, a system `ffmpeg` on
+another), the **numeric path** (`compute_type`, and the CPU kernel behind it —
+`torch.backends.cpu.get_cpu_capability()` returns `AVX512` on one laptop and `AVX2` on another, which
+selects different vectorised kernels), and the **versions of the packages that compute**
+(`ctranslate2`, `torch`, `transformers`, `tokenizers`).
+
+`parity` runs one clip through every stage and prints one hash per stage, so the first line that
+differs is the answer:
+
+```bash
+# on each machine, the same file and the same settings
+python -m audio_studio parity song.mp3 --seconds 30
+
+  machine      Windows 10 AMD64  kernel AVX2  torch threads 2
+  settings     model small, int8, cpu_threads None
+  weights      536b0662742c02347bc0e980a01041f333bce120  363ce3ff…
+  stages
+  source       191b01cc38e3e2d9…
+  pcm          3bb9c35308542d47…
+  weights      363ce3ffa6971c4e…
+  transcript   ab5184c37f833179…
+  emissions    1117955a1156a108…
+  alignment    3ded3e3b85fa44a2…
+```
+
+* **`source` differs** — not the same bytes. Compare `sha256` of the file.
+* **`pcm` differs, `source` does not** — the same file decoded differently. `doctor` names the
+  decoder; pin `av`, or give both machines the same WAV.
+* **`weights` differs** — the same model name is not the same weights. The pinned commit and the
+  hash of the files on disk are printed; `modelRevisionFallback` in the artifact says whether a pin
+  fell forward. With the store filled on both machines this line should never differ; when it does,
+  one machine is not reading the store.
+* **`transcript` differs, `weights` does not** — same weights, different arithmetic. Check
+  `kernel`, `compute_type` and the package versions; `--compute-type float32` is the portable
+  (slower) setting if the two machines have to match.
+* **`emissions`/`alignment` differ but `transcript` does not** — the difference has reached the
+  aligner, and the numbers above say from where.
+
+Every artifact now carries the same facts, so a finished file can be compared after the fact without
+re-running anything: `source.samplesSha256` (the decoded samples, not the container),
+`engine.modelWeightsSha256`, `engine.cpuCapability`, `engine.cpuThreads`,
+`alignment.weightsSha256`, `alignment.torchThreads`. And the two knobs that used to have no flag —
+`--compute-type` and `--cpu-threads` — are on `transcribe` as well, so a run that behaved differently
+can be reproduced on purpose instead of by luck.
+
 ## The bridge to caption-studio
 
 `caption-studio`'s importer is written against Veed's extractor output, and the
@@ -648,6 +759,10 @@ python -m audio_studio emit out/song.speech.json --emit srt,vtt   # re-emit, no 
 python -m audio_studio transcribe song.mp3 --align wav2vec            # re-time every word from the audio
 python -m audio_studio transcribe song.mp3 --align wav2vec --validate rules
 python -m audio_studio transcribe song.mp3 --reference lyrics.srt --align wav2vec
+
+python -m audio_studio models --import all            # fill the verified store, once
+python -m audio_studio models --verify                # re-hash it
+python -m audio_studio parity song.mp3 --seconds 30   # where do two machines stop agreeing?
 ```
 
 ### What a run leaves behind

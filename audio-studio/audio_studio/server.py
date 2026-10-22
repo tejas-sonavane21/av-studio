@@ -55,6 +55,7 @@ from . import __version__
 from .align import aligner_names, available_aligners
 from .config import (
     DEFAULT_ALIGN_MODEL,
+    DEFAULT_COMPUTE_TYPE,
     DEFAULT_PRESET,
     PRESETS,
     AlignOptions,
@@ -65,7 +66,7 @@ from .config import (
 from .emit import DEFAULT_KINDS, filename, kinds, safe_stem, write_bundle
 from .engines import available_engines, engine_names, get_engine
 from .media import AUDIO_EXTENSIONS, MediaError, load_audio
-from . import models, pins
+from . import fingerprint, models, pins
 from .pipeline import PipelineOptions, post_process
 from .reference import Reference, ReferenceParseError
 from .validate import available_validators, validator_names
@@ -172,6 +173,11 @@ class Job:
     align: Optional[str] = None
     validate: Optional[str] = None
     align_model: Optional[str] = None
+    #: The two settings that change numbers rather than text. Sent by a client that is
+    #: comparing two machines, and defaulted to the studio's own config otherwise - a job
+    #: that cannot say which precision produced it is a job that cannot be reproduced.
+    compute_type: str = DEFAULT_COMPUTE_TYPE
+    cpu_threads: int = 0
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
     #: The original lyrics. Either a path the server can read (``reference``) or the
@@ -207,6 +213,8 @@ class Job:
             "emit": list(self.emit),
             "align": self.align,
             "validate": self.validate,
+            "computeType": self.compute_type,
+            "cpuThreads": self.cpu_threads or None,
             "created": round(self.created, 3),
             "started": round(self.started, 3) if self.started else None,
             "finished": round(self.finished, 3) if self.finished else None,
@@ -310,6 +318,8 @@ class Jobs:
             align=align,
             validate=validate,
             align_model=payload.get("alignModel"),
+            compute_type=str(payload.get("computeType") or DEFAULT_COMPUTE_TYPE),
+            cpu_threads=int(payload.get("cpuThreads") or 0),
             llm_provider=payload.get("llmProvider"),
             llm_model=payload.get("llmModel"),
             reference=reference,
@@ -418,6 +428,8 @@ class Jobs:
                 job.preset,
                 model=job.model,
                 language=job.language,
+                compute_type=job.compute_type,
+                cpu_threads=job.cpu_threads,
             )
 
             def on_progress(fraction: float, message: str) -> None:
@@ -509,6 +521,10 @@ def build_health_report() -> dict:
         # has already made two machines disagree about the same commit. See `models.py`.
         "presetDetails": models.preset_details(PRESETS),
         "modelCache": str(models.cache_dir()),
+        # The machine's arithmetic, for the same reason: this endpoint is where a browser
+        # looks before it queues minutes of CPU, and "which kernel/versions is this box on"
+        # is the question two disagreeing machines raise. See `fingerprint.py`.
+        "environment": fingerprint.environment(),
         "emitKinds": kinds(),
         # The pinned set this checkout was verified against, against what this
         # interpreter actually has. Cheap (metadata only) and reported *here* because

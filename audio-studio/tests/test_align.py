@@ -429,6 +429,9 @@ def _stub_transformers(monkeypatch, asked: list[dict], *, pin_missing: bool = Fa
     module.AutoTokenizer = Tokenizer  # type: ignore[attr-defined]
     module.Wav2Vec2ForCTC = Model  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", module)
+    # The verified store answers before the hub, and on a machine that has filled it these
+    # pin decisions would never be reached. `test_modelstore.py` tests the precedence itself.
+    monkeypatch.setattr("audio_studio.align.wav2vec.modelstore.require", lambda *a, **k: None)
 
 
 def test_the_aligner_is_handed_the_pinned_checkpoint(monkeypatch):
@@ -496,6 +499,7 @@ def test_a_failure_that_is_not_about_the_pin_is_not_retried_here_either(monkeypa
     module.AutoTokenizer = Tokenizer  # type: ignore[attr-defined]
     module.Wav2Vec2ForCTC = Model  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", module)
+    monkeypatch.setattr(wav2vec.modelstore, "require", lambda *a, **k: None)
     wav2vec.clear_cache()
 
     with pytest.raises(ConnectionError):

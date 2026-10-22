@@ -288,7 +288,17 @@ def test_every_subcommand_is_registered():
     for action in actions:
         if hasattr(action, "_name_parser_map"):
             subcommands |= set(action._name_parser_map)
-    assert subcommands == {"transcribe", "emit", "align", "validate", "doctor", "serve", "version"}
+    assert subcommands == {
+        "transcribe",
+        "emit",
+        "align",
+        "validate",
+        "doctor",
+        "models",
+        "parity",
+        "serve",
+        "version",
+    }
 
 
 def test_serve_is_wired_to_a_handler():
@@ -299,6 +309,44 @@ def test_serve_is_wired_to_a_handler():
 
 def test_native_module_is_importable_for_tests():
     assert native.KIND == "json"
+
+
+def test_models_export_copies_what_the_store_holds(tmp_path, monkeypatch, capsys):
+    """
+    The store holds the two models this studio runs on, so `models --export DIR` means those.
+
+    Asking for every preset in the catalogue instead would make the documented copy command
+    fail on a trimmed store, printing three errors about models nobody asked to copy.
+    """
+    from audio_studio import cli, modelstore
+
+    rows = [
+        {"model": "small", "present": False},
+        {"model": "medium", "present": True},
+        {"model": "facebook/wav2vec2-base-960h", "present": True},
+    ]
+    monkeypatch.setattr(cli.modelstore, "inventory", lambda **kwargs: rows)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        cli.modelstore,
+        "export",
+        lambda model_id, destination, **kwargs: asked.append(model_id) or {"model": model_id, "directory": destination},
+    )
+
+    assert main(["models", "--export", str(tmp_path)]) == 0
+    assert asked == ["medium", "facebook/wav2vec2-base-960h"]
+    # `--model` is still the way to name one, and it does not consult the inventory.
+    assert main(["models", "--export", str(tmp_path), "--model", "small"]) == 0
+    assert asked[-1] == "small"
+
+
+def test_models_export_of_an_empty_store_says_so(tmp_path, monkeypatch, capsys):
+    from audio_studio import cli
+
+    monkeypatch.setattr(cli.modelstore, "inventory", lambda **kwargs: [{"model": "medium", "present": False}])
+    assert main(["models", "--export", str(tmp_path)]) == 1
+    assert "empty" in capsys.readouterr().err
+
 
 
 # --------------------------------------------------------------------------- #
