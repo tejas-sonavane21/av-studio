@@ -6,6 +6,7 @@
   "license": "MIT",
   "description": "Free hosted transcription for the web_av_editor suite, with artifacts audio-studio and caption-studio can read.",
   "scripts": {
+    "start": "node src/server.js 8757",
     "test": "node --test \"tests/unit/*.test.js\"",
     "serve": "node src/server.js 8757",
     "smoke": "node tools/live-smoke.mjs"
