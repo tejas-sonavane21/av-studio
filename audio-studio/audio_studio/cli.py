@@ -599,7 +599,10 @@ def _add_align_arguments(parser: argparse.ArgumentParser, default: str | None = 
         "--align",
         default=default,
         choices=aligner_names(),
-        help="re-time words against the audio (wav2vec: ~20 ms; fake: offline, synthetic)",
+        help=(
+            "re-time words against the audio (wav2vec: ~20 ms; w2v-bert: a lyrics "
+            "checkpoint, needs --align-model; fake: offline, synthetic)"
+        ),
     )
     parser.add_argument("--align-model", default=None, help=f"acoustic model (default: {DEFAULT_ALIGN_MODEL})")
     parser.add_argument(

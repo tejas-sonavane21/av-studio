@@ -29,6 +29,7 @@ from ..model import Transcript
 #: name → "module:ClassName". Imported on demand by :func:`get_aligner`.
 _REGISTRY: dict[str, str] = {
     "wav2vec": "audio_studio.align.wav2vec:Wav2VecAligner",
+    "w2v-bert": "audio_studio.align.w2vbert:Wav2VecBertAligner",
     "fake": "audio_studio.align.fake:FakeAligner",
 }
 

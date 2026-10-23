@@ -56,7 +56,7 @@ no GPU, no `ffmpeg` on `PATH`.**
 | Layer | Choice | Why it wins here |
 |---|---|---|
 | **Transcribe** | [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) (CTranslate2, int8) | No PyTorch, and the best throughput-per-core of the CPU-capable options. Default model `small`: the cheapest model measured to transcribe a *sung* track correctly here |
-| **Align** *(the actual sync fix)* | `wav2vec2` forced alignment — optional `[align]` extra | Tightens word onsets to ~20–50 ms. We usually already *have* the words (an SRT/VTT), so we do not have to guess them — known text can be aligned to the waveform |
+| **Align** *(the actual sync fix)* | `wav2vec2` forced alignment (default), or `w2v-bert` on a music-trained lyrics CTC — optional `[align]` extra | Tightens word onsets to ~20–50 ms. We usually already *have* the words (an SRT/VTT), so we do not have to guess them — known text can be aligned to the waveform. The second backend is measurably better on a sung mix and costs 3× the time; see [below](#a-second-aligner-w2v-bert-measured-against-wav2vec2) |
 | **Validate** | `google-genai` / OpenRouter — optional `[llm]` extra | Polices the transcript *text* (spelling, casing, punctuation) and emits an auditable ledger. Timings never depend on it |
 | **Decode** | PyAV, bundled with the `[asr]` extra | No system `ffmpeg` install; a system one is still used if it appears |
 
@@ -218,6 +218,13 @@ The store holds the set this studio actually runs on: **`medium`** (1.5 GB) and 
 presets nothing here selects; import one by name (`models --import small`) on a machine that
 wants it. A preset that is not in the store is not blocked — it just loads from the hub cache,
 unverified, and `models` lists it as `missing` so that difference is visible before a run.
+
+The w2v-bert checkpoint is **not** in the catalogue or the store: it is six times the size
+of the aligner the store was built for, so `--align-model` takes its hub id (or a local
+folder) and the load is unverified, the same trade `models` reports as `missing` for any
+preset that was never imported. Add it to `models.ALIGN_MODEL` only if it becomes a
+default, because everything that reads that pin - `doctor`, the store manifest, the
+provenance in every artifact - would then be describing a different set of weights.
 
 The default location is `audio-studio/models/` (gitignored, because the weights are
 hundreds of megabytes). `AUDIO_STUDIO_MODELS` moves it, so three machines can point at one
@@ -412,6 +419,54 @@ the editor ends up using **13.40 s**. The measurement wins. That is the exact
 inversion of what used to happen when caption-studio inherited its word timings
 from Veed — where every word span was 0.08 s long and started up to 2 s late, so
 the midpoint a split cuts on was never on the audio.
+
+### A second aligner: w2v-bert, measured against wav2vec2
+
+`wav2vec2-base-960h` was trained on read speech; a chorus is not that, and it shows
+when a drum fill sits under a vowel. [`mrfakename/w2v-bert-2.0-music-lyrics-ctc`](https://huggingface.co/mrfakename/w2v-bert-2.0-music-lyrics-ctc)
+is the same CTC pass over a 921-character checkpoint fine-tuned on **full music
+mixes** — and it is six times the weights (2.3 GB, 24 layers). It is a second
+backend, not a replacement, because the trade is real:
+
+```bash
+python -m audio_studio align transcript.speech.json --audio song.mp3 \
+  --align w2v-bert --align-model mrfakename/w2v-bert-2.0-music-lyrics-ctc
+```
+
+Measured on `Holding_the_Sky.mp3` (178.8 s, 403 words in 47 segments), same
+transcript, same guards, 4 CPU cores, no GPU. `onset` is the mean z-score of a
+vocal-band (250–3500 Hz) energy rise at each word start — computed from the
+waveform alone, so neither model is scoring itself — and `lift` is that minus the
+same measurement 0.25 s later, which a run that just likes loud moments cannot win:
+
+| run | onset | lift | on a rise | emissions | total | peak RSS |
+|---|---|---|---|---|---|---|
+| Whisper, **no alignment** | +1.63 | +0.17 | 90 % | — | — | — |
+| `wav2vec` (the default) | +1.89 | +0.50 | 94 % | 140 s | 160 s | 3.76 GB |
+| `wav2vec`, `--align-pad 0.5` | +2.04 | +0.69 | 95 % | 161 s | 183 s | 3.76 GB |
+| `w2v-bert`, 20 s window | **+2.10** | **+0.71** | 98 % | 454 s | 477 s | **3.43 GB** |
+| `w2v-bert`, 15 s window | +2.09 | +0.69 | 97 % | 451 s | 495 s | 3.21 GB |
+
+The averages hide the part that matters, so the two clocks were also scored word
+by word: of 403 words, 129 are placed more than 100 ms apart, and the w2v-bert
+placement scores higher on 78 of them against 49 for wav2vec2 (sign test over the
+paired scores, z = −2.6). The 960h clock is not *wrong* on those words — both
+clocks clear the same guards and both keep all 47 segments — the music-trained one
+is more often on the consonant.
+
+What that costs is the whole argument for keeping wav2vec2 as the default: **3× the
+wall time** for the same song, a 2.3 GB download against 361 MB, and about 3 s of
+loading before it starts. Peak memory is actually *lower*, because a 20 s window cap
+does what the 960h pass does with the whole file at once. Two settings matter and
+both were measured rather than copied: 20 s windows are the cheapest size that keeps
+the onsets (30 s needed 181 s of emissions on a 60 s clip where 20 s needed 115 s,
+and 10 s was slower than both), and `bfloat16` weights do not run on a CPU in
+torch 2.14 (`layer_norm` refuses the mixed dtype), so `float32` stays.
+
+The scripts are `out/eval/aligner-bench.py` (the sweep, the per-word duel and the
+peak-RSS sampler) and `out/eval/bench_one.py` (one configuration per process, so
+the memory numbers do not add up across models). They are scratch, and `out/` is
+ignored; the numbers above are what they printed on this machine.
 
 ## Choosing a flow: accuracy, latency, and the free tier
 
@@ -670,6 +725,7 @@ on a stopwatch.
 | Local Whisper transcription (`faster-whisper`) | ✅ `audio_studio/engines/whisper.py` |
 | HTTP server (job queue) for the browser | ✅ `audio_studio/server.py` |
 | **Forced alignment** (`wav2vec2` CTC, 20 ms frames) | ✅ `audio_studio/align/wav2vec.py` |
+| Music-mix aligner (`--aligner w2v-bert`, w2v-bert lyrics CTC) | ✅ `audio_studio/align/w2vbert.py` |
 | Pure CTC core — no torch, no numpy, hand-testable | ✅ `audio_studio/align/ctc.py` |
 | Guarded re-timing (confidence / shift / window / shape) | ✅ `audio_studio/align/apply.py` |
 | Offline aligner (`--align fake`: no model, no decoder) | ✅ `audio_studio/align/fake.py` |
@@ -756,7 +812,9 @@ python -m audio_studio transcribe clip.mp4 --preset balanced --language en
 python -m audio_studio transcribe song.mp3 --emit veed --emphasis none --json
 python -m audio_studio emit out/song.speech.json --emit srt,vtt   # re-emit, no re-transcribe
 
-python -m audio_studio transcribe song.mp3 --align wav2vec            # re-time every word from the audio
+python -m audio_studio transcribe song.mp3 --align wav2vec            # re-time every word from the audio (the default)
+python -m audio_studio transcribe song.mp3 --align w2v-bert \
+  --align-model mrfakename/w2v-bert-2.0-music-lyrics-ctc                # the music-trained one
 python -m audio_studio transcribe song.mp3 --align wav2vec --validate rules
 python -m audio_studio transcribe song.mp3 --reference lyrics.srt --align wav2vec
 
@@ -804,7 +862,7 @@ The two passes have different authorities, and the split is the whole design:
 
 | | authority | may change |
 |---|---|---|
-| `align` (`wav2vec2` CTC) | **timing** | `start` / `end`, and nothing else |
+| `align` (`wav2vec2` / `w2v-bert` CTC) | **timing** | `start` / `end`, and nothing else |
 | `validate` (`rules`, `llm`) | **spelling** | `text`, and nothing else |
 
 Neither can do the other's job. Alignment never rewords a lyric — a pass that
@@ -910,7 +968,7 @@ Two tests exist specifically to lock the *interfaces* rather than the details:
 | `audio_studio/artifact.py` | Load / save `*.speech.json` |
 | `audio_studio/emit/` | `native`, `veed` (the caption-studio bridge), `srt`, `vtt` |
 | `audio_studio/engines/` | Backend interface + registry; `whisper`, `fake` |
-| `audio_studio/align/` | `ctc` (pure trellis), `wav2vec`, `fake`, `apply` (the guards) |
+| `audio_studio/align/` | `ctc` (pure trellis), `wav2vec`, `w2vbert`, `fake`, `apply` (the guards) |
 | `audio_studio/validate/` | `rules`, `llm`, `ledger` (the corrections audit trail) |
 | `audio_studio/pipeline.py` | The order the optional passes run in, in one place |
 | `audio_studio/media.py` | Decoding, hashing, duration probing |

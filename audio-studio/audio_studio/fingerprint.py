@@ -222,8 +222,31 @@ def directory_digest(directory: Path, *, files: bool = False) -> dict:
     names = _weight_files(directory)
     per_file: list[dict] = []
     for path in names:
+        # Streamed, not read into one bytes object. The hash is the same either way, but
+        # a 2.3 GB checkpoint read whole is a 2.3 GB allocation on the machine that is
+        # about to load that same checkpoint - and the first thing it hits is `MemoryError`
+        # inside a provenance report. The file size is taken from the filesystem, which is
+        # what the bytes that follow are counted against.
+        relative = path.relative_to(directory).as_posix().encode("utf-8")
+        # Built on a copy so a file that fails halfway leaves `digest` at the last good
+        # file rather than at half of this one - the error branch reports a partial
+        # `bytes` count, and the hash it returns is None either way.
+        running = digest.copy()
+        running.update(relative)
         try:
-            data = path.read_bytes()
+            size = path.stat().st_size
+            individual = sha256() if files else None
+            # Length-prefixed, so `ab` + `c` cannot hash the same as `a` + `bc`.
+            running.update(size.to_bytes(8, "little"))
+            drained = 0
+            with open(path, "rb") as handle:
+                for block in iter(lambda: handle.read(8 << 20), b""):
+                    running.update(block)
+                    if individual is not None:
+                        individual.update(block)
+                    drained += len(block)
+            if drained != size:
+                raise OSError(f"read {drained} bytes of {size}")
         except OSError as exc:
             return {
                 "sha256": None,
@@ -231,18 +254,14 @@ def directory_digest(directory: Path, *, files: bool = False) -> dict:
                 "bytes": total,
                 "error": f"could not read {path.name}: {exc}",
             }
-        relative = path.relative_to(directory).as_posix().encode("utf-8")
-        # Length-prefixed, so `ab` + `c` cannot hash the same as `a` + `bc`.
-        digest.update(relative)
-        digest.update(len(data).to_bytes(8, "little"))
-        digest.update(data)
-        total += len(data)
+        digest = running
+        total += size
         if files:
             per_file.append(
                 {
                     "name": path.relative_to(directory).as_posix(),
-                    "bytes": len(data),
-                    "sha256": sha256_bytes(data),
+                    "bytes": size,
+                    "sha256": individual.hexdigest() if individual is not None else None,
                 }
             )
     out = {"sha256": digest.hexdigest(), "files": len(names), "bytes": total}

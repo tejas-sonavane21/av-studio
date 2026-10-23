@@ -76,7 +76,7 @@ def test_health_reports_version_and_usable_engines(server):
     assert body["ok"] is True
     assert body["version"] == __version__
     assert {e["name"] for e in body["engines"]} == {"fake", "whisper"}
-    assert {a["name"] for a in body["aligners"]} == {"fake", "wav2vec"}
+    assert {a["name"] for a in body["aligners"]} == {"fake", "w2v-bert", "wav2vec"}
     assert {v["name"] for v in body["validators"]} == {"rules", "llm"}
     assert "balanced" in body["presets"]
     assert set(body["emitKinds"]) == {"json", "veed", "srt", "vtt"}
