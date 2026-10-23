@@ -595,6 +595,167 @@ def test_a_word_boundary_token_separates_adjacent_words():
     assert groups == [[0, 1], [3, 4]]
 
 
+def test_the_boundary_filler_can_wrap_the_whole_sequence():
+    """
+    A checkpoint with a filler token wants one at each end, and the groups have to
+    move with it: a word whose group was left behind would be spelled into the
+    previous word's frames.
+    """
+    from audio_studio.align.wav2vec import build_targets
+
+    words = [Word(text="ab", start=0.0, end=1.0), Word(text="cd", start=1.0, end=2.0)]
+    vocab = {"<": 0, "|": 1, "A": 2, "B": 3, "C": 4, "D": 5}
+    targets, groups, dropped, _unplaceable = build_targets(
+        words, vocab, boundary=1, pad_boundaries=True
+    )
+
+    assert targets == [1, 2, 3, 1, 4, 5, 1]
+    assert groups == [[1, 2], [4, 5]], "the groups index the padded sequence, not the original"
+    assert dropped == 0
+
+
+# --------------------------------------------------------------------------- #
+# the w2v-bert backend
+# --------------------------------------------------------------------------- #
+
+
+def test_the_w2v_bert_checkpoint_speaks_lower_case_and_pads_its_edges(monkeypatch):
+    """
+    The 921-token vocabulary is lower-case, so the upper-cased spelling the ``960h``
+    backend uses would drop every character - and the filler at both ends is what the
+    model card asks for. Both are asserted through ``align()`` rather than through
+    ``build_targets``, because the class attribute is what the pass actually reads.
+    """
+    from array import array
+
+    from audio_studio.align import w2vbert
+    from audio_studio.align.ctc import log_softmax
+
+    vocab = {"<blank>": 0, "|": 1, "a": 2, "b": 3, "c": 4, "d": 5}
+    channels = 6
+    # blank, | a b | c d |, each label held for 20 frames (400 ms).
+    labels = [0] * 10
+    for label in (1, 2, 3, 1, 4, 5, 1):
+        labels.extend([label] * 20)
+    labels.extend([0] * (150 - len(labels)))
+    assert len(labels) == 150
+
+    data = array("f")
+    for label in labels:
+        row = [0.0] * channels
+        row[label] = 8.0
+        data.extend(log_softmax(row))
+    emissions = w2vbert._Emissions(frames=150, channels=channels, data=data)
+
+    monkeypatch.setattr(w2vbert, "_load_checkpoint", lambda model, device: (None, vocab, 0, 1, 320, 16000))
+    monkeypatch.setattr(w2vbert.Wav2VecBertAligner, "available", lambda self: (True, "stub model"))
+    monkeypatch.setattr(
+        w2vbert.Wav2VecBertAligner, "_emissions", lambda self, samples, model, device: emissions
+    )
+
+    transcript = Transcript.from_segments(
+        [
+            Segment(
+                start=0.0,
+                end=3.0,
+                words=[Word(text="AB", start=0.0, end=1.5), Word(text="CD", start=1.5, end=3.0)],
+            )
+        ],
+        language="en",
+        duration=3.0,
+    )
+    audio = Audio(samples=[0.0] * 10, sample_rate=16000, duration=3.0)
+    result = w2vbert.Wav2VecBertAligner().align(audio, transcript, AlignOptions())
+
+    assert result.provenance["backend"] == "w2v-bert"
+    assert result.provenance["charactersDropped"] == 0, "upper-case words must be spelled in lower case"
+    assert result.provenance["sampleRate"] == 16000
+    assert result.provenance["secondsPerFrame"] == 0.02
+
+    first, second = result.spans[0]
+    # frames 30..69 is 'a b', 90..129 is 'c d'; the leading filler is not part of either
+    assert (first.start, first.end) == pytest.approx((0.60, 1.40))
+    assert (second.start, second.end) == pytest.approx((1.80, 2.60))
+
+
+def test_the_w2v_bert_backend_refuses_a_checkpoint_it_cannot_use(monkeypatch):
+    """A wav2vec2 checkpoint here would load and then emit 32-dim logits into a 921-label
+    decoder, so the mistake is named where it is made rather than 200 frames later."""
+    from audio_studio.align import w2vbert
+
+    module = types.ModuleType("transformers")
+    module.AutoConfig = type(  # type: ignore[attr-defined]
+        "AutoConfig",
+        (),
+        {"from_pretrained": staticmethod(lambda *a, **k: types.SimpleNamespace(model_type="wav2vec2"))},
+    )
+    # The import is one statement, so every name it asks for has to exist even though the
+    # guard rejects the checkpoint before any of them is used.
+    module.AutoTokenizer = type("AutoTokenizer", (), {})  # type: ignore[attr-defined]
+    module.Wav2Vec2BertForCTC = type("Wav2Vec2BertForCTC", (), {})  # type: ignore[attr-defined]
+    module.SeamlessM4TFeatureExtractor = type("SeamlessM4TFeatureExtractor", (), {})  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", module)
+    monkeypatch.setattr(w2vbert.modelstore, "require", lambda *a, **k: None)
+    w2vbert.clear_cache()
+
+    with pytest.raises(RuntimeError, match="wav2vec2-bert"):
+        w2vbert._load_checkpoint("facebook/wav2vec2-base-960h", "cpu")
+
+
+def test_windowed_emissions_keep_every_frame_on_its_own_clock(monkeypatch):
+    """
+    The window crop is the one place this backend can be wrong in a way the trellis
+    cannot notice: every word would still be placed, just offset by the window. The
+    fake model returns, for each frame, the sample index that frame starts at, so any
+    slip between window position and output position shows up as a wrong number.
+    """
+    import numpy as np
+
+    from audio_studio.align import w2vbert
+
+    monkeypatch.setattr(w2vbert, "WINDOW_SECONDS", 1.0)
+    monkeypatch.setattr(w2vbert, "CONTEXT_SECONDS", 0.5)
+
+    frames = 100  # 2 s of 20 ms frames
+    samples = np.arange(frames * w2vbert.FRAME_HOP, dtype="float32")
+
+    class Fake:
+        def __init__(self, values):
+            self.values = values
+
+        def __getitem__(self, index):
+            return Fake(self.values[index])
+
+        def float(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self.values
+
+    def fake_logits(self, chunk):
+        start = int(chunk[0])
+        count = len(chunk) // w2vbert.FRAME_HOP
+        values = np.arange(start, start + count * w2vbert.FRAME_HOP, w2vbert.FRAME_HOP, dtype="float32")
+        return Fake(np.expand_dims(values.reshape(count, 1), 0))
+
+    bundle = w2vbert._Bundle(
+        processor=None,
+        model=types.SimpleNamespace(config=types.SimpleNamespace(vocab_size=1)),
+        dtype="float32",
+        device="cpu",
+    )
+    monkeypatch.setattr(w2vbert._Bundle, "_logits", fake_logits)
+
+    emissions = bundle.encode(samples)
+
+    assert emissions.frames == frames
+    got = [emissions.data[index] for index in range(frames)]
+    assert got == [float(index * w2vbert.FRAME_HOP) for index in range(frames)]
+
+
 # --------------------------------------------------------------------------- #
 # provenance
 # --------------------------------------------------------------------------- #
@@ -656,7 +817,7 @@ def test_align_transcript_records_the_registry_name_as_well_as_the_backend_name(
 
 def test_available_aligners_reports_every_registered_name():
     report = {entry["name"]: entry for entry in available_aligners()}
-    assert set(report) == {"fake", "wav2vec"}
+    assert set(report) == {"fake", "w2v-bert", "wav2vec"}
     assert report["fake"]["available"] is True
     for entry in report.values():
         assert set(entry) >= {"name", "backend", "available", "reason"}

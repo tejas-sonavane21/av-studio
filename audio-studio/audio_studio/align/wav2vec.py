@@ -246,9 +246,23 @@ def build_targets(
     words: Sequence[Any],
     vocab: dict,
     boundary: Optional[int],
+    *,
+    case: Any = str.upper,
+    pad_boundaries: bool = False,
 ) -> tuple[list[int], list[list[int]], int, int]:
     """
     Spell the words into label indices, one group per word.
+
+    ``case`` is how the checkpoint spells its alphabet: ``960h`` is an upper-case
+    character model, ``w2v-bert`` is a lower-case one, and getting it backwards does
+    not fail - it drops every character and aligns nothing - so it is a parameter
+    rather than an assumption buried in the loop.
+
+    ``pad_boundaries`` puts the word boundary token at both **ends** of the target
+    sequence as well as between words, which is what a checkpoint trained with a
+    filler token expects: the leading and trailing filler are frames the path may
+    spend on an ad-lib, a breath or a drum fill instead of stretching them into the
+    first and last word. They belong to no word, so no group covers them.
 
     :returns: ``(targets, groups, dropped, unplaceable)`` — ``groups[k]`` holds the
         *positions* in ``targets`` that belong to word ``k`` (empty when nothing in
@@ -259,7 +273,7 @@ def build_targets(
     dropped = 0
     for word in words:
         indices: list[int] = []
-        for char in str(word.text).upper():
+        for char in case(str(word.text)):
             index = vocab.get(char)
             if index is None:
                 dropped += 1
@@ -282,6 +296,14 @@ def build_targets(
         start = len(targets)
         targets.extend(indices)
         groups.append(list(range(start, len(targets))))
+
+    if pad_boundaries and boundary is not None and targets:
+        # Outside every group, so the filler can absorb the edges of the window, and
+        # so `group_spans` still sees exactly one group per word.
+        targets.insert(0, int(boundary))
+        for group in groups:
+            group[:] = [index + 1 for index in group]
+        targets.append(int(boundary))
     return targets, groups, dropped, unplaceable
 
 
@@ -322,6 +344,23 @@ def word_confidences(
 class Wav2VecAligner(Aligner):
     name = "wav2vec2"
 
+    #: How this checkpoint spells its alphabet, and whether it wants the word-boundary
+    #: filler at the ends of the target sequence too. Both are overridden by a backend
+    #: built on a different checkpoint - see `w2vbert.py`.
+    #: ``staticmethod``: a bare ``str.upper`` as a class attribute is a descriptor and
+    #: would arrive bound to the aligner, so ``self.case(text)`` would pass `self` as
+    #: the string to upper-case.
+    case = staticmethod(str.upper)
+    pad_boundaries: bool = False
+
+    def _load_checkpoint(self, model_name: str, device: str):
+        """``(model, vocab, blank, boundary, hop, sample_rate)`` for one checkpoint."""
+        return _load(model_name, device)
+
+    def _emissions(self, samples: Any, model: Any, device: str) -> _Emissions:
+        """The checkpoint's acoustic output for the whole file, one frame per label."""
+        return compute_emissions(samples, model, device)
+
     def available(self) -> tuple[bool, str]:
         try:
             import torch  # type: ignore  # noqa: F401
@@ -344,7 +383,7 @@ class Wav2VecAligner(Aligner):
             raise RuntimeError("alignment needs decoded audio: load it with load_audio(..., decode=True)")
 
         model_name = options.model or DEFAULT_ALIGN_MODEL
-        model, vocab, blank, boundary, hop, sample_rate = _load(model_name, options.device)
+        model, vocab, blank, boundary, hop, sample_rate = self._load_checkpoint(model_name, options.device)
         # Which weights, in the artifact: two machines that re-time the same transcript
         # differently should be comparable without guessing at the checkpoint. Read from the load
         # rather than from the catalogue, so a run that had to fall forward reports the commit it
@@ -362,7 +401,7 @@ class Wav2VecAligner(Aligner):
         if on_progress:
             on_progress(0.05, f"acoustic features ({model_name})")
 
-        emissions = compute_emissions(audio.samples, model, options.device)
+        emissions = self._emissions(audio.samples, model, options.device)
         if emissions.frames == 0:
             return AlignmentResult(provenance={"backend": self.name, "model": model_name, "frames": 0}, warnings=warnings)
         if emissions.frames > MAX_FRAMES:
@@ -388,7 +427,15 @@ class Wav2VecAligner(Aligner):
             limits = limits_for(transcript, index, options)
             spans.append(
                 self._align_segment(
-                    segment, limits, emissions, vocab, blank, boundary, hop, sample_rate, warnings
+                    segment,
+                    limits,
+                    emissions,
+                    vocab,
+                    blank,
+                    boundary,
+                    hop,
+                    sample_rate,
+                    warnings,
                 )
             )
             dropped_total += _last_counts["dropped"]
@@ -464,7 +511,9 @@ class Wav2VecAligner(Aligner):
         if not words:
             return []
 
-        targets, groups, dropped, unplaceable = build_targets(words, vocab, boundary)
+        targets, groups, dropped, unplaceable = build_targets(
+            words, vocab, boundary, case=self.case, pad_boundaries=self.pad_boundaries
+        )
         _last_counts["dropped"] = dropped
         _last_counts["unplaceable"] = unplaceable
         if not targets:
