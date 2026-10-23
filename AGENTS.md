@@ -34,8 +34,10 @@
   asked for this more than once; treat it as a hard rule.
 - A `commit-msg` hook in `.githooks/` rejects `Generated with`, `Co-Authored-By` and
   `noreply@codebuff` in a message, and `git config --global commit.template` points at a
-  footer-free `~/.gitmessage`. If a commit is refused, the message is wrong, not the hook:
-  remove the line rather than the check.
+  footer-free `~/.gitmessage`. Hooks are not installed by cloning, so a fresh clone needs
+  `git config core.hooksPath .githooks` once; without it the guard is silent, which is the
+  one failure mode worth checking after setting up a machine. If a commit is refused, the
+  message is wrong, not the hook: remove the line rather than the check.
 - Plain ASCII punctuation (`-` rather than `—`) so the message reads the same in
   every terminal and in `git log` on Windows.
 - Subject: `type(scope): what changed, in the user's terms`, imperative, under
