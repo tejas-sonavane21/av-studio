@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>transcript-studio</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <h1>transcript-studio</h1>
+          <p class="tagline">
+            Free hosted transcription for the <code>web_av_editor</code> suite. A real Chrome window opens for the
+            site's security check; the page's own form does the upload.
+          </p>
+        </div>
+        <span class="badge" id="engine-badge">checking service…</span>
+      </header>
+
+      <section class="card">
+        <form id="job-form">
+          <div class="drop" id="drop">
+            <input id="audio-input" type="file" accept=".mp3,.wav,.flac,audio/mpeg,audio/wav,audio/flac" hidden />
+            <div class="drop-inner">
+              <div class="drop-mark">♪</div>
+              <p class="drop-title" id="drop-title">Drop an audio file, or click to choose one</p>
+              <p class="drop-hint" id="drop-hint">MP3, WAV or FLAC · 1 s to 5 min · at most 25 MB</p>
+            </div>
+          </div>
+
+          <div class="controls">
+            <label class="field">
+              <span>Language</span>
+              <select id="language">
+                <option value="auto">Auto Detect</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Also write</span>
+              <span class="checks">
+                <label><input type="checkbox" name="emit" value="speech" checked /> audio-studio artifact</label>
+                <label><input type="checkbox" name="emit" value="veed" checked /> caption-studio master</label>
+                <label><input type="checkbox" name="emit" value="txt" /> plain text</label>
+              </span>
+            </label>
+            <button type="submit" id="run" disabled>Transcribe</button>
+          </div>
+          <p class="error" id="error" hidden></p>
+        </form>
+      </section>
+
+      <section class="card progress-card" id="progress-card" hidden>
+        <div class="progress-head">
+          <strong id="progress-phase">queued</strong>
+          <span id="progress-detail" class="muted"></span>
+        </div>
+        <div class="bar"><div class="bar-fill" id="bar-fill"></div></div>
+        <p class="muted small" id="progress-note">
+          The free tool runs its own 30-second queue, and a two-minute cooldown between jobs. Both are part of the
+          service and are waited out, not skipped.
+        </p>
+      </section>
+
+      <section class="card" id="result-card" hidden>
+        <div class="result-head">
+          <div>
+            <h2 id="result-title">Done</h2>
+            <p class="muted" id="result-summary"></p>
+          </div>
+          <button type="button" class="ghost" id="reset">New file</button>
+        </div>
+        <ul class="files" id="files"></ul>
+        <div class="warnings" id="warnings" hidden></div>
+        <p class="muted small">
+          <code>.speech.json</code> can be re-emitted by <code>audio-studio emit</code>; <code>.veed.json</code> opens
+          in caption-studio's importer. The word timings in both are interpolated inside each measured line — the
+          free service reports lines, not words.
+        </p>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

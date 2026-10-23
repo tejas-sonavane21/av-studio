@@ -20,9 +20,10 @@
   branch ever existed. Committing straight onto `main` and pushing it alone loses
   both. The user has asked for this more than once; treat it as a hard rule.
 - **The test step is the checks that cover the change**, run *before* the merge:
-  `pytest` for `audio-studio`, `npm test` for `caption-studio`, and the browser runs
-  (`npm run ui`, `tools/preview-perf.mjs`) when the change is one only a browser can
-  exercise. A branch whose checks were not run is not ready to merge.
+  `pytest` for `audio-studio`, `npm test` for `caption-studio` and `transcript-studio`
+  (plus `python -m unittest` in `transcript-studio/python` when the client changes),
+  and the browser runs (`npm run ui`, `tools/preview-perf.mjs`) when the change is one
+  only a browser can exercise. A branch whose checks were not run is not ready to merge.
 - Never force-push `main`, and never delete a branch that has been pushed.
 
 ## Commit messages
@@ -41,8 +42,8 @@
 - Plain ASCII punctuation (`-` rather than `—`) so the message reads the same in
   every terminal and in `git log` on Windows.
 - Subject: `type(scope): what changed, in the user's terms`, imperative, under
-  ~72 characters. Scopes in use: `audio-studio`, `caption-studio`, `fix`, `docs`,
-  `chore`.
+  ~72 characters. Scopes in use: `audio-studio`, `caption-studio`, `transcript-studio`,
+  `fix`, `docs`, `chore`.
 - Body: *why*, not a restatement of the diff — what was wrong, what was measured,
   what the trade-off was. Numbers are welcome when they were measured on this
   machine.

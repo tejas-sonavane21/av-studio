@@ -1,0 +1,12 @@
+# Generated transcripts and job folders
+out/
+
+# Chrome profile holding the site's clearance cookie - never commit a cookie jar
+.browser-profile/
+
+node_modules/
+*.log
+
+# Python client
+__pycache__/
+*.pyc

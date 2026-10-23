@@ -4,17 +4,19 @@
 git clone https://github.com/tejas-sonavane21/av-studio.git
 ```
 
-**Two cooperating studios over audio and video.** One edits the *captions* — text, style, placement,
-the cut, the render, the exported file. The other works out *what was said and when*, with the timing
-audited rather than guessed.
+**Three cooperating studios over audio and video.** One edits the *captions* — text, style, placement,
+the cut, the render, the exported file. One works out *what was said and when*, with the timing
+audited rather than guessed. The third fetches a transcript from a free hosted service whose text is
+better than the local small model's, and writes it in the formats the other two already read.
 
-Both run locally. No account, no upload, no build step in the browser half, and no runtime npm
-dependency at all in it.
+All three run locally. No account, no upload in the editing half, no build step in the browser half,
+and no runtime npm dependency in either JavaScript studio.
 
 | | Studio | Owns | Stack |
 |---|---|---|---|
 | `caption-studio` | [`caption-studio/`](caption-studio) | the **caption** timeline: 10 Veed/CapCut-style templates, direct-manipulation placement with snapping, a CapCut-style timeline that cuts video *and* audio, a real offline export (WebCodecs → `.mp4`/`.webm`, rendered frame by frame, never screen-recorded), and a corrections ledger | browser, ES modules, **zero runtime npm deps**, no bundler |
 | `audio-studio` | [`audio-studio/`](audio-studio) | the **audio** timeline: speech-to-text, per-word timing, forced alignment, silence detection, and a validation layer with an auditable ledger | Python, `faster-whisper`, optional wav2vec2 alignment, optional LLM validation |
+| `transcript-studio` | [`transcript-studio/`](transcript-studio) | the **transcript** bridge: a free hosted transcriber driven through its real page, emitting millisecond SRT/VTT, audio-studio's native artifact and the Veed master caption-studio imports | Node, **zero runtime npm deps**, the user's own Chrome over CDP |
 
 Each half is useful on its own. `caption-studio` edits a document you already have an `.srt`, `.vtt`,
 CapCut/Veed JSON or the built-in demo for; reach for `audio-studio` when you need the timings to come
@@ -47,8 +49,9 @@ Two design rules hold the seam together, and both are the reason the bridge can 
 
 ## Requirements
 
-* **Node 24+** for `caption-studio` (developed on v24.21.0). No dependencies to install — the test
-  and dev tooling is Node's own.
+* **Node 24+** for `caption-studio` and `transcript-studio` (developed on v24.21.0). Neither has
+  dependencies to install — the test and dev tooling is Node's own, and both drive Chrome over the
+  DevTools protocol rather than through a browser-automation package.
 * **Python 3.10+** (3.11 tested) for `audio-studio`, in a **virtualenv**. Never the system Python.
 * **Chrome** for the UI smoke test and for the export (WebCodecs).
 * The instructions are written for **Windows 11 + Git Bash**; everything is POSIX shell syntax, so
@@ -121,7 +124,26 @@ cp .env.example .env          # from the repository root
 must be is version-controlled and the key itself never is. A real environment variable always wins
 over the file, and `python -m audio_studio doctor` prints whether a key was found and where from.
 
-### 3. Both, together
+### 3. The transcript bridge (optional)
+
+```bash
+cd transcript-studio
+npm test                                  # 50 unit tests, no network, no browser
+node src/cli.js song.mp3 --out out        # opens Chrome, uses the free transcriber, closes it
+npm start                                 # or: a local studio on http://127.0.0.1:8757
+```
+
+It writes `.transcript.json`, `.srt`, `.vtt`, `.speech.json` and `.veed.json`. The last two are the
+suite's own formats: `audio-studio emit` re-reads the first, and `caption-studio`'s importer opens
+the second with no changes on either side. There is also a `requests`-only Python client in
+`transcript-studio/python/` for the local server, so a Python script never touches a browser.
+
+Why a browser at all is explained in [`transcript-studio/README.md`](transcript-studio/README.md):
+the site sits behind a Cloudflare challenge and its endpoint needs a token only a browser can
+obtain. `requests` and even `curl_cffi` with Chrome's TLS fingerprint get a 403 there — measured,
+not assumed.
+
+### 4. Both, together
 
 ```bash
 # terminal 1
@@ -132,6 +154,11 @@ cd caption-studio && npm run serve
 
 Then, in the browser: **Transcribe** tab → pick the audio → upload → the returned caption document
 lands in the editor, ready to edit, cut, style and export.
+
+The strongest results come from using them together: take the *text* from `transcript-studio`
+(measured 5.5 % WER on the project's own track, against 11.8 % for the local `small` model), and the
+*timing* from `audio-studio --reference … --align wav2vec`. The README explains the measurement and
+why the site's own timings are not good enough to keep.
 
 ## Where the files go
 
@@ -144,6 +171,7 @@ itself beside what it wrote:
 | the same run's manifest | beside those four | `<stem>.run.json` — what produced it, the source's SHA-256, and every file it wrote |
 | `audio-studio serve` | `--out` (default `./jobs`), one folder per job | `jobs/<id>/source.*` |
 | `caption-studio` | your browser's download folder | `<stem>.caproj`, `<stem>.veed.json`, `<stem>.srt`, `<stem>.vtt`, and the exported `.mp4`/`.webm` |
+| `transcript-studio` | `--out` (default `./out`) | `<stem>.transcript.json`, `<stem>.srt`, `<stem>.vtt`, `<stem>.speech.json`, `<stem>.veed.json` (`--emit txt` adds the words) |
 
 The stem is sanitised the same way by both studios: a path is not a name, so only the last segment
 survives, and a character a filesystem refuses becomes `_`. `--stem ../../notes/attack` writes
@@ -161,6 +189,10 @@ npm run visual           # render the reference documents to PNG for eyeballing
 
 cd ../audio-studio && source .venv/Scripts/activate
 python -m pytest         # no model, no network, no browser
+
+cd ../transcript-studio
+npm test                 # unit tests, no network, no browser
+cd python && python -m unittest -v    # the requests client against a stub server
 ```
 
 The suites are deliberately dependency-free: nothing needs a model download or a network connection
@@ -200,6 +232,11 @@ personal one that has to render the same way on every machine its owner uses.
 ├── audio-studio/            the Python engine
 │   ├── audio_studio/        asr/ · align/ · validate/ · pipeline.py · cli.py · server.py
 │   └── tests/               runs with no model, no network and no third-party packages
+├── transcript-studio/       the hosted-transcription bridge
+│   ├── src/                 core/ · browser/ · provider/ · cli.js · server.js
+│   ├── web/                 its local studio page
+│   ├── python/              the requests-only client for that studio
+│   └── tests/               node:test, no network, no browser
 └── README.md                this file
 ```
 
@@ -213,6 +250,8 @@ personal one that has to render the same way on every machine its owner uses.
   reference renderer does, measured rather than assumed.
 * [`audio-studio/README.md`](audio-studio/README.md) — the engine decisions, the pipeline passes, the
   validation ledger, and the numbers from the real track.
+* [`transcript-studio/README.md`](transcript-studio/README.md) — the reverse-engineered contract, the
+  measured quality comparison, why plain HTTP cannot call it, and the two bridges' provenance.
 
 ## Licence
 

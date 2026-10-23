@@ -604,6 +604,25 @@ exception, and says which reading it used. Read this way the file is **255 words
 exactly what `out/wer.py` parses by hand to score the table above — and that agreement
 is what makes the score trustworthy.
 
+The timestamp shape has a matching trap, found when a free transcription site's own
+`.srt` was used as the reference. Its exporter writes `00:12 --> 00:17` — whole
+seconds, no fractional part — and the cue pattern here required one. The cues were
+not recognised, so the file fell through to the plain-text reader and every cue
+number and every `00:12` became a **lyric**, which then came back out as subtitle
+text. Nothing raised: a timing dump looked exactly like a lyric sheet. The fraction
+is optional now, and the regression test is that site's real download (52 cues, 423
+words, and not one timestamp token in the word list).
+
+That site is also where `transcript-studio`, the third studio in this suite, gets its
+text: 5.5 % WER on this track against `small`'s 11.8 %. Its timings are line-level
+and coarse, so the useful recipe keeps this studio's clock and takes only the words:
+
+```bash
+cd ../transcript-studio && node src/cli.js song.mp3 --out out
+cd ../audio-studio && python -m audio_studio transcribe song.mp3 \
+  --reference ../transcript-studio/out/song.srt --align wav2vec
+```
+
 Because the text is now the file's, `--validate llm` has nothing left to guess.
 Running both is allowed and recorded as a warning, but it is not worth doing: the only
 correction that pass can still propose is one that disagrees with the lyrics.
