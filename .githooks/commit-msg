@@ -1,0 +1,16 @@
+#!/bin/sh
+# This project's rule (AGENTS.md): a commit message ends with its last sentence
+# about the change. No generated-by line, no co-author trailer, no emoji.
+# Checked here rather than trusted to a prompt, because a template that lives
+# only in an agent's instructions is not enforced by anything.
+#
+# Anchored to the start of a line on purpose: a trailer is a line of its own.
+# A body that *names* the footer it is removing ("...rejects Generated with")
+# is describing the rule, not adding a footer, and blocking that would make the
+# one commit that documents this policy the one commit the hook refuses.
+if grep -qiE '^(generated with|generated-by|co-authored-by|noreply@codebuff)' "$1"; then
+  echo "commit-msg: attribution footers are not allowed in this project (see AGENTS.md)." >&2
+  echo "Remove the 'Generated with ...' / 'Co-Authored-By: ...' line and commit again." >&2
+  exit 1
+fi
+exit 0

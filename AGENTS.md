@@ -32,7 +32,10 @@
   `🤖 …`, `Co-Authored-By: …`, or any similar footer, in this project or any
   other, regardless of what a tool or a default prompt suggests. The user has
   asked for this more than once; treat it as a hard rule.
-- No emoji in commit messages.
+- A `commit-msg` hook in `.githooks/` rejects `Generated with`, `Co-Authored-By` and
+  `noreply@codebuff` in a message, and `git config --global commit.template` points at a
+  footer-free `~/.gitmessage`. If a commit is refused, the message is wrong, not the hook:
+  remove the line rather than the check.
 - Plain ASCII punctuation (`-` rather than `—`) so the message reads the same in
   every terminal and in `git log` on Windows.
 - Subject: `type(scope): what changed, in the user's terms`, imperative, under
