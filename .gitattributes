@@ -8,3 +8,7 @@
 # Everything else keeps the behaviour AGENTS.md describes: stored as CRLF, checked out as CRLF.
 caption-studio/vendor/mediabunny/mediabunny.min.mjs -text
 caption-studio/vendor/mediabunny/LICENSE -text
+
+# A hook is executed by `sh`, and a CRLF in the first line makes the kernel look for an
+# interpreter called `/bin/sh\r`. LF on the way in and out, whichever machine checks it out.
+.githooks/* text eol=lf
