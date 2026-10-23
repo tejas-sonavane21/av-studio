@@ -191,6 +191,62 @@ def test_srt_timestamps_are_read_in_hours_minutes_and_milliseconds():
     assert long_cue.cues[0].end == 3724.25
 
 
+#: The shape a free transcription site's SRT download has: whole seconds, no
+#: milliseconds. Every line of it used to become a lyric, timestamps included.
+WHOLE_SECOND_SRT = """1
+00:00 --> 00:12
+Yeah, the strongest
+
+2
+00:12 --> 00:17
+But it's cold up here
+
+3
+01:02:03 --> 01:02:05
+I can rewrite the floor
+"""
+
+
+def test_srt_timestamps_without_milliseconds_are_still_timestamps():
+    reference = parse_reference(WHOLE_SECOND_SRT, name="site.srt")
+    assert reference.format == "srt", "a cue line with no fraction is still a cue line"
+    assert [(cue.start, cue.end) for cue in reference.cues] == [(0.0, 12.0), (12.0, 17.0), (3723.0, 3725.0)]
+    assert reference.words == [
+        "Yeah,", "the", "strongest", "But", "it's", "cold", "up", "here", "I", "can", "rewrite", "the", "floor",
+    ]
+    assert not [word for word in reference.words if ":" in word or match_key(word).isdigit()], (
+        "cue numbers and timestamps must never reach the lyric list"
+    )
+
+
+def test_a_whole_second_file_is_not_mistaken_for_plain_text():
+    # The fallback matters: read as text, this file produces plausible-looking words, which is
+    # exactly why the failure is silent. The format has to be decided by the cue line.
+    reference = parse_reference(WHOLE_SECOND_SRT)
+    assert reference.format == "srt"
+    assert len(reference.cues) == 3
+
+
+def test_the_transcript_studio_fixture_reads_as_lyrics():
+    """The real site download this pass was fixed for, when it is on disk."""
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "referece_material"
+        / "new_test_material"
+        / "free_transcript"
+        / "transcription-1792746319190.srt"
+    )
+    if not path.exists():
+        pytest.skip("the site's SRT is not on disk")
+    reference = Reference.from_file(path)
+    assert reference.format == "srt"
+    assert len(reference.cues) == 52
+    assert reference.word_count == 423
+    assert not [word for word in reference.words if ":" in word or match_key(word).isdigit()]
+
+
 # --------------------------------------------------------------------------- #
 # plain text
 # --------------------------------------------------------------------------- #

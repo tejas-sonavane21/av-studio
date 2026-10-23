@@ -62,7 +62,15 @@ ROLLING_MIN_CUES = 3
 #: Four groups per timestamp, in order h, m, s, ms — so the second half of a cue line
 #: starts at group 5. The enclosing groups are non-capturing on purpose: one stray
 #: capturing group here would renumber every index in ``_cue_time``.
-_TIME = r"(?:(\d{1,3}):)?(\d{1,2}):(\d{2})[.,](\d{1,3})"
+#:
+#: The fraction is **optional**, because a whole class of real exporters writes
+#: ``00:12 --> 00:17``: the free transcription tool this suite's users bring files
+#: from truncates to the second in its own SRT download. Requiring ``[.,]\d{1,3}``
+#: did not reject those files — it silently failed to recognise their cue lines, so
+#: the file fell through to the plain-text reader and every cue number and every
+#: ``00:12`` became a *word*, which then came back out as subtitle text. One
+#: optional group is the difference between a lyric sheet and a timing dump.
+_TIME = r"(?:(\d{1,3}):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?"
 _CUE_RE = re.compile(rf"^\s*(?:{_TIME})\s*-->\s*(?:{_TIME})")
 
 #: Formatting that is never sung: ``<v Singer>``, ``<c.yellow>``, ``{\an8}``.
@@ -141,8 +149,8 @@ def _lyric_line(raw: str) -> str:
     return " ".join(_TAG_RE.sub(" ", _strip_markers(raw)).split())
 
 
-def _seconds(hours: Optional[str], minutes: str, seconds: str, millis: str) -> float:
-    return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis.ljust(3, "0")) / 1000.0
+def _seconds(hours: Optional[str], minutes: str, seconds: str, millis: Optional[str]) -> float:
+    return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int((millis or "0").ljust(3, "0")) / 1000.0
 
 
 def _cue_time(match: "re.Match[str]", base: int) -> float:
